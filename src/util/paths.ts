@@ -58,6 +58,50 @@ export function cachePathTmp(runId: string): string {
 }
 
 /**
+ * `<runDir>/manifest.json` — frozen run config (PRD §6.2). Slice 6
+ * writes the parent-liveness fields; slice 8a fills the rest.
+ */
+export function manifestPath(runId: string): string {
+  return join(runDir(runId), "manifest.json");
+}
+
+/**
+ * `<runDir>/fixtures.jsonl` — canned agent responses for `--mock-agents`.
+ * Slice 6's mock branch reads this; the file is author-supplied (test
+ * fixtures live under `tests/fixtures/dispatcher/`).
+ */
+export function fixturesPath(runId: string): string;
+export function fixturesPath(runDirAbs: string, _byDir: true): string;
+export function fixturesPath(arg: string, byDir?: true): string {
+  return byDir === true ? join(arg, "fixtures.jsonl") : join(runDir(arg), "fixtures.jsonl");
+}
+
+/**
+ * `<runDir>/agents/` — per-agent transcripts directory (PRD §6.5).
+ */
+export function agentsDir(runId: string): string;
+export function agentsDir(runDirAbs: string, _byDir: true): string;
+export function agentsDir(arg: string, byDir?: true): string {
+  return byDir === true ? join(arg, "agents") : join(runDir(arg), "agents");
+}
+
+/**
+ * `<runDir>/agents/<agentId>.jsonl` — raw NDJSON transcript of a
+ * single sub-agent's `pi --mode json` output. Slice 6 tees stdout here.
+ */
+export function agentTranscriptPath(runDirAbs: string, agentId: string): string {
+  return join(agentsDir(runDirAbs, true), `${agentId}.jsonl`);
+}
+
+/**
+ * `<runDir>/agents/<agentId>.stderr` — child's stderr plus any
+ * malformed-bytes appended for forensics (PRD §5.5.2).
+ */
+export function agentStderrPath(runDirAbs: string, agentId: string): string {
+  return join(agentsDir(runDirAbs, true), `${agentId}.stderr`);
+}
+
+/**
  * `<projectRoot>/.pi/workflows/` — the project-scoped workflow root.
  *
  * Slice 1 takes the `cwd` from `session_start` as the project root

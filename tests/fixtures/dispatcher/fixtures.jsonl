@@ -1,0 +1,3 @@
+{"agentId": "auditor", "promptHash": "audit-h", "result": {"text": "Audit complete: no critical findings.", "usage": {"input": 100, "output": 30, "totalTokens": 130}, "toolCalls": 4}, "events": [{"type": "session"}, {"type": "agent_start"}, {"type": "agent_end", "messages": [{"role": "user", "content": [{"type": "text", "text": "audit"}]}, {"role": "assistant", "content": [{"type": "text", "text": "Audit complete: no critical findings."}]}]}]}
+{"agentId": "scout", "promptHash": "scout-h", "result": {"text": "Scout report: 5 modules surveyed.", "usage": {"input": 50, "output": 15, "totalTokens": 65}, "toolCalls": 1}}
+{"agentId": "summarizer", "promptHash": "sum-h", "result": {"text": "Summary: all green.", "usage": {"input": 200, "output": 5, "totalTokens": 205}}}
