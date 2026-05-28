@@ -21,12 +21,13 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@earendil-works/pi-coding-agent --external:typebox",
+    "build": "tsc -p tsconfig.build.json && node esbuild.config.js",
     "build:types": "tsc -p tsconfig.build.json --emitDeclarationOnly",
     "typecheck": "tsc --noEmit",
-    "test": "node --import tsx --test tests/unit/*.test.ts tests/integration/*.smoke.ts tests/integration/*.test.ts",
+    "test": "node --import tsx --test tests/unit/*.test.ts tests/integration/*.smoke.ts tests/integration/*.test.ts tests/security/*.test.ts",
     "test:unit": "node --import tsx --test tests/unit/*.test.ts",
     "test:integration": "node --import tsx --test tests/integration/*.smoke.ts tests/integration/*.test.ts",
+    "test:security": "node --import tsx --test tests/security/*.test.ts",
     "prepublishOnly": "npm run build && npm test"
   },
   "peerDependencies": {

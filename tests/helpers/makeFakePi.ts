@@ -127,7 +127,10 @@ export function makeFakePi(_opts: MakeFakePiOpts = {}): FakePi {
       handlers.set(event, list);
     },
     sendMessage(message, options) {
-      messages.push({ ...message, options });
+      const entry: FakeSentMessage = options !== undefined
+        ? { ...message, options }
+        : { ...message };
+      messages.push(entry);
     },
     appendEntry(customType, data) {
       entries.push({ customType, data });

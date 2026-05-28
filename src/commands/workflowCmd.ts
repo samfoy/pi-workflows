@@ -20,6 +20,10 @@
  * `registerWorkflowCommands` for the per-workflow `/<name>` commands.
  * `/workflows` itself is still registered in nested sessions, and it
  * always errors with the documented message.
+ *
+ * Slice 2 carry-forward: helpers/constants previously exported via
+ * `__testInternals` were moved to `workflowCmd.internal.ts`. See that
+ * file's header for the convention.
  */
 
 import type {
@@ -27,11 +31,12 @@ import type {
   WorkflowFile,
   WorkflowRegistry,
 } from "../types/internal.js";
-
-const STUB_BODY =
-  "workflows runtime not yet wired in this slice (v0.1 development)";
-
-const STUB_CUSTOM_TYPE = "pi-workflows.stub";
+import {
+  STUB_CUSTOM_TYPE,
+  formatRegistryListing,
+  stubDescription,
+  stubMessage,
+} from "./workflowCmd.internal.js";
 
 /**
  * Register `/<name>` for every workflow in the registry. Returns the
@@ -143,56 +148,3 @@ export function registerWorkflowsCommand(
     },
   });
 }
-
-function stubDescription(file: WorkflowFile): string {
-  return `Workflow ${file.name} (${file.scope}; slice-1 stub — runtime not wired)`;
-}
-
-function stubMessage(file: WorkflowFile): string {
-  return [
-    `▶ ${STUB_BODY}`,
-    `  workflow: ${file.name}`,
-    `  source:   ${file.absPath}`,
-    `  scope:    ${file.scope}`,
-    "",
-    "This is the slice-1 skeleton. The runtime (sandbox, cache,",
-    "dispatcher, ledger, overlay, approval flow) lands in slices 2-17.",
-    "Track progress in plan.md.",
-  ].join("\n");
-}
-
-function formatRegistryListing(registry: WorkflowRegistry): string {
-  if (registry.size === 0) {
-    return [
-      "no workflows discovered",
-      "",
-      "drop a `.js` file in `<projectRoot>/.pi/workflows/` or",
-      "`~/.pi/agent/workflows/` and `/reload` to register it.",
-    ].join("\n");
-  }
-  const rows: string[] = [
-    `${registry.size} workflow(s) discovered (TUI overlay lands in slice 13):`,
-    "",
-  ];
-  // Sort for deterministic output.
-  const sorted = [...registry.values()].sort((a, b) =>
-    a.name.localeCompare(b.name),
-  );
-  for (const f of sorted) {
-    rows.push(`  /${f.name}  (${f.scope})  ${f.absPath}`);
-  }
-  rows.push("");
-  rows.push("invoke any of the above with arguments, e.g. `/<name> hello`.");
-  return rows.join("\n");
-}
-
-/**
- * Exported for tests — keeps the stub-card text in one place so the
- * smoke test can assert against the exact body without regex chasing.
- */
-export const __testInternals = {
-  STUB_BODY,
-  STUB_CUSTOM_TYPE,
-  stubMessage,
-  formatRegistryListing,
-};

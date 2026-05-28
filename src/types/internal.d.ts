@@ -185,3 +185,135 @@ export interface RunOptions {
   /** PRD §1.2 pin #6: default 1000, hard-fail if exceeded. */
   readonly perRunAgentCap: number;
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// Slice 2 — vm.Context sandbox + frozen globals + realm error contract
+// ───────────────────────────────────────────────────────────────────────
+
+/**
+ * Reified, host-visible record of an error captured at the host↔Context
+ * boundary. The Context-realm Error returned to the script is built from
+ * this record (see `src/runtime/realmError.ts::reconstructError`); the
+ * record itself is also persisted to the ledger by slice 7 for debugging.
+ *
+ * Field semantics follow PRD §8.3.4's reconstruction contract.
+ */
+export interface RealmErrorRecord {
+  /** Constructor name of the original throw value. `"Error"` for non-Errors. */
+  readonly name: string;
+  /** Stringified message (always present, possibly empty). */
+  readonly message: string;
+  /** Original `.stack` if the throw was an Error; otherwise `null`. */
+  readonly stack: string | null;
+  /**
+   * `true` for non-Error throws (`throw 42`, `throw "hi"`, etc.); the
+   * reconstructed Context-realm Error carries this flag verbatim. Real
+   * Errors MUST NOT have this set.
+   */
+  readonly wrappedNonError: boolean;
+  /**
+   * For non-Error throws, normalized type tag ("number", "string",
+   * "boolean", "bigint", "undefined", "symbol", "function", "object",
+   * "null"). Absent for real Errors.
+   */
+  readonly originalType?: string;
+  /** AggregateError children, recursively reconstructed. Absent otherwise. */
+  readonly errors?: readonly RealmErrorRecord[];
+  /** `.cause` chain, recursively reconstructed. Absent if no cause. */
+  readonly cause?: RealmErrorRecord;
+}
+
+/**
+ * Sandbox violation — thrown by host-side wrappers when a sandbox
+ * invariant cannot be safely repaired (e.g. realm-error reconstruction
+ * itself blew up, or the bridge was tampered with). NOT thrown for
+ * ordinary script errors (those propagate as Context-realm Errors
+ * unchanged).
+ *
+ * Slice 7's ledger writes one `sandbox_violation` entry per instance.
+ */
+export interface SandboxViolationError extends Error {
+  readonly name: "SandboxViolationError";
+  /** Short tag for dispatch / metric labels. */
+  readonly violation:
+    | "bridge-tampered"
+    | "realm-error-reconstruct-failed"
+    | "timer-host-exception"
+    | "init-script-failed"
+    | "shape-detect-failed"
+    | "compile-failed";
+  /** Optional underlying cause from the host side (not surfaced to script). */
+  readonly hostCause?: unknown;
+}
+
+/**
+ * Console capture — what `console.log` and friends inside the sandbox
+ * funnel into. Slice 7 replaces this with a ledger writer; slice 2
+ * gives it a plain in-memory list so unit tests can assert.
+ */
+export interface SandboxLogEntry {
+  /** ISO-8601 host time (slice-2 helper, slice 7 will use ledger time). */
+  readonly t: string;
+  readonly level: "log" | "info" | "warn" | "error" | "debug";
+  /**
+   * Pre-stringified arguments (each via `safeStringify`). We don't keep
+   * raw values — they may carry Context-realm prototypes that surprise
+   * downstream consumers.
+   */
+  readonly args: readonly string[];
+}
+
+/**
+ * Construction options for a Sandbox. `signal` is required — sandboxes
+ * are always tied to a run lifecycle. `log` is optional in slice 2 and
+ * required by slice 8a (DI'd from the ledger writer); when omitted the
+ * sandbox keeps an internal in-memory array reachable via
+ * `Sandbox#takeLog()`.
+ *
+ * Slice 8a will add `ctx` (the workflow author API) and `runtimeMeta`.
+ * Both extend additively; this slice's tests pass `signal` + (optionally)
+ * `log` only.
+ */
+export interface SandboxOptions {
+  readonly signal: AbortSignal;
+  /** Sink for `console.*` from inside the sandbox. */
+  readonly log?: (entry: SandboxLogEntry) => void;
+  /**
+   * Optional input value passed to the script's `(ctx, input) =>` body.
+   * Strings/JSON-cloneable values only; the host-side caller is
+   * responsible for `JSON.parse(JSON.stringify(...))` cloning before
+   * passing — see `safeCloneIntoContext` in `sandbox.ts`.
+   */
+  readonly input?: unknown;
+  /**
+   * Override the wall-clock used inside the sandbox for `Date.now`.
+   * Slice 9 (replay) sets this; slice 2 leaves it `undefined`.
+   */
+  readonly nowMs?: () => number;
+  /**
+   * Allow `eval` and `Function(...)` to compile new code. Default: true
+   * (matches PRD §4.3 ⚠ row). Tests use `false` to make the absence
+   * provable.
+   */
+  readonly allowCodegen?: boolean;
+  /**
+   * Optional debug name for the vm.Context (used in stack traces).
+   * Defaults to `pi-workflows:sandbox`.
+   */
+  readonly debugName?: string;
+}
+
+/**
+ * Result returned by `Sandbox#runScript`. `returnValue` is the resolved
+ * value of the user script's top-level `return` (after structured
+ * cloning back to the host realm), or `undefined` if the script didn't
+ * return anything.
+ *
+ * `log` is only populated when `SandboxOptions.log` was omitted (DI not
+ * provided).
+ */
+export interface SandboxResult {
+  readonly returnValue: unknown;
+  readonly log: readonly SandboxLogEntry[];
+  readonly durationMs: number;
+}
