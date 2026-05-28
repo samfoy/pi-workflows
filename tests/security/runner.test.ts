@@ -199,6 +199,11 @@ const VECTORS: readonly Vector[] = [
         "crypto-method",
         "url-static",
         "textenc-instance",
+        // Slice 8a additions — ctx.* surface.
+        "ctx-agent",
+        "ctx-phase",
+        "ctx-cache-get",
+        "ctx-log",
       ];
       for (const k of probeKeys) {
         const row = r[k] as {
@@ -237,6 +242,15 @@ const VECTORS: readonly Vector[] = [
         true,
         "crypto.randomUUID.constructor must be Context-realm Function",
       );
+      // Slice 8a: ctx.* wrapper-identity oracle.
+      const ctxIdent = r["wrapper-identity-ctx"] as Record<string, unknown>;
+      assert.equal(ctxIdent.agentCtorIsContextFn, true, "ctx.agent.constructor must be Context Function");
+      assert.equal(ctxIdent.phaseCtorIsContextFn, true, "ctx.phase.constructor must be Context Function");
+      assert.equal(ctxIdent.cacheGetCtorIsContextFn, true, "ctx.cache.get.constructor must be Context Function");
+      assert.equal(ctxIdent.cacheSetCtorIsContextFn, true, "ctx.cache.set.constructor must be Context Function");
+      assert.equal(ctxIdent.cacheHasCtorIsContextFn, true, "ctx.cache.has.constructor must be Context Function");
+      assert.equal(ctxIdent.cacheDelCtorIsContextFn, true, "ctx.cache.delete.constructor must be Context Function");
+      assert.equal(ctxIdent.logCtorIsContextFn, true, "ctx.log.constructor must be Context Function");
       const hidden = r["console-bridge-hidden"] as Record<string, unknown>;
       assert.equal(
         hidden.visibleAsKey,

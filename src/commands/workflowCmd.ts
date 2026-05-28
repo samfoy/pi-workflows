@@ -37,6 +37,7 @@ import {
   stubDescription,
   stubMessage,
 } from "./workflowCmd.internal.js";
+import { startWorkflowRun } from "../runManager.js";
 
 /**
  * Register `/<name>` for every workflow in the registry. Returns the
@@ -58,21 +59,75 @@ export function registerWorkflowCommands(
   for (const file of registry.values()) {
     pi.registerCommand(file.name, {
       description: stubDescription(file),
-      handler: async () => {
-        pi.sendMessage(
-          {
-            customType: STUB_CUSTOM_TYPE,
-            content: stubMessage(file),
-            display: true,
-            details: {
-              workflowName: file.name,
-              absPath: file.absPath,
-              scope: file.scope,
-              slice: 1,
+      handler: async (args) => {
+        // Slice 8a: actually start the run via RunManager. Approval
+        // dialog is slice 9 — here we bypass with `preApproved: true`
+        // and emit a notify so users see what's happening.
+        try {
+          const run = await startWorkflowRun(file, args, {
+            preApproved: true,
+          });
+          pi.sendMessage(
+            {
+              customType: STUB_CUSTOM_TYPE,
+              content:
+                `started workflow "${file.name}" (runId=${run.runId})\n\n` +
+                "Approval flow is slice-9 pending; this run was bypassed. " +
+                "TUI overlay is slice-13 pending; tail " +
+                `${run.runDirAbs}/ledger.jsonl manually for now.`,
+              display: true,
+              details: {
+                workflowName: file.name,
+                runId: run.runId,
+                runDir: run.runDirAbs,
+                approvalBypassed: true,
+                slice: "8a",
+              },
             },
-          },
-          { triggerTurn: false, deliverAs: "nextTurn" },
-        );
+            { triggerTurn: false, deliverAs: "nextTurn" },
+          );
+          // Fire-and-forget the run; result delivery is slice 10.
+          run.promise.catch((err: unknown) => {
+            // Surface failures via notify so users aren't left wondering.
+            // Best-effort — don't throw out of an unhandled rejection.
+            try {
+              const msg =
+                err instanceof Error ? err.message : String(err);
+              pi.sendMessage(
+                {
+                  customType: STUB_CUSTOM_TYPE,
+                  content: `workflow "${file.name}" (${run.runId}) failed: ${msg}`,
+                  display: true,
+                  details: { workflowName: file.name, runId: run.runId },
+                },
+                { triggerTurn: false, deliverAs: "nextTurn" },
+              );
+            } catch {
+              // ignore
+            }
+          });
+        } catch (err) {
+          // Stub fallback so a runtime-init failure doesn't crash the
+          // session. Surfaces the underlying message.
+          const msg = err instanceof Error ? err.message : String(err);
+          pi.sendMessage(
+            {
+              customType: STUB_CUSTOM_TYPE,
+              content:
+                stubMessage(file) +
+                `\n\n[runtime-init failed: ${msg}]`,
+              display: true,
+              details: {
+                workflowName: file.name,
+                absPath: file.absPath,
+                scope: file.scope,
+                error: msg,
+                slice: "8a",
+              },
+            },
+            { triggerTurn: false, deliverAs: "nextTurn" },
+          );
+        }
       },
     });
     count++;

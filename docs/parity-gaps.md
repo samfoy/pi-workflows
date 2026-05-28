@@ -1,129 +1,83 @@
-# Parity gaps — pi-workflows v0.1
+# pi-workflows — Parity Gaps vs Claude Code Dynamic Workflows
 
-Documented limitations that diverge from the PRD's idealized author API
-or from Claude Code's "Dynamic Workflows" feature. Filled in
-incrementally per slice; finalised in slice 18.
+This document tracks behaviors documented in the PRD or implied by
+Anthropic's dynamic workflows blog post that we deliberately defer to
+v2 (or beyond). Each row should cite the PRD/plan section, the slice
+that reviewed the gap, and the trigger condition for revisiting.
 
-## Slice 2 — sandbox substrate
+## v1 deferred — schema validation of agent JSON output
 
-### sync-loop wedge (PRD §8.3.6)
+**Trigger:** PRD §5.5.2 path 4 ("valid JSON / wrong schema") +
+slice 8a concern F5.
 
-A workflow with a synchronous infinite loop (`while (true) {}`,
-`for (;;);`, etc.) blocks the Node event loop. While that loop runs:
+**v1 behavior:** the dispatcher's JSON-stream parser checks structural
+shape (one event per line, recognizable `type` field, `agent_end`
+terminator). It does NOT validate that the events match a published
+`pi --mode json` schema. The PRD's `MalformedAgentOutputError` reasons
+include `unexpected-schema` but slice 6 never produces that value;
+slice 8a confirmed and left the enum entry intact for v2.
 
-- The pi TUI cannot receive keystrokes; **`x` (stop) does NOT fire**.
-- The overlay cannot redraw.
-- Other extensions' timers / event handlers are starved.
-- AbortSignal listeners cannot fire (they're scheduled as microtasks).
+**Why deferred:** the upstream pi `--mode json` schema is not yet
+published. Defining a schema in pi-workflows would create a coupling
+that breaks every time pi extends its event payload. Better to wait
+for an upstream `pi --mode json --schema` machine-readable export.
 
-The only recovery is `kill -INT <pi-pid>` from another terminal, which
-terminates **every** active run, not only the offender.
+**Revisit trigger:** when pi exposes a stable, versioned JSON schema
+for `--mode json` events.
 
-We accept this in v1 because alternatives (worker_threads,
-interrupt-on-tick) are out of scope per pin 5 of PRD §1.2. Authors must
-yield via `await` at least every ~10ms — see `docs/authoring.md`'s
-"avoid CPU loops" guidance (slice 18 stub).
+**Owner at revisit:** dispatcher (slice 6 successor).
 
-### globalThis is not freezable in vm.Context
+## v1 deferred — `crypto.subtle`
 
-`Object.freeze(globalThis)` and `Object.preventExtensions(globalThis)`
-both throw "Cannot freeze" / "Cannot prevent extensions" inside a
-`vm.Context` because the Context's globalThis is a Proxy that refuses
-those operations. The meaningful pollution defense is freezing
-`Object.prototype`, `Array.prototype`, etc. — which we do.
+**Trigger:** PRD §14 row 21.
 
-Effect: a script can write `globalThis.foo = 1` and the assignment
-succeeds, putting `foo` on the Context's globalThis (NOT the host's).
-Each `Sandbox` is a fresh Context, so cross-run pollution is
-impossible. Within a run, multiple `runScript` calls reuse the Context
-but rebind `ctx`/`input` first, so a prior call's stray globals are
-observable but harmless.
+**v1 behavior:** the sandbox exposes `crypto.randomUUID`,
+`crypto.randomBytes`, `crypto.randomFillSync`, `crypto.getRandomValues`.
+`crypto.subtle` is NOT exposed.
 
-### Realm-leak via host-realm globals: crypto, Buffer, URL, etc. (closed at slice 2)
+**Why deferred:** `crypto.subtle` is async and capability-heavy (key
+material, signatures). Threading an async capability surface through
+the realm boundary needs a careful design pass.
 
-**Status: closed.** All exposed globals (`Buffer`, `crypto`, `URL`,
-`URLSearchParams`, `TextEncoder`, `TextDecoder`, `atob`, `btoa`,
-`console`) are Context-realm wrappers around their host-realm originals.
-`Buffer.from.constructor` resolves to the Context's `Function`, so
-`.constructor.constructor("return process")()` evaluates inside the
-Context and gets the Context-realm `process` stub, not the host's.
-Verified by `tests/security/fixtures/host-realm-eval.workflow.js`.
+**Revisit trigger:** author demand.
 
-Slice 8a's `ctx.agent` / `ctx.phase` host-method wrappers must follow
-the same pattern — see `wrapHostMethod` inside
-`src/runtime/sandbox.ts` `buildInitScript` for the reference
-implementation. Cross-ref PRD §8.3.4, §8.3.10.
+## v1 deferred — `worker_threads` / interrupt-on-tick
 
-#### Residual gaps inside this defense
+**Trigger:** PRD §1.2 pin 5 + §8.3.6.
 
-- **`Buffer` instance methods** still walk to the host realm.
-  `Buffer.from('AB').toString.constructor.constructor` returns the
-  host's `Function` because the returned `Buffer` is a host-realm
-  instance whose prototype chain is host. Authors who only use the
-  wrapped statics (`from`, `alloc`, `concat`, `byteLength`,
-  `isBuffer`, `isEncoding`, `compare`) are safe; chains through
-  instance methods are not. Workflows that need locked-down byte
-  manipulation should convert the result to a Context-realm
-  `Uint8Array` (`new Uint8Array(buf)`) before further work.
-  Closing this fully would require wrapping every `Buffer.prototype`
-  method, which is large and rarely needed.
+**v1 behavior:** sandbox is a `vm.Context`; a synchronous infinite
+loop wedges the entire pi event loop. User must SIGINT pi from another
+terminal.
 
-- **`crypto` whitelist.** Only `randomUUID`, `getRandomValues`,
-  `randomBytes`, `randomFillSync` are exposed. `crypto.subtle`,
-  `crypto.createHash`, `crypto.createHmac`, etc. are NOT exposed —
-  they're capability-bearing or stateful and outside the v1 trust
-  model. A future slice can add purified wrappers if author feedback
-  surfaces a need.
+**Why deferred:** `worker_threads` would solve this but adds a deep
+re-architecture (different IPC model, no shared globals, async-only).
+Out of scope for v1's "production-quality on a single host" bar.
 
-- **`URL` and `URLSearchParams` are immutable snapshots.** Construction
-  delegates to host `URL`, but properties (`href`, `pathname`, etc.)
-  are captured at construction and frozen. There are no setters. To
-  mutate a URL, construct a new one. This is a behavioural departure
-  from the WHATWG spec but avoids exposing host setter side-effects.
+**Revisit trigger:** persistent operator complaints about wedging, or
+clear evidence of malicious DoS use cases.
 
-- **TextEncoder / TextDecoder** wrap the host instance via
-  `Reflect.apply` so `.encode` / `.decode` return host-realm typed
-  arrays. The methods themselves are Context-realm functions, so the
-  constructor walk on the method is closed; the returned typed array
-  IS host-realm. Authors who downstream-walk
-  `tEnc.encode('x').constructor` reach the host `Uint8Array` —
-  documented but acceptable since `Uint8Array` doesn't grant
-  capability beyond what `Buffer` already exposed.
+## v1 deferred — true cross-run cache
 
-### Custom Error subclass identity does not survive realm crossing
+**Trigger:** PRD §6.3 + slice 3.
 
-When a host-side error crosses into the sandbox via the
-realm-error reconstruction contract (PRD §8.3.4), custom subclasses
-(`class FooError extends Error {}`) are reconstructed as Context-realm
-`Error` with `.name` preserved. `instanceof FooError` returns false
-inside the script.
+**v1 behavior:** `cache.jsonl` lives under each run's directory. Cache
+hits only happen WITHIN a single run unless the author preserves the
+runDir (e.g. via `--keep-runs`). Slice 14's `s` save-script extracts
+the cache for re-use.
 
-Authors should compare `.name` (`if (e.name === "FooError")`) instead
-of `instanceof`. Documented in `docs/authoring.md` slice 18.
+**Why deferred:** workflow scripts are author-versioned. A cross-run
+cache requires script-version-aware invalidation, which couples
+slice 8a's cache key derivation to slice 14's save format. Slice 11
+(resume) is the closest cousin and it does cross-run only WITHIN a
+single workflow run.
 
-### Resource exhaustion is bounded only by Node's heap
+**Revisit trigger:** documented author workflow that would benefit
+(e.g. CI runs of the same audit workflow against PRs).
 
-A script doing `const a = []; while (true) a.push(a);` will OOM the
-entire pi process. v1 has no per-run heap cap. Acceptance per
-PRD §8.3.7 — the trust model assumes the author isn't actively trying
-to crash pi.
+## Slice 8a author-API alignment
 
-The `--max-old-space-size` Node flag (default 4GB) is the only bound.
-Slice 17 may revisit if user feedback flags the gap.
-
-### `process` is a stub, not absent
-
-PRD §4.3 ❌ row says "process: Replaced by a frozen stub". The
-sandbox installs a frozen object `{ env: {}, platform: 'sandbox',
-arch: 'sandbox', versions: { node: '0.0.0-sandbox' } }`. Author code
-doing `process.env.X || default` works (returns default).
-
-This deliberately differs from "process is undefined" — many ergonomic
-patterns rely on the object existing. The security claim (no env
-leak) is preserved by `process.env === {}`.
-
-## Future slices
-
-Slices 3–17 will append further parity-gap notes here. Slice 18 is the
-final pass that authors `docs/authoring.md` + this file as
-public-facing release notes.
+For reference, the slice-8a public author API (`ctx.agent`,
+`ctx.phase`, `ctx.cache`, `ctx.log`, `ctx.finishCallback`, `ctx.run`,
+`ctx.input`, `ctx.signal`) matches PRD §4.2.1–4.2.5 + §4.2.7 fully.
+The stdlib helpers (`ctx.vote`, `ctx.consensus`, `ctx.parallel`,
+`ctx.retry`, `ctx.sleep` per §4.2.6) land in slice 8b.

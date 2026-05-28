@@ -538,9 +538,17 @@ export async function log(
 
 const MAX_AGENT_ERROR_BYTES = 256;
 
+/**
+ * Byte-aware truncation. Slice 8a fix per `slice_8a_concerns#H9`:
+ * the previous implementation sliced UTF-16 code units, which under-
+ * counts cap when the input contains multi-byte characters. Switch to
+ * Buffer-based slicing so the cap is exact in bytes (matching
+ * `buildResultEntry` below).
+ */
 function truncBytes(s: string, max: number): string {
-  if (s.length <= max) return s;
-  return s.slice(0, max);
+  const buf = Buffer.from(s, "utf8");
+  if (buf.length <= max) return s;
+  return buf.subarray(0, max).toString("utf8");
 }
 
 /**

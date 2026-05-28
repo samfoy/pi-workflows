@@ -270,9 +270,7 @@ export interface SandboxLogEntry {
  * sandbox keeps an internal in-memory array reachable via
  * `Sandbox#takeLog()`.
  *
- * Slice 8a will add `ctx` (the workflow author API) and `runtimeMeta`.
- * Both extend additively; this slice's tests pass `signal` + (optionally)
- * `log` only.
+ * Slice 8a adds `ctx` (the workflow author API via `runCtxHost`).
  */
 export interface SandboxOptions {
   readonly signal: AbortSignal;
@@ -301,6 +299,108 @@ export interface SandboxOptions {
    * Defaults to `pi-workflows:sandbox`.
    */
   readonly debugName?: string;
+  /**
+   * Slice 8a — host-side runtime ctx bridge. When provided, the init
+   * script captures these host methods into closure-locals and builds
+   * a Context-realm `ctx` object whose member methods all wrap via
+   * `wrapHostMethod` (PRD §8.3.4 host-realm-eval defense). The bridge
+   * is then DELETED from `globalThis` so user code can't enumerate it.
+   *
+   * When omitted, sandbox falls back to the slice-2 stub `ctx` (every
+   * method throws "not yet implemented"). Used by every slice-2 test
+   * that doesn't care about the runtime.
+   */
+  readonly runCtxHost?: RunCtxHost;
+}
+
+// ─── slice 8a — runtime ctx host bridge ────────────────────────────
+
+/**
+ * Tagged union the host bridge returns from every async ctx.* method.
+ * The Context-realm wrapper inspects this and either yields the value
+ * or throws a Context-realm Error reconstructed from the carried
+ * `RealmErrorRecord`.
+ *
+ * Why tag instead of throwing host-realm Errors directly: a host
+ * `Promise.reject(hostErr)` would deliver `hostErr` (host-realm) to the
+ * Context-realm `await`, which then rethrows it. The script would see
+ * `e.constructor === <host>.Error` — a realm leak. Tagging keeps every
+ * realm-crossing value plain JSON; reconstruction stays inside the
+ * Context.
+ */
+export type RunCtxBridgeResult<T> =
+  | { readonly ok: true; readonly value: T }
+  | { readonly ok: false; readonly error: RealmErrorRecord };
+
+/**
+ * Author-handle data carried across the realm boundary by `ctx.agent`.
+ * The Context wrapper rebuilds this as a frozen Context-realm object
+ * matching the public `AgentHandle` shape (PRD §4.2.1).
+ */
+export interface AgentHandleData {
+  readonly kind: "agent";
+  readonly id: string;
+  readonly prompt: string;
+  readonly opts: Readonly<Record<string, unknown>>;
+}
+
+/**
+ * Run metadata exposed via `ctx.run` (PRD §4.2.7). Plain JSON; cloned
+ * into Context realm at bind time (no host functions inside).
+ */
+export interface RunMetaData {
+  readonly id: string;
+  readonly workflowName: string;
+  readonly startedAt: string;
+  readonly cwd: string;
+  readonly resumed: boolean;
+}
+
+/**
+ * Host-side bridge consumed by the sandbox. Every method is host-realm
+ * — the init script wraps each one inside the Context. None of these
+ * methods leaks Context-realm objects back into the host's mutable
+ * state; they accept Context-realm values by reference (Reflect.apply
+ * passes them through) and read fields off them as plain data.
+ *
+ * Sync vs async:
+ *   - `agent` is sync: it just constructs a handle (no I/O).
+ *   - `phase`, `cacheGet`, `cacheSet`, `cacheHas`, `cacheDelete` are async.
+ *   - `log` is sync (fire-and-forget — host queues to ledger writer).
+ */
+export interface RunCtxHost {
+  readonly runMeta: RunMetaData;
+  /** Slash-command argument string (PRD §4.2.7 `ctx.input`). */
+  readonly input: string;
+  /**
+   * Build an AgentHandle. Pure — same args twice yields two distinct
+   * handles (ids may differ if author omitted `id`). Per PRD §4.2.1
+   * "ctx.agent is pure — calling it twice with identical args twice
+   * schedules two distinct agents. Idempotency is the cache's job."
+   */
+  agent(prompt: unknown, opts: unknown): RunCtxBridgeResult<AgentHandleData>;
+  /**
+   * Run a phase. Reads each handle's fields (id, prompt, opts) as
+   * plain data, dispatches in parallel under the run's semaphore.
+   * Resolves with an array of cloned `AgentResult` matching the input
+   * order. Rejection: tagged AggregateError record per PRD §4.2.2.
+   */
+  phase(
+    name: unknown,
+    agents: unknown,
+  ): Promise<RunCtxBridgeResult<readonly AgentResultLike[]>>;
+  cacheGet(key: unknown): Promise<RunCtxBridgeResult<unknown>>;
+  cacheSet(key: unknown, value: unknown): Promise<RunCtxBridgeResult<null>>;
+  cacheHas(key: unknown): Promise<RunCtxBridgeResult<boolean>>;
+  cacheDelete(key: unknown): Promise<RunCtxBridgeResult<null>>;
+  log(message: unknown, level: unknown): RunCtxBridgeResult<null>;
+  /**
+   * Slice 8a placeholder — slice 10 wires this into the actual
+   * `pi.sendUserMessage(prompt)` queue. Slice 8a only needs the
+   * call to be observable (so the integration test can assert
+   * "recorded but not yet fired").
+   */
+  finishCallback(prompt: unknown): RunCtxBridgeResult<null>;
 }
 
 /**

@@ -30,6 +30,7 @@
 
 import { promises as fs, existsSync, readFileSync } from "node:fs";
 import { tmpdir as _tmpdir } from "node:os";
+import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
 import type {
@@ -105,7 +106,15 @@ export async function writeParentLivenessFields(
     parentStartTime: fields.parentStartTime,
     parentBootId: fields.parentBootId,
   };
-  const tmpName = join(runDirAbs, `manifest.json.tmp-${process.pid}-${Date.now()}`);
+  const tmpName = join(
+    runDirAbs,
+    // Slice 8a fix: include random bytes in the tmp filename so two
+    // concurrent dispatches in the same millisecond can't collide on
+    // the rename path. Without this, parallel agents in `ctx.phase`
+    // race: both writeFile the same tmp path, A renames first, B's
+    // rename ENOENTs because A's rename moved (and removed) the tmp.
+    `manifest.json.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`,
+  );
   const json = JSON.stringify(merged, null, 2) + "\n";
   await fs.writeFile(tmpName, json, "utf8");
   await fs.rename(tmpName, target);

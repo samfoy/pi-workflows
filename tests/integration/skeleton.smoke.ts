@@ -89,7 +89,10 @@ test("smoke: drops foo.js → /foo registered → invoking returns stub", async 
         // /workflows is registered.
         assert.ok(pi.commands.has("workflows"));
 
-        // Invoke /foo — observe a stub sendMessage.
+        // Invoke /foo — observe a stub sendMessage. Slice 8a:
+        // workflowCmd actually starts a run via RunManager; we get a
+        // "started workflow ..." card (or the runtime-init failure
+        // fallback if anything goes wrong).
         await pi.invokeCommand("foo", "");
         const stubMsg = pi.messages.find(
           (m) => m.customType === "pi-workflows.stub",
@@ -97,8 +100,8 @@ test("smoke: drops foo.js → /foo registered → invoking returns stub", async 
         assert.ok(stubMsg, "expected a stub message after /foo invocation");
         assert.match(
           stubMsg!.content,
-          /workflows runtime not yet wired/,
-          "stub body should match the documented slice-1 placeholder",
+          /started workflow|runtime-init failed/,
+          "slice-8a stub body should report run-start or init-failure",
         );
         assert.deepEqual(
           (stubMsg!.details as { workflowName: string }).workflowName,

@@ -43,6 +43,10 @@
 import vm from "node:vm";
 
 import type {
+  AgentHandleData,
+  AgentResultLike,
+  RunCtxBridgeResult,
+  RunMetaData,
   SandboxOptions,
   SandboxResult,
   SandboxLogEntry,
@@ -62,6 +66,34 @@ interface HostBridgePayload {
   readonly timer: TimerBridge["bridge"];
   readonly consoleLog: (level: string, args: unknown[]) => void;
   readonly hostGlobals: HostGlobals;
+  /**
+   * Slice 8a — host-side runtime ctx bridge. May be `null` for slice-2
+   * tests that don't need a real runtime; in that case the init
+   * script falls back to the slice-2 stub literal. Captured into
+   * closure-locals + DELETED from `globalThis` per the same
+   * close-and-hide pattern as the timer/console bridges (PRD §8.3.4).
+   */
+  readonly runCtxHost: RunCtxHostInternal | null;
+}
+
+/**
+ * Host-realm bridge object the init script captures into closure
+ * locals. Same shape as `RunCtxHost` from `internal.d.ts` minus the
+ * pure-data `runMeta` and `input` (which are JSON-stringified and
+ * inlined into the bind script). Functions only.
+ */
+interface RunCtxHostInternal {
+  agent(prompt: unknown, opts: unknown): RunCtxBridgeResult<AgentHandleData>;
+  phase(
+    name: unknown,
+    agents: unknown,
+  ): Promise<RunCtxBridgeResult<readonly AgentResultLike[]>>;
+  cacheGet(key: unknown): Promise<RunCtxBridgeResult<unknown>>;
+  cacheSet(key: unknown, value: unknown): Promise<RunCtxBridgeResult<null>>;
+  cacheHas(key: unknown): Promise<RunCtxBridgeResult<boolean>>;
+  cacheDelete(key: unknown): Promise<RunCtxBridgeResult<null>>;
+  log(message: unknown, level: unknown): RunCtxBridgeResult<null>;
+  finishCallback(prompt: unknown): RunCtxBridgeResult<null>;
 }
 
 /**
@@ -473,6 +505,7 @@ export class Sandbox {
       timer: this.timerBridge.bridge,
       consoleLog: consoleHandler,
       hostGlobals: collectHostGlobals(),
+      runCtxHost: opts.runCtxHost ?? null,
     };
     (sandboxBase as Record<string, unknown>)[nonce] = hostBridge;
 
@@ -573,11 +606,30 @@ export class Sandbox {
     // this RIGHT BEFORE running so a previous `runScript` call's
     // bindings don't bleed in.
     //
-    // For slice 2 — `ctx` is a minimal object; slice 8a installs the
-    // real workflow author API.
-    const minimalCtxScript = `globalThis.ctx = ${minimalCtxLiteral()}; globalThis.input = ${JSON.stringify(this.opts.input ?? null)};`;
+    // Slice 8a: when `runCtxHost` was supplied, the init script
+    // installed `__pi_build_ctx(runMeta, input)`. We call it inside
+    // the Context to build the frozen ctx. When no host was supplied
+    // (slice-2 path), the same factory returns the slice-2 stub.
+    //
+    // We pass `runMeta` + `input` as JSON-source literals embedded in
+    // the bind script. The literals evaluate inside the Context, so
+    // the resulting objects' prototype chains run through the Context's
+    // Object/Array (matches `host-input-realm.workflow.js` expectation
+    // that `inputCtorIsCtxObject === true`). JSON.stringify is the
+    // safe encoding because every value we embed is JSON-cloneable.
+    const runMetaJson = JSON.stringify(
+      this.opts.runCtxHost?.runMeta ?? slice2StubRunMeta(),
+    );
+    const inputJson =
+      this.opts.runCtxHost !== undefined
+        ? JSON.stringify(String(this.opts.runCtxHost.input ?? ""))
+        : JSON.stringify(this.opts.input ?? null);
+    const bindScript = [
+      `globalThis.input = ${inputJson};`,
+      `globalThis.ctx = globalThis.__pi_build_ctx(${runMetaJson}, globalThis.input);`,
+    ].join("\n");
     try {
-      vm.runInContext(minimalCtxScript, this.context, {
+      vm.runInContext(bindScript, this.context, {
         filename: "pi-workflows-bind-ctx.js",
       });
     } catch (e) {
@@ -721,29 +773,41 @@ async function raceWithAbort<T>(
 }
 
 /**
- * Minimal `ctx` literal installed by slice 2. Slice 8a replaces with
- * the real workflow author API. We give the script enough to:
- *   - call `ctx.log(...)` (forwards to the same sink as console.log)
- *   - read `ctx.signal.aborted` (the run AbortSignal)
- *   - read `ctx.run.id` etc. (stub strings)
+ * Slice-2 fallback runMeta values — used when no `runCtxHost` was
+ * supplied so the security/sandbox tests still get a `ctx.run` shape.
+ */
+function slice2StubRunMeta(): RunMetaData {
+  return {
+    id: "wf-stub",
+    workflowName: "stub",
+    startedAt: "1970-01-01T00:00:00Z",
+    cwd: ".",
+    resumed: false,
+  };
+}
+
+/**
+ * Minimal `ctx` literal kept for backward compatibility with any
+ * out-of-tree caller that constructed a Sandbox before slice 8a's
+ * factory pattern. Unreachable from the slice-8a constructor (the
+ * factory `__pi_build_ctx` is what runs).
  *
- * Implemented as a Context-realm object literal so authors don't see
- * any host-realm prototypes. The literal is built from a JS string and
- * evaluated inside the Context.
+ * Kept as a no-op stub. Per critic concern slice_8a_concerns#2: the
+ * old body referenced the deleted `__pi_console_log__` global — calling
+ * it would TypeError. The new body throws explicitly with a message
+ * pointing at slice-8a's bind path.
  */
 function minimalCtxLiteral(): string {
-  // Slice 2: nothing real — just a frozen object with stubs that throw
-  // if invoked. Slice 8a replaces.
   return [
     "Object.freeze({",
-    "  log: (msg) => { globalThis.__pi_console_log__('log', [msg]); },",
-    "  agent: () => { throw new Error('ctx.agent: not yet implemented (slice 8a)'); },",
-    "  phase: () => { throw new Error('ctx.phase: not yet implemented (slice 8a)'); },",
-    "  cache: Object.freeze({",
-    "    get: () => { throw new Error('ctx.cache: not yet implemented (slice 8a)'); },",
-    "    set: () => { throw new Error('ctx.cache: not yet implemented (slice 8a)'); },",
-    "    has: () => { throw new Error('ctx.cache: not yet implemented (slice 8a)'); },",
-    "    delete: () => { throw new Error('ctx.cache: not yet implemented (slice 8a)'); },",
+    "  log:    function () { throw new Error('ctx.log: legacy minimalCtxLiteral path \u2014 use SandboxOptions.runCtxHost (slice 8a)'); },",
+    "  agent:  function () { throw new Error('ctx.agent: legacy minimalCtxLiteral path'); },",
+    "  phase:  function () { throw new Error('ctx.phase: legacy minimalCtxLiteral path'); },",
+    "  cache:  Object.freeze({",
+    "    get:    function () { throw new Error('ctx.cache: legacy minimalCtxLiteral path'); },",
+    "    set:    function () { throw new Error('ctx.cache: legacy minimalCtxLiteral path'); },",
+    "    has:    function () { throw new Error('ctx.cache: legacy minimalCtxLiteral path'); },",
+    "    delete: function () { throw new Error('ctx.cache: legacy minimalCtxLiteral path'); },",
     "  }),",
     "  run: Object.freeze({ id: 'wf-stub', workflowName: 'stub', startedAt: '1970-01-01T00:00:00Z', cwd: '.', resumed: false }),",
     "})",
@@ -778,6 +842,7 @@ function buildInitScript(nonce: string): string {
     "const __h = __bridge.timer;",
     "const __consoleLog = __bridge.consoleLog;",
     "const __hostGlobals = __bridge.hostGlobals;",
+    "const __runCtxHost = __bridge.runCtxHost;",
     "",
     "// wrapHostMethod: builds a Context-realm function that delegates",
     "// to a host-realm method via Reflect.apply. The returned function's",
@@ -958,7 +1023,115 @@ function buildInitScript(nonce: string): string {
     "// We keep the stub since author code commonly does `process.env.X || default`.",
     "// Slice 8a docs MUST clarify this gap with PRD §4.3.",
     "",
-    "// Prototype-pollution defense — PRD §8.3.2.",
+    "",
+    "// ---- ctx factory (slice 8a) --------------------------------",
+    "// __runCtxHost is a host-realm bridge object (or null). We build a",
+    "// Context-realm `__pi_build_ctx(runMetaJson, inputStr)` factory",
+    "// function. Per-runScript bind path calls it inside the Context to",
+    "// construct the frozen `ctx` object. All ctx.* methods are",
+    "// Context-realm closures whose .constructor === Context Function",
+    "// (PRD \u00a78.3.4 host-realm-eval defense \u2014 mirrors Buffer/crypto/URL",
+    "// wrapping above).",
+    "",
+    "// wrapAsync: returns a Context-realm async function that calls a",
+    "// host-realm tagged-result method. Inspects the {ok,value,error}",
+    "// envelope; on `ok:true` clones value through Context JSON; on",
+    "// `ok:false` reconstructs a Context-realm Error from the",
+    "// RealmErrorRecord and throws it.",
+    "function __pi_clone_into_ctx(value) {",
+    "  if (value === undefined) return undefined;",
+    "  if (value === null) return null;",
+    "  if (typeof value !== 'object') return value;",
+    "  return JSON.parse(JSON.stringify(value));",
+    "}",
+    "function __pi_reconstruct_error(record) {",
+    "  // record is a host-realm object but its fields are primitives",
+    "  // and arrays of records. Rebuild as Context-realm Error/Aggregate.",
+    "  if (!record || typeof record !== 'object') {",
+    "    return new Error('unknown ctx bridge error');",
+    "  }",
+    "  const message = typeof record.message === 'string' ? record.message : '';",
+    "  const name    = typeof record.name    === 'string' ? record.name    : 'Error';",
+    "  let result;",
+    "  if (record.errors && typeof record.errors.length === 'number') {",
+    "    const children = [];",
+    "    for (let i = 0; i < record.errors.length; i++) {",
+    "      children.push(__pi_reconstruct_error(record.errors[i]));",
+    "    }",
+    "    result = new AggregateError(children, message);",
+    "  } else {",
+    "    result = new Error(message);",
+    "  }",
+    "  Object.defineProperty(result, 'name', { value: name, configurable: true, writable: true, enumerable: false });",
+    "  if (typeof record.stack === 'string') {",
+    "    Object.defineProperty(result, 'stack', { value: record.stack, configurable: true, writable: true, enumerable: false });",
+    "  }",
+    "  if (record.cause !== undefined && record.cause !== null) {",
+    "    Object.defineProperty(result, 'cause', { value: __pi_reconstruct_error(record.cause), configurable: true, writable: true, enumerable: false });",
+    "  }",
+    "  return result;",
+    "}",
+    "function __pi_unwrap(envelope) {",
+    "  if (!envelope || typeof envelope !== 'object') {",
+    "    throw new Error('ctx bridge returned invalid envelope');",
+    "  }",
+    "  if (envelope.ok === true) return __pi_clone_into_ctx(envelope.value);",
+    "  throw __pi_reconstruct_error(envelope.error);",
+    "}",
+    "function wrapHostAsync(host) {",
+    "  // Plain (non-async) function so .constructor === Function.",
+    "  // We still hand out a Promise; the chain unwraps host's tagged",
+    "  // envelope on resolve. AsyncFunction's .constructor would be",
+    "  // AsyncFunction (a different intrinsic) and would fail the",
+    "  // wrapper-identity oracle in tests/security/host-realm-eval.",
+    "  return function (...args) {",
+    "    return Promise.resolve(Reflect.apply(host, this, args)).then(__pi_unwrap);",
+    "  };",
+    "}",
+    "function wrapHostSync(host) {",
+    "  return function (...args) {",
+    "    return __pi_unwrap(Reflect.apply(host, this, args));",
+    "  };",
+    "}",
+    "",
+    "globalThis.__pi_build_ctx = function (runMeta, input) {",
+    "  if (!__runCtxHost) {",
+    "    return Object.freeze({",
+    "      log:    function () { throw new Error('ctx.log: no runtime (slice-2 stub)'); },",
+    "      agent:  function () { throw new Error('ctx.agent: no runtime (slice-2 stub)'); },",
+    "      phase:  function () { throw new Error('ctx.phase: no runtime (slice-2 stub)'); },",
+    "      cache:  Object.freeze({",
+    "        get:    function () { throw new Error('ctx.cache: no runtime (slice-2 stub)'); },",
+    "        set:    function () { throw new Error('ctx.cache: no runtime (slice-2 stub)'); },",
+    "        has:    function () { throw new Error('ctx.cache: no runtime (slice-2 stub)'); },",
+    "        delete: function () { throw new Error('ctx.cache: no runtime (slice-2 stub)'); },",
+    "      }),",
+    "      finishCallback: function () { throw new Error('ctx.finishCallback: no runtime (slice-2 stub)'); },",
+    "      run: Object.freeze({ id: 'wf-stub', workflowName: 'stub', startedAt: '1970-01-01T00:00:00Z', cwd: '.', resumed: false }),",
+    "      input: '',",
+    "      signal: undefined,",
+    "    });",
+    "  }",
+    "  const cache = Object.freeze({",
+    "    get:    wrapHostAsync(__runCtxHost.cacheGet),",
+    "    set:    wrapHostAsync(__runCtxHost.cacheSet),",
+    "    has:    wrapHostAsync(__runCtxHost.cacheHas),",
+    "    delete: wrapHostAsync(__runCtxHost.cacheDelete),",
+    "  });",
+    "  const ctx = Object.freeze({",
+    "    log:            wrapHostSync(__runCtxHost.log),",
+    "    agent:          wrapHostSync(__runCtxHost.agent),",
+    "    phase:          wrapHostAsync(__runCtxHost.phase),",
+    "    cache:          cache,",
+    "    finishCallback: wrapHostSync(__runCtxHost.finishCallback),",
+    "    run:            Object.freeze(runMeta),",
+    "    input:          input,",
+    "    // signal is bound at runScript-time \u2014 see bind path.",
+    "  });",
+    "  return ctx;",
+    "};",
+    "",
+    "// Prototype-pollution defense \u2014 PRD \u00a78.3.2.",
     "Object.freeze(Object.prototype);",
     "Object.freeze(Array.prototype);",
     "Object.freeze(Function.prototype);",

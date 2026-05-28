@@ -62,14 +62,16 @@
 import type { AcquireToken, Semaphore } from "../types/internal.d.ts";
 
 /**
- * Internal queue entry. `cleanup()` is called both when the waiter
- * resolves (success path) and when it's aborted (failure path) — it's
- * the listener-removal hook so AbortSignal subscriptions don't leak.
+ * Internal queue entry. Slice 8a `slice_8a_concerns#H8`: the
+ * previously-defined `cleanup()` method on this struct was dead — the
+ * inline `removeEventListener` calls inside `resolve`/`reject` are the
+ * cleanup. Removed for hygiene. If a future slice needs a separate
+ * cleanup hook (e.g. setCap-driven preemption), reintroduce with a
+ * test that proves invocation.
  */
 interface Waiter {
   resolve(token: AcquireToken): void;
   reject(reason: unknown): void;
-  cleanup(): void;
   /** Set true when this waiter has already been settled (resolve or
    * reject) — guards against double-settle when an abort fires
    * concurrently with release-driven resolution. */
@@ -176,11 +178,6 @@ export class FifoSemaphore implements Semaphore {
             signal.removeEventListener("abort", onAbort);
           }
           reject(reason);
-        },
-        cleanup: () => {
-          if (signal !== undefined) {
-            signal.removeEventListener("abort", onAbort);
-          }
         },
         settled: false,
       };
