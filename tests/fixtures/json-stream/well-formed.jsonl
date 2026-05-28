@@ -1,0 +1,6 @@
+{"type":"system_init","model":"claude-sonnet-4-5","sessionId":"abc123"}
+{"type":"assistant_message","content":"Reading the file..."}
+{"type":"tool_call","id":"tu_1","toolName":"read","arguments":{"path":"foo.ts"}}
+{"type":"tool_result","id":"tu_1","result":"...","isError":false}
+{"type":"assistant_message","content":"Here is the summary:\n\n- one\n- two\n- three"}
+{"type":"result","output":{"text":"Done."},"success":true,"usage":{"input":120,"output":80,"totalTokens":200}}

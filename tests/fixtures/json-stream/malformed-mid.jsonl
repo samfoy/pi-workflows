@@ -1,0 +1,5 @@
+{"type":"system_init","model":"claude-sonnet-4-5"}
+{"type":"assistant_message","content":"hello"}
+{"type":"tool_call","id":"tu_1",not-valid-json,oops
+{"type":"assistant_message","content":"this line never gets parsed"}
+{"type":"result","output":{},"success":false}

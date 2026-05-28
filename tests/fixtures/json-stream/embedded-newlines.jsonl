@@ -1,0 +1,3 @@
+{"type":"system_init","model":"claude"}
+{"type":"assistant_message","content":"Line 1\nLine 2\nLine 3 with quote \"x\" and tab\there"}
+{"type":"result","output":{"text":"ok"},"success":true}

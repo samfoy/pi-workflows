@@ -1,0 +1,9 @@
+{"type":"system_init","model":"claude-sonnet-4-5","sessionId":"s1"}
+{"type":"thinking","thinking":"I should read the file first."}
+{"type":"assistant_message","content":"Reading."}
+{"type":"tool_call","id":"tu_1","toolName":"read","arguments":{"path":"a.ts"}}
+{"type":"tool_result","id":"tu_1","result":{"content":"export const x = 1"},"isError":false}
+{"type":"tool_call","id":"tu_2","toolName":"bash","arguments":{"command":"ls"}}
+{"type":"tool_result","id":"tu_2","result":{"stdout":"a.ts\nb.ts\n"},"isError":false}
+{"type":"assistant_message","content":"Done.","tokens":{"input":50,"output":30}}
+{"type":"result","output":{"text":"Summary: 2 files."},"success":true,"usage":{"input":150,"output":80,"totalTokens":230}}
