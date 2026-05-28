@@ -1,0 +1,22 @@
+# Source files (built into dist/) — only ship the compiled bundle.
+src/
+tests/
+scripts/
+plan.md
+SPIKE-FINDINGS.md
+
+# Configs
+tsconfig.json
+tsconfig.build.json
+tsconfig.test.json
+
+# Dev artifacts
+*.tsbuildinfo
+coverage/
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+*.swp
+*.swo

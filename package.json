@@ -1,14 +1,54 @@
 {
   "name": "@samfp/pi-workflows",
-  "version": "0.0.0",
-  "description": "Dynamic workflows for pi — JS scripts that orchestrate sub-agents",
+  "version": "0.1.0",
+  "description": "Dynamic workflows for pi — sandboxed JS scripts that drive sub-agent fleets, with TUI inspection and resume",
   "keywords": [
     "pi-package",
-    "extensions",
+    "pi-extension",
     "workflows",
-    "subagents"
+    "subagents",
+    "claude-code-parity"
   ],
   "private": true,
   "license": "MIT",
-  "type": "module"
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json && esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --external:@earendil-works/pi-coding-agent --external:typebox",
+    "build:types": "tsc -p tsconfig.build.json --emitDeclarationOnly",
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/unit/*.test.ts tests/integration/*.smoke.ts tests/integration/*.test.ts",
+    "test:unit": "node --import tsx --test tests/unit/*.test.ts",
+    "test:integration": "node --import tsx --test tests/integration/*.smoke.ts tests/integration/*.test.ts",
+    "prepublishOnly": "npm run build && npm test"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "typebox": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "esbuild": "^0.24.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.5.0"
+  },
+  "pi": {
+    "extensions": ["./dist/index.js"]
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "PRD.md",
+    "LICENSE"
+  ]
 }
