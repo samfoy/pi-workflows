@@ -61,6 +61,16 @@ probe("ctx-phase",     () => ctx.phase.constructor);
 probe("ctx-cache-get", () => ctx.cache.get.constructor);
 probe("ctx-log",       () => ctx.log.constructor);
 
+// Slice 8b: stdlib helpers — same wrapper-identity / host-realm-eval
+// invariants as the slice 8a ctx.* surface. The helpers are pure
+// Context-realm closures (no host bridge), so .constructor must
+// resolve to Context Function.
+probe("ctx-vote",      () => ctx.vote.constructor);
+probe("ctx-consensus", () => ctx.consensus.constructor);
+probe("ctx-parallel",  () => ctx.parallel.constructor);
+probe("ctx-retry",     () => ctx.retry.constructor);
+probe("ctx-sleep",     () => ctx.sleep.constructor);
+
 // Wrapper-identity invariant — these must equal the Context's Function.
 tests["wrapper-identity"] = {
   bufferFromCtorIsContextFn: Buffer.from.constructor === Function,
@@ -78,6 +88,29 @@ tests["wrapper-identity-ctx"] = {
   cacheHasCtorIsContextFn: ctx.cache.has.constructor === Function,
   cacheDelCtorIsContextFn: ctx.cache.delete.constructor === Function,
   logCtorIsContextFn:      ctx.log.constructor === Function,
+};
+
+// Slice 8b: stdlib helpers wrapper-identity oracle. If a future patch
+// stops installing __helpers.{vote,...} or routes them through a
+// host-realm shim, .constructor would no longer be Context Function
+// and === fails.
+tests["wrapper-identity-stdlib"] = {
+  voteCtorIsContextFn:      ctx.vote.constructor === Function,
+  consensusCtorIsContextFn: ctx.consensus.constructor === Function,
+  parallelCtorIsContextFn:  ctx.parallel.constructor === Function,
+  retryCtorIsContextFn:     ctx.retry.constructor === Function,
+  sleepCtorIsContextFn:     ctx.sleep.constructor === Function,
+};
+
+// Slice 8b: __pi_install_stdlib must be hidden after init (deleted
+// once __pi_build_ctx captures the helper closures). Mirrors the
+// console-bridge-hidden invariant for __pi_console_log__.
+tests["stdlib-factory-hidden"] = {
+  visibleAsKey: Reflect.ownKeys(globalThis).includes("__pi_install_stdlib"),
+  enumerable: Object.keys(globalThis).includes("__pi_install_stdlib"),
+  fromGetOwnPropDescriptor:
+    Object.getOwnPropertyDescriptor(globalThis, "__pi_install_stdlib") !==
+    undefined,
 };
 
 // Bridge-hidden invariant — `__pi_console_log__` must NOT be visible.

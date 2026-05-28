@@ -75,7 +75,18 @@ test("slice 8a: host-realm-eval fixture passes with real runCtxHost", async () =
   const r = result.returnValue as Record<string, unknown>;
 
   // ctx.* probes — the exploit attempts to walk Function constructor.
-  for (const key of ["ctx-agent", "ctx-phase", "ctx-cache-get", "ctx-log"]) {
+  for (const key of [
+    "ctx-agent",
+    "ctx-phase",
+    "ctx-cache-get",
+    "ctx-log",
+    // Slice 8b: stdlib helpers.
+    "ctx-vote",
+    "ctx-consensus",
+    "ctx-parallel",
+    "ctx-retry",
+    "ctx-sleep",
+  ]) {
     const row = r[key] as {
       escaped: boolean;
       envKeys?: number;
@@ -98,4 +109,20 @@ test("slice 8a: host-realm-eval fixture passes with real runCtxHost", async () =
   assert.equal(ctxIdent.cacheHasCtorIsContextFn, true);
   assert.equal(ctxIdent.cacheDelCtorIsContextFn, true);
   assert.equal(ctxIdent.logCtorIsContextFn, true);
+
+  // Slice 8b: stdlib wrapper-identity oracle. Pure Context-realm
+  // closures — if a future patch removes them or routes them through
+  // a host shim, .constructor is no longer Context Function.
+  const stdlibIdent = r["wrapper-identity-stdlib"] as Record<string, unknown>;
+  assert.equal(stdlibIdent.voteCtorIsContextFn, true);
+  assert.equal(stdlibIdent.consensusCtorIsContextFn, true);
+  assert.equal(stdlibIdent.parallelCtorIsContextFn, true);
+  assert.equal(stdlibIdent.retryCtorIsContextFn, true);
+  assert.equal(stdlibIdent.sleepCtorIsContextFn, true);
+
+  // Slice 8b: factory must be deleted post-init.
+  const stdlibHidden = r["stdlib-factory-hidden"] as Record<string, unknown>;
+  assert.equal(stdlibHidden.visibleAsKey, false);
+  assert.equal(stdlibHidden.enumerable, false);
+  assert.equal(stdlibHidden.fromGetOwnPropDescriptor, false);
 });

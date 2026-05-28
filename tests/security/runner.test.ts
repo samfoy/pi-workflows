@@ -204,6 +204,12 @@ const VECTORS: readonly Vector[] = [
         "ctx-phase",
         "ctx-cache-get",
         "ctx-log",
+        // Slice 8b additions — stdlib helpers.
+        "ctx-vote",
+        "ctx-consensus",
+        "ctx-parallel",
+        "ctx-retry",
+        "ctx-sleep",
       ];
       for (const k of probeKeys) {
         const row = r[k] as {
@@ -251,6 +257,18 @@ const VECTORS: readonly Vector[] = [
       assert.equal(ctxIdent.cacheHasCtorIsContextFn, true, "ctx.cache.has.constructor must be Context Function");
       assert.equal(ctxIdent.cacheDelCtorIsContextFn, true, "ctx.cache.delete.constructor must be Context Function");
       assert.equal(ctxIdent.logCtorIsContextFn, true, "ctx.log.constructor must be Context Function");
+      // Slice 8b: stdlib wrapper-identity.
+      const stdlibIdent = r["wrapper-identity-stdlib"] as Record<string, unknown>;
+      assert.equal(stdlibIdent.voteCtorIsContextFn,      true, "ctx.vote.constructor must be Context Function");
+      assert.equal(stdlibIdent.consensusCtorIsContextFn, true, "ctx.consensus.constructor must be Context Function");
+      assert.equal(stdlibIdent.parallelCtorIsContextFn,  true, "ctx.parallel.constructor must be Context Function");
+      assert.equal(stdlibIdent.retryCtorIsContextFn,     true, "ctx.retry.constructor must be Context Function");
+      assert.equal(stdlibIdent.sleepCtorIsContextFn,     true, "ctx.sleep.constructor must be Context Function");
+      // Slice 8b: __pi_install_stdlib must be deleted post-init.
+      const stdlibHidden = r["stdlib-factory-hidden"] as Record<string, unknown>;
+      assert.equal(stdlibHidden.visibleAsKey, false, "__pi_install_stdlib must be hidden from Reflect.ownKeys");
+      assert.equal(stdlibHidden.enumerable, false, "__pi_install_stdlib must NOT appear in Object.keys");
+      assert.equal(stdlibHidden.fromGetOwnPropDescriptor, false, "__pi_install_stdlib must not have an own property descriptor");
       const hidden = r["console-bridge-hidden"] as Record<string, unknown>;
       assert.equal(
         hidden.visibleAsKey,
