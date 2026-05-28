@@ -1,0 +1,6 @@
+{"type":"init","at":"2026-05-28T14:30:12.345Z","manifest":{"runId":"wf-invalidtran","workflowName":"audit"}}
+{"type":"transition","at":"2026-05-28T14:30:12.400Z","from":"pending","to":"approved"}
+{"type":"transition","at":"2026-05-28T14:30:12.500Z","from":"approved","to":"running"}
+{"type":"transition","at":"2026-05-28T14:30:13.000Z","from":"running","to":"paused"}
+{"type":"transition","at":"2026-05-28T14:30:13.100Z","from":"paused","to":"done"}
+{"type":"transition","at":"2026-05-28T14:30:13.200Z","from":"paused","to":"running"}

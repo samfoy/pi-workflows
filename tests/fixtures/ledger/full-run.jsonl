@@ -1,0 +1,18 @@
+{"type":"init","at":"2026-05-28T14:30:12.345Z","manifest":{"runId":"wf-fixturefull","workflowName":"codebase-audit","workflowAbsPath":"/home/samfp/proj/.pi/workflows/codebase-audit.js","input":"audit auth","startedAt":"2026-05-28T14:30:12.345Z","cwd":"/home/samfp/proj","piVersion":"1.4.7","piWorkflowsVersion":"0.1.0"}}
+{"type":"transition","at":"2026-05-28T14:30:12.500Z","from":"pending","to":"approved"}
+{"type":"transition","at":"2026-05-28T14:30:12.600Z","from":"approved","to":"running"}
+{"type":"phase_start","at":"2026-05-28T14:30:13.000Z","phaseName":"discover","agentCount":3}
+{"type":"agent_start","at":"2026-05-28T14:30:13.010Z","phaseName":"discover","agentId":"discover-1","promptHash":"abc123"}
+{"type":"agent_start","at":"2026-05-28T14:30:13.011Z","phaseName":"discover","agentId":"discover-2","promptHash":"def456"}
+{"type":"agent_start","at":"2026-05-28T14:30:13.012Z","phaseName":"discover","agentId":"discover-3","promptHash":"789abc"}
+{"type":"log","at":"2026-05-28T14:30:14.000Z","level":"info","message":"discover phase running"}
+{"type":"agent_end","at":"2026-05-28T14:30:18.000Z","phaseName":"discover","agentId":"discover-1","durationMs":4990,"usage":{"input":1200,"output":340,"cacheRead":0,"cacheWrite":0,"totalTokens":1540},"cached":false}
+{"type":"agent_end","at":"2026-05-28T14:30:19.000Z","phaseName":"discover","agentId":"discover-2","durationMs":5989,"usage":{"input":1100,"output":280,"cacheRead":0,"cacheWrite":0,"totalTokens":1380},"cached":false}
+{"type":"agent_end","at":"2026-05-28T14:30:20.000Z","phaseName":"discover","agentId":"discover-3","durationMs":6988,"usage":{"input":1300,"output":410,"cacheRead":0,"cacheWrite":0,"totalTokens":1710},"cached":false}
+{"type":"phase_end","at":"2026-05-28T14:30:20.100Z","phaseName":"discover","durationMs":7100,"agentResults":{"ok":3,"error":0,"cacheHit":0}}
+{"type":"phase_start","at":"2026-05-28T14:30:20.200Z","phaseName":"audit","agentCount":1}
+{"type":"agent_start","at":"2026-05-28T14:30:20.210Z","phaseName":"audit","agentId":"audit-1","promptHash":"deadbeef"}
+{"type":"agent_end","at":"2026-05-28T14:30:30.000Z","phaseName":"audit","agentId":"audit-1","durationMs":9790,"usage":{"input":3200,"output":1800,"cacheRead":0,"cacheWrite":0,"totalTokens":5000},"cached":false}
+{"type":"phase_end","at":"2026-05-28T14:30:30.100Z","phaseName":"audit","durationMs":9900,"agentResults":{"ok":1,"error":0,"cacheHit":0}}
+{"type":"result","at":"2026-05-28T14:30:30.200Z","truncated":false,"result":"{\"summary\":\"Audit complete: 3 issues found\",\"issues\":[{\"file\":\"auth/login.ts\",\"severity\":\"medium\"}]}"}
+{"type":"transition","at":"2026-05-28T14:30:30.300Z","from":"running","to":"done"}

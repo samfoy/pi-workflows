@@ -77,6 +77,18 @@ export function fixturesPath(arg: string, byDir?: true): string {
 }
 
 /**
+ * `<runDir>/ledger.jsonl` — append-only state event log (PRD §6.4).
+ * Slice 7 owner; consumed by slice 11 (resume) and slice 13 (TUI overlay).
+ * Mirrors `cachePath`'s overload-free shape — runId-only, callers that
+ * already know the runDir can construct via `join(runDir, "ledger.jsonl")`.
+ */
+export function ledgerPath(runId: string): string;
+export function ledgerPath(runDirAbs: string, _byDir: true): string;
+export function ledgerPath(arg: string, byDir?: true): string {
+  return byDir === true ? join(arg, "ledger.jsonl") : join(runDir(arg), "ledger.jsonl");
+}
+
+/**
  * `<runDir>/agents/` — per-agent transcripts directory (PRD §6.5).
  */
 export function agentsDir(runId: string): string;
