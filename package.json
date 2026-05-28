@@ -1,0 +1,14 @@
+{
+  "name": "@samfp/pi-workflows",
+  "version": "0.0.0",
+  "description": "Dynamic workflows for pi — JS scripts that orchestrate sub-agents",
+  "keywords": [
+    "pi-package",
+    "extensions",
+    "workflows",
+    "subagents"
+  ],
+  "private": true,
+  "license": "MIT",
+  "type": "module"
+}
