@@ -40,6 +40,24 @@ export function runDir(runId: string): string {
 }
 
 /**
+ * `<runDir>/cache.jsonl` — append-only cache file (PRD §6.3).
+ * Slice 3 owner; consumed by slice 5 (dispatcher) and slice 8a
+ * (`ctx.cache.*`).
+ */
+export function cachePath(runId: string): string {
+  return join(runDir(runId), "cache.jsonl");
+}
+
+/**
+ * Tmp file used during atomic compaction. The `CacheStore` writes a
+ * fresh snapshot here, fsync's, then renames over `cache.jsonl` —
+ * see `src/runtime/cache.ts::compact()`.
+ */
+export function cachePathTmp(runId: string): string {
+  return join(runDir(runId), "cache.jsonl.tmp");
+}
+
+/**
  * `<projectRoot>/.pi/workflows/` — the project-scoped workflow root.
  *
  * Slice 1 takes the `cwd` from `session_start` as the project root
