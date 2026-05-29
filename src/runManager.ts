@@ -58,6 +58,7 @@ import { Sandbox } from "./runtime/sandbox.js";
 import { captureError } from "./runtime/realmError.js";
 import { createRunCtxHost } from "./runtime/runCtx.js";
 import { makeSemaphore } from "./runtime/semaphore.js";
+import { PauseGate } from "./runtime/pauseGate.js";
 import { runApprovalGate } from "./runtime/approval.js";
 import { sha256 } from "./util/hash.js";
 import { newRunId } from "./util/runId.js";
@@ -76,6 +77,48 @@ export interface Run {
   cancel(reason?: unknown): void;
   /** Slice 9: how the run was approved (or `null` for `preApproved`). */
   readonly approvalDecision: ApprovalDecision | null;
+  /**
+   * Slice 12: cooperatively pause the run. New agent spawns block
+   * until {@link resumePaused} is called; in-flight agents finish
+   * naturally. Idempotent — a second `pause()` while already paused
+   * is a no-op (no second ledger entry, returns `false`).
+   *
+   * Returns `true` if state changed (was running, now paused),
+   * `false` if no-op (already paused, or run is past `running`).
+   * Awaits the ledger fsync of the `pause` entry + the `running →
+   * paused` transition before resolving.
+   *
+   * Refs: PRD §5.7, plan.md §4 Slice 12.
+   */
+  pause(reason?: string): Promise<boolean>;
+  /**
+   * Slice 12: cooperatively resume a paused run. Distinct from
+   * slice 11's `resumeRun(runId)` which loads from disk — this
+   * operates on the live in-process Run handle. Idempotent — if
+   * not paused, returns `false` and emits no ledger entry.
+   *
+   * Returns `true` if state changed (was paused, now running),
+   * `false` if no-op. Awaits the ledger fsync of the `resume`
+   * entry + the `paused → running` transition before resolving.
+   *
+   * **slice_12_concerns B1**: uses the dedicated `paused → running`
+   * edge per PRD §5.7 — NOT the `failed → running` advisory
+   * rollback edge added by slice 11.
+   */
+  resumePaused(reason?: string): Promise<boolean>;
+  /**
+   * Slice 12: cooperatively stop the run. Aborts the per-run
+   * controller (in-flight subprocesses receive SIGTERM via slice 6's
+   * dispatcher), unblocks any paused waiters, and lets the natural
+   * promise rejection drive the `stopped` terminal classification
+   * inside the existing `runManager` finally block.
+   *
+   * Distinct from {@link cancel} only in that it accepts a reason
+   * string for ledger forensics. Use `stop()` from the TUI overlay
+   * (`x` hotkey) and CLI `/workflows kill`. Both methods are
+   * idempotent if already aborted.
+   */
+  stop(reason?: string): void;
   /**
    * Slice 10: resolves AFTER `promise` settles AND the ledger has
    * been flushed. Always resolves (never rejects) with the full
@@ -390,6 +433,12 @@ export async function startWorkflowRun(
       cancel: () => undefined,
       approvalDecision,
       terminated: Promise.resolve(terminalInfo),
+      // Slice 12: pre-run-cancelled runs never enter `running`, so
+      // pause/resume/stop are pure no-ops (return false / undefined).
+      // No ledger entries; the cancelled state is already terminal.
+      pause: () => Promise.resolve(false),
+      resumePaused: () => Promise.resolve(false),
+      stop: () => undefined,
     };
   }
 
@@ -403,6 +452,23 @@ export async function startWorkflowRun(
   // `failed` (script error).
   const ctrl = new AbortController();
   let userStopRequested = false;
+
+  // Slice 12: cooperative pause gate. Construct BEFORE ctxHost so we
+  // can pass it through. RunManager owns this; the gate is exposed
+  // to author code only via the `pause`/`resumePaused`/`stop` Run
+  // handle methods (NOT through ctx) per PRD §5.7 — author scripts
+  // can't pause themselves.
+  const pauseGate = new PauseGate();
+  // Serialize pause/resume against each other so two concurrent
+  // `pause()` calls can't both decide they won the gate (the gate
+  // itself is idempotent, but the ledger-write + sm.go() pair must
+  // run atomically per call).
+  let controlChain: Promise<unknown> = Promise.resolve();
+  function withControlLock<T>(fn: () => Promise<T>): Promise<T> {
+    const next = controlChain.then(fn, fn);
+    controlChain = next.catch(() => undefined);
+    return next;
+  }
 
   // Build runCtx host bridge.
   const runMeta: RunMetaData = {
@@ -421,6 +487,7 @@ export async function startWorkflowRun(
     ledger,
     semaphore,
     signal: ctrl.signal,
+    pauseGate,
     perRunAgentCap: runOptions.perRunAgentCap,
     mockAgents: runOptions.mockAgents,
     cwd,
@@ -559,10 +626,78 @@ export async function startWorkflowRun(
     getFinishCallbackPrompt: ctxHost.getFinishCallbackPrompt,
     cancel: (reason?: unknown) => {
       userStopRequested = true;
+      // Slice 12: unblock pause-waiters before abort lands so the
+      // race in `PauseGate.waitWhilePaused` resolves cleanly via
+      // the abort branch (rejects with `reason`).
       ctrl.abort(reason);
     },
     approvalDecision,
     terminated,
+    pause: (reason?: string) =>
+      withControlLock(async () => {
+        // Don't pause a terminated/aborted run — the gate would
+        // never release because in-flight is already empty.
+        if (sm.state !== "running" || ctrl.signal.aborted) {
+          return false;
+        }
+        const changed = pauseGate.pause();
+        if (!changed) return false;
+        const at = (opts.nowIso ?? (() => new Date().toISOString()))();
+        // Order: ledger `pause` entry first (so a TUI tail observes
+        // the pause before the transition), then `running → paused`
+        // transition. Both writes go through the same writeQueue so
+        // ordering is preserved across fsyncs.
+        await ledger.append(
+          reason !== undefined
+            ? { type: "pause", at, reason }
+            : { type: "pause", at },
+        );
+        try {
+          await sm.go("paused");
+        } catch {
+          // Race: state changed between the gate check and the
+          // transition (e.g. abort fired). Roll back the gate so a
+          // future resume() doesn't enter an inconsistent state.
+          pauseGate.resume();
+          return false;
+        }
+        return true;
+      }),
+    resumePaused: (reason?: string) =>
+      withControlLock(async () => {
+        if (sm.state !== "paused") return false;
+        const changed = pauseGate.resume();
+        if (!changed) return false;
+        const at = (opts.nowIso ?? (() => new Date().toISOString()))();
+        await ledger.append(
+          reason !== undefined
+            ? { type: "resume", at, reason }
+            : { type: "resume", at },
+        );
+        // slice_12_concerns B1: this is the dedicated `paused →
+        // running` edge per PRD §5.7. Slice 11's `failed → running`
+        // advisory rollback is reachable ONLY from `failed` state
+        // — since pause never enters `failed`, this transition can't
+        // accidentally route through that path.
+        try {
+          await sm.go("running");
+        } catch {
+          // Race: state already advanced. Re-engaging the gate would
+          // be wrong (state might be `stopped`/`failed`). Leave
+          // gate released and absorb — caller sees `false`.
+          return false;
+        }
+        return true;
+      }),
+    stop: (reason?: string) => {
+      userStopRequested = true;
+      // Unblock pause-waiters; abort wins per plan §4 Slice 12 risk.
+      // The abort propagates through phaseCtrl to running
+      // dispatcher subprocesses (SIGTERM via slice 6).
+      ctrl.abort(
+        reason !== undefined ? new Error(`stopped: ${reason}`) : undefined,
+      );
+    },
   };
 }
 

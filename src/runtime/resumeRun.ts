@@ -59,6 +59,7 @@ import {
 import { Sandbox } from "./sandbox.js";
 import { captureError } from "./realmError.js";
 import { createRunCtxHost } from "./runCtx.js";
+import { PauseGate } from "./pauseGate.js";
 import { makeSemaphore } from "./semaphore.js";
 import { runApprovalGate } from "./approval.js";
 import { acquireResumeLock, ResumeLockedError } from "./runLock.js";
@@ -421,6 +422,17 @@ export async function resumeRun(
     const ctrl = new AbortController();
     let userStopRequested = false;
 
+    // Slice 12: resumed runs also get pause/stop primitives so the
+    // TUI overlay can pause a previously-resumed run identically to
+    // a fresh one.
+    const pauseGate = new PauseGate();
+    let controlChain: Promise<unknown> = Promise.resolve();
+    function withControlLock<T>(fn: () => Promise<T>): Promise<T> {
+      const next = controlChain.then(fn, fn);
+      controlChain = next.catch(() => undefined);
+      return next;
+    }
+
     const runMeta: RunMetaData = {
       id: runId,
       workflowName: workflow.name,
@@ -437,6 +449,7 @@ export async function resumeRun(
       ledger,
       semaphore,
       signal: ctrl.signal,
+      pauseGate,
       perRunAgentCap: runOptions.perRunAgentCap,
       mockAgents: runOptions.mockAgents,
       cwd,
@@ -576,6 +589,50 @@ export async function resumeRun(
       },
       approvalDecision: null,
       terminated,
+      pause: (reason?: string) =>
+        withControlLock(async () => {
+          if (sm.state !== "running" || ctrl.signal.aborted) return false;
+          if (!pauseGate.pause()) return false;
+          const at = (opts.nowIso ?? (() => new Date().toISOString()))();
+          await ledger.append(
+            reason !== undefined
+              ? { type: "pause", at, reason }
+              : { type: "pause", at },
+          );
+          try {
+            await sm.go("paused");
+          } catch {
+            pauseGate.resume();
+            return false;
+          }
+          return true;
+        }),
+      resumePaused: (reason?: string) =>
+        withControlLock(async () => {
+          if (sm.state !== "paused") return false;
+          if (!pauseGate.resume()) return false;
+          const at = (opts.nowIso ?? (() => new Date().toISOString()))();
+          await ledger.append(
+            reason !== undefined
+              ? { type: "resume", at, reason }
+              : { type: "resume", at },
+          );
+          // slice_12_concerns B1: dedicated paused→running edge.
+          try {
+            await sm.go("running");
+          } catch {
+            return false;
+          }
+          return true;
+        }),
+      stop: (reason?: string) => {
+        userStopRequested = true;
+        ctrl.abort(
+          reason !== undefined
+            ? new Error(`stopped: ${reason}`)
+            : undefined,
+        );
+      },
     };
   } catch (err) {
     // Release the lock if we never made it to the run.

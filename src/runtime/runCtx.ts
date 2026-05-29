@@ -47,6 +47,7 @@ import { CacheStore } from "./cache.js";
 import { LedgerWriter, log as ledgerLog } from "./ledger.js";
 import { agentErrorFromException } from "./ledger.js";
 import { dispatchAgent } from "./dispatcher.js";
+import type { PauseGate } from "./pauseGate.js";
 import { captureError } from "./realmError.js";
 import { cacheKey } from "../util/hash.js";
 import { sha256 } from "../util/hash.js";
@@ -66,6 +67,14 @@ export interface RunCtxHostOptions {
   readonly semaphore: Semaphore;
   /** Per-run abort signal — propagates to all agent dispatches. */
   readonly signal: AbortSignal;
+  /**
+   * Slice 12: cooperative pause gate. When paused, `runOneAgent`
+   * blocks BEFORE acquiring a semaphore slot so paused runs hold
+   * no shared resources. Optional — when absent, behaves as a
+   * never-paused gate (back-compat for tests constructed before
+   * slice 12).
+   */
+  readonly pauseGate?: PauseGate;
   /** PRD §1.2 pin 6: hard cap on agent dispatches per run. */
   readonly perRunAgentCap: number;
   /** `--mock-agents` mode flag. */
@@ -360,8 +369,29 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       return tagged;
     }
 
-    // Cache miss: bound the spawn under the run semaphore.
-    const token = await opts.semaphore.acquire(phaseCtrl.signal);
+    // Cache miss: spawn a real agent. Slice 12 — the pause gate must
+    // be honored both BEFORE acquiring a slot (so a paused run holds
+    // no shared resources) AND AFTER acquiring (because semaphore
+    // grants triggered by a previous in-flight release would
+    // otherwise unblock waiters that pre-dated the pause).
+    //
+    // Loop discipline: check gate → acquire → if paused, release back
+    // and loop. Bounded by `cap * pauseCount` iterations (each pause
+    // burst can only thrash `cap` slots once).
+    let token: { release(): void };
+    // eslint-disable-next-line no-constant-condition
+    while (true) {
+      if (opts.pauseGate !== undefined) {
+        await opts.pauseGate.waitWhilePaused(phaseCtrl.signal);
+      }
+      token = await opts.semaphore.acquire(phaseCtrl.signal);
+      if (opts.pauseGate === undefined || !opts.pauseGate.paused) break;
+      // Race: pause() ran between the gate-check and the acquire-grant
+      // (or this waiter was woken by a release while the gate was
+      // already engaged). Drop the slot and re-wait so other runs
+      // sharing the cap aren't starved.
+      token.release();
+    }
     try {
       const result = await dispatch({
         runDir: opts.runDirAbs,

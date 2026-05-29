@@ -839,8 +839,8 @@ export type LedgerEntry =
       readonly level: "info" | "warn" | "error";
       readonly message: string;
     }
-  | { readonly type: "pause"; readonly at: string }
-  | { readonly type: "resume"; readonly at: string }
+  | { readonly type: "pause"; readonly at: string; readonly reason?: string }
+  | { readonly type: "resume"; readonly at: string; readonly reason?: string }
   | { readonly type: "shutdown"; readonly at: string; readonly graceful: boolean }
   | {
       readonly type: "result";
