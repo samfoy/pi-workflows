@@ -468,8 +468,8 @@ export async function main(_ctx: any) { return "ok"; }`;
   rmSync(dirE, { recursive: true, force: true });
 });
 
-test("runNow:false — startRun NOT called even when startRun is wired", async () => {
-  const dirF = mkdtempSync(join(tmpdir(), "wf-runnow-false-"));
+test("always runs when startRun is wired — no opt-out param", async () => {
+  const dirF = mkdtempSync(join(tmpdir(), "wf-always-run-"));
   const piF = {
     registerTool: (def: any) => { (piF as any).__tool = def; },
     appendEntry: () => {},
@@ -483,9 +483,10 @@ test("runNow:false — startRun NOT called even when startRun is wired", async (
   const CONF_NO_SCRIPT = `export const meta = { name: "confirm-no-wf", description: "d", version: "1.0.0" };
 export async function main(_ctx: any) { return "ok"; }`;
 
-  const result = await (piF as any).__tool.execute("td5", { name: "confirm-no-wf", script: CONF_NO_SCRIPT, runNow: false }, {});
+  // runNow is no longer in the schema; passing it is ignored. Tool always runs.
+  const result = await (piF as any).__tool.execute("td5", { name: "confirm-no-wf", script: CONF_NO_SCRIPT }, {});
 
-  assert.ok(!startRunCalledF, "startRun should NOT be called when runNow:false");
-  assert.ok(!result.details.runStarted, "runStarted should be false");
+  assert.ok(startRunCalledF, "startRun SHOULD always be called when startRun is wired");
+  assert.ok(result.details.runStarted, "runStarted should be true");
   rmSync(dirF, { recursive: true, force: true });
 });

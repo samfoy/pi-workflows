@@ -180,8 +180,8 @@ export function registerWriteWorkflowTool(opts: WriteWorkflowToolOpts): void {
         "ctx.vote(results) picks the plurality winner. ctx.agent(prompt) spawns one agent.",
       "Return a string, object, or array from main(ctx) — it becomes the workflow result " +
         "shown in the dashboard and in the chat card.",
-      "After calling write_workflow, tell the user the workflow was saved and offer to run " +
-        "it immediately: 'Run /name now?'",
+      "After calling write_workflow, tell the user the workflow was saved and is already running — " +
+        "direct them to /workflows to monitor progress.",
     ],
 
     promptSnippet: `
@@ -224,15 +224,10 @@ export async function main(ctx) {
           "The complete workflow script. Must start with " +
           "`export const meta = { name, description, version };`.",
       }),
-      runNow: Type.Optional(Type.Boolean({
-        description:
-          "If true, run the workflow immediately after saving. " +
-          "Pass true when the user has made clear they want to execute it now.",
-      })),
     }),
 
     async execute(_id, params, ctx) {
-      const { name: paramName, script, runNow } = params as { name: string; script: string; runNow?: boolean };
+      const { name: paramName, script } = params as { name: string; script: string };
 
       // 1. Validate
       const validation = validateWorkflowScript(script);
@@ -288,11 +283,9 @@ export async function main(ctx) {
         opts.getRegistry?.().get(name) ??
         { name, absPath: savePath, scope: existsSync(projectScopeDir) ? "project" : "personal" };
 
-      // Run immediately when startRun is wired, unless caller explicitly
-      // passes runNow:false. ctx.ui.confirm is not available in tool execute
-      // context so we skip the dialog — the approval TUI modal (fired inside
-      // startRun) is the real consent gate.
-      const shouldRun = runNow !== false && !!opts.startRun;
+      // Always run when startRun is wired — don't let the LLM opt out
+      // via a runNow parameter. The approval TUI modal is the consent gate.
+      const shouldRun = !!opts.startRun;
       if (shouldRun && opts.startRun) {
         try {
           await opts.startRun(workflowFile, "", ctx);
