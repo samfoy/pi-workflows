@@ -54,6 +54,8 @@ import {
 } from "../runtime/resumeRun.js";
 import { runGc } from "../runtime/gc.js";
 import { LedgerReader } from "../runtime/ledger.js";
+import { getActiveRuns } from "../runtime/activeRuns.js";
+import { mountOverlay, runKill } from "../runtime/overlay.js";
 import { runDir as runDirFor, runsHome } from "../util/paths.js";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -134,6 +136,10 @@ export function registerWorkflowCommands(
           const run = await startWorkflowRun(file, args, {
             approval,
             emitBanner,
+            // Slice 13/F3: register the live Run handle into the
+            // per-process active-runs registry so the overlay's hotkey
+            // wiring (`p`/`x`/`r`) and `/workflows kill` find it.
+            activeRuns: getActiveRuns(),
           });
           // Slice 10: active-runs index entry on start (PRD §6.6).
           if (typeof pi.appendEntry === "function") {
@@ -285,7 +291,27 @@ export function registerWorkflowsCommand(
 
       const trimmed = args.trim();
       if (trimmed.length === 0) {
-        // Default: list discovered workflows.
+        // Slice 13: `/workflows` no-arg opens the TUI overlay (PRD
+        // §10.1). When stdout isn't a TTY (`pi -p` / SDK) the overlay
+        // falls back to printing the runs list to chat per PRD
+        // §10.9. Either way, we ALSO surface a workflow-discovery
+        // listing so scripts that grep for it keep working.
+        const result = await mountOverlay({ pi, ctx });
+        if (result.mode === "already-open") {
+          ctx.ui.notify("workflows overlay already open", "info");
+          return;
+        }
+        if (result.mode === "tui") {
+          ctx.ui.notify(
+            registry.size === 0
+              ? "no workflows discovered"
+              : `${registry.size} workflow(s) discovered`,
+            "info",
+          );
+          return;
+        }
+        // Non-TTY / no-custom-api fallback: also send the workflow
+        // listing for parity with slice-1 behavior.
         const body = formatRegistryListing(registry);
         pi.sendMessage(
           {
@@ -294,8 +320,8 @@ export function registerWorkflowsCommand(
             display: true,
             details: {
               workflowCount: registry.size,
-              slice: 11,
-              note: "TUI overlay lands in slice 13; sub-commands: list, show, resume, gc, kill",
+              slice: 13,
+              overlayMode: result.mode,
             },
           },
           { triggerTurn: false, deliverAs: "nextTurn" },
@@ -565,6 +591,7 @@ async function handleResume(
     const run = await resumeRun(runId, {
       useLatest,
       preApproved: true, // slice 11: TODO wire approval through pi.ui.confirm in slice 13
+      activeRuns: getActiveRuns(),
       onLatestWarning: (w) =>
         pi.sendMessage(
           {
@@ -763,31 +790,33 @@ function handleKill(
         customType: STUB_CUSTOM_TYPE,
         content: "/workflows kill <runId> — missing runId argument",
         display: true,
-        details: { subcommand: "kill", slice: 11 },
+        details: { subcommand: "kill", slice: 13 },
       },
       { triggerTurn: false, deliverAs: "nextTurn" },
     );
     return;
   }
-  // Slice 11 stub: emit a kill request via appendEntry. Slice 13's
-  // active-runs registry will subscribe to this and abort the matching
-  // in-process Run handle.
-  if (typeof pi.appendEntry === "function") {
-    try {
-      pi.appendEntry("pi-workflows.run.kill-requested", { runId });
-    } catch {
-      /* swallow */
-    }
-  }
+  // Slice 13/F2: route through the active-runs registry. `runKill`
+  // emits the appendEntry (cross-process awareness) AND calls
+  // `Run.stop("user-kill")` on the live in-process handle if we hold
+  // one. Idempotent at every layer.
+  const registry = getActiveRuns();
+  const result = runKill(pi, registry, runId, "user-kill");
   pi.sendMessage(
     {
       customType: STUB_CUSTOM_TYPE,
-      content:
-        `kill request emitted for runId=${runId}.\n` +
-        "Note: in-process kill wiring lands with the slice-13 active-runs registry. " +
-        "For now, the request is recorded via pi.appendEntry.",
+      content: result.found
+        ? `kill signal sent to runId=${runId} (in-process Run handle aborted).`
+        : `kill request emitted for runId=${runId}.\n` +
+          `Note: no in-process Run handle is registered (run was started in a different pi window or has already terminated). The request is recorded via pi.appendEntry.`,
       display: true,
-      details: { subcommand: "kill", runId, slice: 11 },
+      details: {
+        subcommand: "kill",
+        runId,
+        found: result.found,
+        emittedEntry: result.emittedEntry,
+        slice: 13,
+      },
     },
     { triggerTurn: false, deliverAs: "nextTurn" },
   );

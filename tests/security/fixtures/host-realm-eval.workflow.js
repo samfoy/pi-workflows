@@ -61,6 +61,15 @@ probe("ctx-phase",     () => ctx.phase.constructor);
 probe("ctx-cache-get", () => ctx.cache.get.constructor);
 probe("ctx-log",       () => ctx.log.constructor);
 
+// Slice 13/Sec9: ctx.finishCallback is wired via the same
+// `wrapHostSync(__runCtxHost.finishCallback)` mechanism at
+// sandbox.ts:1238. By construction it carries the same wrapper-identity
+// invariant as ctx.agent/ctx.phase, but the regression matrix had a
+// hole — if a future patch ever stops wrapping finishCallback (or
+// substitutes a host reference), .constructor walks back to host
+// Function. Probe + identity row close that gap.
+probe("ctx-finishCallback", () => ctx.finishCallback.constructor);
+
 // Slice 8b: stdlib helpers — same wrapper-identity / host-realm-eval
 // invariants as the slice 8a ctx.* surface. The helpers are pure
 // Context-realm closures (no host bridge), so .constructor must
@@ -88,6 +97,9 @@ tests["wrapper-identity-ctx"] = {
   cacheHasCtorIsContextFn: ctx.cache.has.constructor === Function,
   cacheDelCtorIsContextFn: ctx.cache.delete.constructor === Function,
   logCtorIsContextFn:      ctx.log.constructor === Function,
+  // Slice 13/Sec9 oracle. If wrapHostSync is ever removed from the
+  // finishCallback installation in sandbox.ts, this flips false.
+  finishCallbackCtorIsContextFn: ctx.finishCallback.constructor === Function,
 };
 
 // Slice 8b: stdlib helpers wrapper-identity oracle. If a future patch

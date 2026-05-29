@@ -161,6 +161,12 @@ export interface ResumeOptions {
    * slash-command handler usually wires it.
    */
   readonly pi?: ExtensionAPI;
+  /**
+   * Slice 13/F3: same registry hookup as `startWorkflowRun`. When
+   * supplied, the resumed `Run` handle is registered for hotkey/
+   * `/workflows kill` discovery.
+   */
+  readonly activeRuns?: import("./activeRuns.js").ActiveRunsRegistry;
 }
 
 interface ResumeManifest extends Partial<RunManifest> {
@@ -577,7 +583,7 @@ export async function resumeRun(
       return result;
     })();
 
-    return {
+    const run: Run = {
       runId,
       runDirAbs,
       promise,
@@ -634,6 +640,24 @@ export async function resumeRun(
         );
       },
     };
+
+    // Slice 13/F3: register the resumed run in the active-runs
+    // registry just like a fresh run. The overlay's hotkeys then
+    // route through the same Run.pause/stop primitives whether the
+    // run was started this session or resumed from disk.
+    if (opts.activeRuns !== undefined) {
+      opts.activeRuns.register(runId, run, {
+        workflowName: workflow.name,
+        state:
+          initialState === "approved" || initialState === "pending"
+            ? "running"
+            : initialState,
+        startedAt,
+        runDir: runDirAbs,
+      });
+    }
+
+    return run;
   } catch (err) {
     // Release the lock if we never made it to the run.
     try {

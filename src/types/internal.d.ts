@@ -116,11 +116,58 @@ export interface ExtensionContextLike {
   readonly cwd: string;
   readonly ui: {
     notify(message: string, type?: "info" | "warning" | "error"): void;
+    /**
+     * Slice 13 — `ctx.ui.custom` mounts a TUI overlay component. Optional
+     * because older pi builds don't expose it; the slice-13 overlay
+     * gracefully falls back to a sendMessage card when undefined (PRD
+     * §10.9 non-TTY behavior). The signature mirrors the upstream
+     * `@earendil-works/pi-coding-agent` ExtensionUIContext.custom
+     * narrowed to the bits this package consumes.
+     */
+    custom?<T = void>(
+      factory: (
+        tui: TuiInstanceLike,
+        theme: TuiThemeLike,
+        kb: TuiKeybindingsLike,
+        done: (result: T) => void,
+      ) => TuiComponentLike | Promise<TuiComponentLike>,
+      options?: { overlay?: boolean },
+    ): Promise<T>;
+    /** Slice 13 — pi-coding-agent's `ctx.ui.confirm` (used by approval). */
+    confirm?(message: string): Promise<boolean>;
   };
 }
 
 /** Subset of `ExtensionCommandContext` needed by the slice-1 stub handler. */
 export interface ExtensionCommandContextLike extends ExtensionContextLike {}
+
+// ───────────────────────────────────────────────────────────────────────
+//  Slice 13 — pi-tui surface narrowed to the bits the overlay consumes.
+// ───────────────────────────────────────────────────────────────────────
+
+/** Mirror of `pi-tui`'s `Component`. Render returns lines; handleInput
+ * receives raw key data; invalidate clears caches. */
+export interface TuiComponentLike {
+  render(width: number): string[];
+  handleInput?(data: string): void;
+  invalidate(): void;
+  /** Optional cleanup hook called by pi-tui on overlay tear-down. */
+  dispose?(): void;
+}
+
+/** Narrow surface — only the methods slice 13 calls. */
+export interface TuiInstanceLike {
+  /** Request a redraw on the next animation frame. Optional because
+   * test fakes don't always need to schedule. */
+  requestRender?(): void;
+}
+
+/** Theme handle — opaque to slice 13; ANSI/colors are theme-agnostic. */
+export type TuiThemeLike = Readonly<Record<string, unknown>>;
+
+/** Keybindings manager handle — opaque to slice 13 (we don't register
+ * global keybindings; the overlay component owns its own input loop). */
+export type TuiKeybindingsLike = Readonly<Record<string, unknown>>;
 
 // ───────────────────────────────────────────────────────────────────────
 // RunManifest — published by slice 1 as a stub. Slice 6 fills the

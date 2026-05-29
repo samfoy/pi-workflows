@@ -30,6 +30,7 @@ import {
   registerWorkflowsCommand,
 } from "./commands/workflowCmd.js";
 import { sweepCrashedRuns } from "./runtime/crashSweep.js";
+import { bindRegistryToFeed } from "./runtime/overlay.js";
 import type {
   ExtensionAPI,
   ExtensionContextLike,
@@ -59,6 +60,13 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     );
     return;
   }
+
+  // Slice 13/F3+S8: bind the active-runs registry to pi.appendEntry
+  // so cross-process awareness lands without ledger.jsonl file
+  // watching. Wraps `pi.appendEntry` so emissions also drive the
+  // registry. Best-effort; older pi builds without `appendEntry` are
+  // tolerated (the wrap returns a no-op disposer).
+  bindRegistryToFeed(pi);
 
   // PRD §13.7: in a recursive (sub-agent child) load, we still register
   // `/workflows` so its handler can return the documented error

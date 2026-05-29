@@ -80,6 +80,9 @@ test("slice 8a: host-realm-eval fixture passes with real runCtxHost", async () =
     "ctx-phase",
     "ctx-cache-get",
     "ctx-log",
+    // Slice 13/Sec9: finishCallback is wrapped via the same
+    // wrapHostSync at sandbox.ts:1238 — closes the regression hole.
+    "ctx-finishCallback",
     // Slice 8b: stdlib helpers.
     "ctx-vote",
     "ctx-consensus",
@@ -109,6 +112,14 @@ test("slice 8a: host-realm-eval fixture passes with real runCtxHost", async () =
   assert.equal(ctxIdent.cacheHasCtorIsContextFn, true);
   assert.equal(ctxIdent.cacheDelCtorIsContextFn, true);
   assert.equal(ctxIdent.logCtorIsContextFn, true);
+  // Slice 13/Sec9 — finishCallback wrapper-identity oracle. If
+  // sandbox.ts:1238 ever drops the `wrapHostSync` wrap, .constructor
+  // walks back to host Function and this row flips to false.
+  assert.equal(
+    ctxIdent.finishCallbackCtorIsContextFn,
+    true,
+    "slice 13/Sec9: ctx.finishCallback.constructor must equal Context Function",
+  );
 
   // Slice 8b: stdlib wrapper-identity oracle. Pure Context-realm
   // closures — if a future patch removes them or routes them through

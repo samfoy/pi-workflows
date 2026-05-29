@@ -34,6 +34,10 @@
  * read this; the helper just notes the contract.
  */
 
+import type {
+  ExtensionContextLike,
+} from "../../src/types/internal.js";
+
 export interface FakeRegisteredCommand {
   readonly name: string;
   readonly description?: string;
@@ -66,6 +70,11 @@ export interface FakeContext {
   readonly cwd: string;
   readonly ui: {
     notify(message: string, type?: "info" | "warning" | "error"): void;
+    /** Slice 13 — fakePi's `ctx.ui.custom` mock. The harness records
+     * the factory; tests can drive the overlay via `fakePi.overlayMounts[i].component.handleInput(key)`.
+     * Returns a never-resolving Promise (the real overlay is closed by
+     * `done()`); the harness exposes `mount.done()` to fire it. */
+    custom?: FakeCustomFn;
   };
 }
 
@@ -73,6 +82,20 @@ export interface FakeCommandContext extends FakeContext {
   /** Slice 1 doesn't need session control; placeholder for slice 11+. */
   readonly waitForIdle?: () => Promise<void>;
 }
+
+export interface FakeOverlayMount {
+  readonly component: {
+    render(width: number): string[];
+    handleInput?(data: string): void;
+    invalidate(): void;
+    dispose?(): void;
+  };
+  readonly overlay: boolean;
+  done(result?: unknown): void;
+  closed: boolean;
+}
+
+export type FakeCustomFn = NonNullable<ExtensionContextLike["ui"]["custom"]>;
 
 export interface FakePi {
   // ── ExtensionAPI surface ──────────────────────────────────────
@@ -92,6 +115,10 @@ export interface FakePi {
   readonly notifications: ReadonlyArray<FakeNotification>;
   readonly entries: ReadonlyArray<FakeAppendEntry>;
   readonly userMessages: ReadonlyArray<FakeUserMessage>;
+  /** Slice 13 — every overlay factory the extension mounted via
+   * `ctx.ui.custom`. Tests assert on length to verify mount/no-mount
+   * and call `mount.component.handleInput(key)` to drive hotkeys. */
+  readonly overlayMounts: ReadonlyArray<FakeOverlayMount>;
 
   // ── Drivers ───────────────────────────────────────────────────
   /** Fires every `session_start` handler in registration order. */
@@ -116,6 +143,37 @@ export function makeFakePi(_opts: MakeFakePiOpts = {}): FakePi {
   const notifications: FakeNotification[] = [];
   const entries: FakeAppendEntry[] = [];
   const userMessages: FakeUserMessage[] = [];
+  const overlayMounts: FakeOverlayMount[] = [];
+  /**
+   * Slice 13 — fake `ctx.ui.custom`. Captures the factory; awaiting
+   * the returned Promise blocks until `done()` fires (mirrors real
+   * pi-tui's contract).
+   */
+  const fakeCustom: FakeCustomFn = async (factory, options = {}) => {
+    let resolveFn: (v: unknown) => void;
+    const p = new Promise<unknown>((r) => {
+      resolveFn = r;
+    });
+    let mountRecord!: FakeOverlayMount;
+    const result = factory(
+      {} as never,
+      {} as never,
+      {} as never,
+      ((v: unknown) => {
+        if (mountRecord) mountRecord.closed = true;
+        resolveFn(v);
+      }) as never,
+    );
+    const component = (await Promise.resolve(result)) as FakeOverlayMount["component"];
+    mountRecord = {
+      component,
+      overlay: options.overlay === true,
+      done: ((v?: unknown) => resolveFn(v)) as (r?: unknown) => void,
+      closed: false,
+    };
+    overlayMounts.push(mountRecord);
+    return p as never;
+  };
 
   const makeCtx = (cwd: string): FakeCommandContext => ({
     cwd,
@@ -123,6 +181,7 @@ export function makeFakePi(_opts: MakeFakePiOpts = {}): FakePi {
       notify(message, type = "info") {
         notifications.push({ message, type });
       },
+      custom: fakeCustom,
     },
   });
 
@@ -154,6 +213,7 @@ export function makeFakePi(_opts: MakeFakePiOpts = {}): FakePi {
     notifications,
     entries,
     userMessages,
+    overlayMounts,
 
     async fireSessionStart(cwd) {
       const list = handlers.get("session_start") ?? [];
@@ -180,6 +240,7 @@ export function makeFakePi(_opts: MakeFakePiOpts = {}): FakePi {
       notifications.length = 0;
       entries.length = 0;
       userMessages.length = 0;
+      overlayMounts.length = 0;
     },
   };
   return pi;

@@ -233,6 +233,14 @@ export interface RunManagerStartOptions {
    * an `author_cache` entry + assert it survives. Tests only.
    */
   readonly preWriteCacheJsonl?: string;
+  /**
+   * Slice 13: register the live `Run` handle into the per-process
+   * active-runs registry so the TUI overlay's `p`/`x`/`r` hotkeys and
+   * `/workflows kill <id>` can call `pause()`/`stop()` on it. When
+   * undefined, runs aren't tracked (slice-8a tests that never want
+   * registry side-effects pass `undefined` here).
+   */
+  readonly activeRuns?: import("./runtime/activeRuns.js").ActiveRunsRegistry;
   /** Slice 8a doesn't flush approval dialogs; this is purely for tests. */
   readonly trustedAtStart?: boolean;
 }
@@ -618,7 +626,7 @@ export async function startWorkflowRun(
     return result;
   })();
 
-  return {
+  const run: Run = {
     runId,
     runDirAbs,
     promise,
@@ -699,6 +707,27 @@ export async function startWorkflowRun(
       );
     },
   };
+
+  // Slice 13/F3: register the run handle into the per-process active
+  // runs registry so the TUI overlay's hotkeys and `/workflows kill`
+  // can find it. Idempotent — re-registration replaces the prior
+  // handle (e.g. on resume). The registry's auto-cleanup hook drops
+  // the live handle on `run.terminated`.
+  const activeRunsRegistry = opts.activeRuns;
+  if (activeRunsRegistry !== undefined) {
+    const summaryPatch: Parameters<typeof activeRunsRegistry.register>[2] = {
+      workflowName: workflow.name,
+      state: "running",
+      startedAt,
+      runDir: runDirAbs,
+      ...(approvalDecision !== null && approvalDecision.reason !== undefined
+        ? { approvalReason: approvalDecision.reason }
+        : {}),
+    };
+    activeRunsRegistry.register(runId, run, summaryPatch);
+  }
+
+  return run;
 }
 
 /**

@@ -115,7 +115,12 @@ test("/workflows kill <runId>: emits kill-requested appendEntry + card", async (
     (e) => e.customType === "pi-workflows.run.kill-requested",
   );
   assert.ok(killEntry, "expected pi-workflows.run.kill-requested entry");
-  assert.deepEqual(killEntry?.data, { runId: "wf-killtarget01" });
+  assert.equal(killEntry?.data && (killEntry.data as { runId?: string }).runId, "wf-killtarget01");
+  assert.equal(
+    killEntry?.data && (killEntry.data as { reason?: string }).reason,
+    "user-kill",
+    "slice 13: kill entry now carries a reason field",
+  );
   const lastMsg = pi.messages[pi.messages.length - 1];
   assert.match(lastMsg!.content, /kill request emitted/);
 });
