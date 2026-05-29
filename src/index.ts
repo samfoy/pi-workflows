@@ -91,21 +91,16 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     getCwd: () => sessionCwd,
     getRegistry: () => _registry ?? new Map(),
     startRun: async (workflow, input, ctx) => {
-      // Mirror the slash-command handler's approval gate setup.
-      const toolCtx = ctx as { ui?: { confirm?: (msg: string) => Promise<boolean> } };
-      const ctxConfirm = toolCtx?.ui?.confirm;
-      const approval = typeof ctxConfirm === "function"
-        ? {
-            dialog: makeConfirmDialog({ confirm: (msg) => ctxConfirm(msg) }),
-            viewer: () => undefined as void,
-          }
-        : {
-            dialog: async () => "no" as const,
-            viewer: () => undefined as void,
-          };
+      // When invoked from the write_workflow tool, the user already
+      // confirmed via ctx.ui.confirm inside the tool execute(). We
+      // pass bypassApproval=true so the run doesn't hit a second
+      // (silent-deny) approval gate here.
+      //
+      // If startRun is ever called without prior user confirmation,
+      // wire a real approval dialog here instead of bypassApproval.
       await startWorkflowRun(workflow, input, {
         cwd: sessionCwd,
-        approval,
+        preApproved: true,
         activeRuns: getActiveRuns(),
       });
     },
