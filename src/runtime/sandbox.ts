@@ -627,7 +627,12 @@ export class Sandbox {
         : JSON.stringify(this.opts.input ?? null);
     const bindScript = [
       `globalThis.input = ${inputJson};`,
-      `globalThis.ctx = globalThis.__pi_build_ctx(${runMetaJson}, globalThis.input);`,
+      // Slice 9: build a Context-realm signal pair, capture the abort
+      // thunk back into the host realm, then forward host signal aborts
+      // through it. The thunk is captured BEFORE we delete the global
+      // so user code can never reach it.
+      `globalThis.__pi_signal_pair__ = globalThis.__pi_make_signal();`,
+      `globalThis.ctx = globalThis.__pi_build_ctx(${runMetaJson}, globalThis.input, globalThis.__pi_signal_pair__.signal);`,
     ].join("\n");
     try {
       vm.runInContext(bindScript, this.context, {
@@ -639,6 +644,45 @@ export class Sandbox {
         "ctx bind failed: " + (e as Error).message,
         e,
       );
+    }
+
+    // Capture the Context-realm abort thunk + delete the smuggle slot.
+    let signalAbortThunk: ((reason?: unknown) => void) | null = null;
+    try {
+      signalAbortThunk = vm.runInContext(
+        `(function(){ var p = globalThis.__pi_signal_pair__; delete globalThis.__pi_signal_pair__; return p && p.abort; })()`,
+        this.context,
+        { filename: "pi-workflows-signal-bind.js" },
+      ) as (reason?: unknown) => void;
+    } catch (e) {
+      throw violation(
+        "init-script-failed",
+        "ctx.signal bind failed: " + (e as Error).message,
+        e,
+      );
+    }
+
+    // Wire host signal → Context signal.
+    const hostSignal = this.opts.signal;
+    const fireCtxAbort = (): void => {
+      if (!signalAbortThunk) return;
+      const r = hostSignal.reason;
+      const msg =
+        r && typeof r === "object" && typeof (r as { message?: unknown }).message === "string"
+          ? (r as { message: string }).message
+          : r === undefined || r === null
+            ? "aborted"
+            : String(r);
+      try {
+        signalAbortThunk(msg);
+      } catch {
+        /* swallow — Context closures shouldn't throw out */
+      }
+    };
+    if (hostSignal.aborted) {
+      fireCtxAbort();
+    } else {
+      hostSignal.addEventListener("abort", fireCtxAbort, { once: true });
     }
 
     // Compile + run.
@@ -1103,7 +1147,56 @@ function buildInitScript(nonce: string): string {
     "const __pi_stdlib = globalThis.__pi_install_stdlib;",
     "delete globalThis.__pi_install_stdlib;",
     "",
-    "globalThis.__pi_build_ctx = function (runMeta, input) {",
+    // Slice 9 — Context-realm AbortSignal factory used by `__pi_build_ctx`.
+    // Each runScript() call mints a fresh signal pair (signal + abort).
+    // The host captures the abort thunk after bind to wire the host
+    // signal to it. The signal object's methods are pure Context-realm
+    // closures — their .constructor === Context Function (PRD §8.3.4).
+    "globalThis.__pi_make_signal = function () {",
+    "  const listeners = [];",
+    "  let aborted = false;",
+    "  let reason = undefined;",
+    "  const signal = {",
+    "    get aborted() { return aborted; },",
+    "    get reason() { return reason; },",
+    "    addEventListener: function (name, fn, _opts) {",
+    "      if (name !== 'abort' || typeof fn !== 'function') return;",
+    "      for (let i = 0; i < listeners.length; i++) {",
+    "        if (listeners[i] === fn) return;",
+    "      }",
+    "      listeners.push(fn);",
+    "    },",
+    "    removeEventListener: function (name, fn) {",
+    "      if (name !== 'abort') return;",
+    "      const idx = listeners.indexOf(fn);",
+    "      if (idx >= 0) listeners.splice(idx, 1);",
+    "    },",
+    "    dispatchEvent: function () { return true; },",
+    "  };",
+    "  function abort(rawReason) {",
+    "    if (aborted) return;",
+    "    aborted = true;",
+    "    let msg;",
+    "    if (rawReason && typeof rawReason === 'object' && typeof rawReason.message === 'string') {",
+    "      msg = rawReason.message;",
+    "    } else if (rawReason === undefined || rawReason === null) {",
+    "      msg = 'aborted';",
+    "    } else {",
+    "      msg = String(rawReason);",
+    "    }",
+    "    const err = new Error(msg);",
+    "    Object.defineProperty(err, 'name', { value: 'AbortError', configurable: true, writable: true, enumerable: false });",
+    "    reason = err;",
+    "    const snapshot = listeners.slice();",
+    "    listeners.length = 0;",
+    "    for (let i = 0; i < snapshot.length; i++) {",
+    "      try { snapshot[i].call(undefined, { type: 'abort', target: signal }); } catch (_) {}",
+    "    }",
+    "  }",
+    "  return { signal: signal, abort: abort };",
+    "};",
+    "",
+    "globalThis.__pi_build_ctx = function (runMeta, input, signal) {",
     "  // ctxRef is the late-bound back-reference the stdlib helpers close",
     "  // over. Populated AFTER ctx is built so vote/parallel/etc. can call",
     "  // ctx.phase without a circular-construction dance. Per-call ref",
@@ -1128,7 +1221,7 @@ function buildInitScript(nonce: string): string {
     "      finishCallback: function () { throw new Error('ctx.finishCallback: no runtime (slice-2 stub)'); },",
     "      run: Object.freeze({ id: 'wf-stub', workflowName: 'stub', startedAt: '1970-01-01T00:00:00Z', cwd: '.', resumed: false }),",
     "      input: '',",
-    "      signal: undefined,",
+    "      signal: signal,",
     "    };",
     "  } else {",
     "    const cache = Object.freeze({",
@@ -1145,7 +1238,7 @@ function buildInitScript(nonce: string): string {
     "      finishCallback: wrapHostSync(__runCtxHost.finishCallback),",
     "      run:            Object.freeze(runMeta),",
     "      input:          input,",
-    "      // signal is bound at runScript-time \u2014 see bind path.",
+    "      signal:         signal,",
     "    };",
     "  }",
     "  __base.vote      = __helpers.vote;",

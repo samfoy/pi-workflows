@@ -105,6 +105,17 @@ export const RECURSION_GUARD_ENV = Object.freeze({
 });
 
 /**
+ * Slice 9: env vars that propagate from parent to child unchanged.
+ * Per PRD §7.5: when the parent run is bypassed via
+ * `--bypass-permissions`, the spawned `pi -p` sub-agents inherit the
+ * bypass (claude-code parity). The dispatcher just forwards the env
+ * var; nothing else.
+ */
+export const PROPAGATED_BYPASS_ENV = Object.freeze([
+  "PI_BYPASS_PERMISSIONS",
+]);
+
+/**
  * Build `process.env`-shaped object for the child. Per §13.7 the two
  * recursion-guard vars OVERWRITE any pre-existing values.
  */
@@ -112,8 +123,14 @@ export function buildChildEnv(
   envBase: NodeJS.ProcessEnv = process.env,
   extra?: Readonly<Record<string, string>>,
 ): NodeJS.ProcessEnv {
+  const propagated: Record<string, string> = {};
+  for (const key of PROPAGATED_BYPASS_ENV) {
+    const v = envBase[key];
+    if (v !== undefined) propagated[key] = v;
+  }
   return {
     ...envBase,
+    ...propagated,
     ...(extra ?? {}),
     ...RECURSION_GUARD_ENV,
   };

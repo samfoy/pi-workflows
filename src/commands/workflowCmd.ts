@@ -28,6 +28,7 @@
 
 import type {
   ExtensionAPI,
+  ExtensionCommandContextLike,
   WorkflowFile,
   WorkflowRegistry,
 } from "../types/internal.js";
@@ -37,7 +38,40 @@ import {
   stubDescription,
   stubMessage,
 } from "./workflowCmd.internal.js";
-import { startWorkflowRun } from "../runManager.js";
+import { startWorkflowRun, RunCancelledError } from "../runManager.js";
+import { makeConfirmDialog } from "../runtime/approval.js";
+import type { ApprovalDialog } from "../types/internal.js";
+
+/**
+ * Slice 9 helper: build the `approval` block for `startWorkflowRun`.
+ * Real pi exposes `ctx.ui.confirm` per docs/rpc.md; the test harness
+ * substitutes its own dialog adapter.
+ */
+function buildApprovalBlock(
+  ctx: ExtensionCommandContextLike,
+): {
+  dialog: ApprovalDialog;
+  viewer: (absPath: string) => Promise<void> | void;
+} {
+  const ctxConfirm = (ctx as ExtensionCommandContextLike & {
+    ui: { confirm?: (msg: string) => Promise<boolean> };
+  }).ui.confirm;
+  if (typeof ctxConfirm !== "function") {
+    // No real ctx.ui.confirm — return a default-deny dialog. Better to
+    // surface a clear denial than to silently auto-approve.
+    return {
+      dialog: async () => "no" as const,
+      viewer: () => undefined,
+    };
+  }
+  const dialog = makeConfirmDialog({
+    confirm: (msg) => ctxConfirm.call(ctx.ui, msg),
+  });
+  return {
+    dialog,
+    viewer: () => undefined, // Slice 13 wires editor open; slice 9 no-op.
+  };
+}
 
 /**
  * Register `/<name>` for every workflow in the registry. Returns the
@@ -59,20 +93,37 @@ export function registerWorkflowCommands(
   for (const file of registry.values()) {
     pi.registerCommand(file.name, {
       description: stubDescription(file),
-      handler: async (args) => {
-        // Slice 8a: actually start the run via RunManager. Approval
-        // dialog is slice 9 — here we bypass with `preApproved: true`
-        // and emit a notify so users see what's happening.
+      handler: async (args, ctx) => {
+        // Slice 9: real approval gate. preApproved is gone from the
+        // production path. Bypass-permissions / pi-p / SDK / mock-agents
+        // are detected inside `runApprovalGate`; everything else gets
+        // the 4-button dialog via ctx.ui.confirm.
+        const approval = buildApprovalBlock(ctx);
+        const emitBanner = (banner: string): void => {
+          pi.sendMessage(
+            {
+              customType: STUB_CUSTOM_TYPE,
+              content: banner,
+              display: true,
+              details: {
+                workflowName: file.name,
+                kind: "bypass-banner",
+                slice: "9",
+              },
+            },
+            { triggerTurn: false, deliverAs: "nextTurn" },
+          );
+        };
         try {
           const run = await startWorkflowRun(file, args, {
-            preApproved: true,
+            approval,
+            emitBanner,
           });
           pi.sendMessage(
             {
               customType: STUB_CUSTOM_TYPE,
               content:
                 `started workflow "${file.name}" (runId=${run.runId})\n\n` +
-                "Approval flow is slice-9 pending; this run was bypassed. " +
                 "TUI overlay is slice-13 pending; tail " +
                 `${run.runDirAbs}/ledger.jsonl manually for now.`,
               display: true,
@@ -80,19 +131,17 @@ export function registerWorkflowCommands(
                 workflowName: file.name,
                 runId: run.runId,
                 runDir: run.runDirAbs,
-                approvalBypassed: true,
-                slice: "8a",
+                approval: run.approvalDecision,
+                slice: "9",
               },
             },
             { triggerTurn: false, deliverAs: "nextTurn" },
           );
           // Fire-and-forget the run; result delivery is slice 10.
           run.promise.catch((err: unknown) => {
-            // Surface failures via notify so users aren't left wondering.
-            // Best-effort — don't throw out of an unhandled rejection.
+            if (err instanceof RunCancelledError) return; // already surfaced below
             try {
-              const msg =
-                err instanceof Error ? err.message : String(err);
+              const msg = err instanceof Error ? err.message : String(err);
               pi.sendMessage(
                 {
                   customType: STUB_CUSTOM_TYPE,
@@ -107,6 +156,26 @@ export function registerWorkflowCommands(
             }
           });
         } catch (err) {
+          if (err instanceof RunCancelledError) {
+            pi.sendMessage(
+              {
+                customType: STUB_CUSTOM_TYPE,
+                content:
+                  `workflow "${file.name}" cancelled: ${err.message}`,
+                display: true,
+                details: {
+                  workflowName: file.name,
+                  runId: err.runId,
+                  runDir: err.runDirAbs,
+                  cancelCause: err.cancelCause,
+                  approval: err.approvalDecision,
+                  slice: "9",
+                },
+              },
+              { triggerTurn: false, deliverAs: "nextTurn" },
+            );
+            return;
+          }
           // Stub fallback so a runtime-init failure doesn't crash the
           // session. Surfaces the underlying message.
           const msg = err instanceof Error ? err.message : String(err);
@@ -122,7 +191,7 @@ export function registerWorkflowCommands(
                 absPath: file.absPath,
                 scope: file.scope,
                 error: msg,
-                slice: "8a",
+                slice: "9",
               },
             },
             { triggerTurn: false, deliverAs: "nextTurn" },

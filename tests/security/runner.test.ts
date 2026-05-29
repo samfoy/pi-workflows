@@ -264,6 +264,27 @@ const VECTORS: readonly Vector[] = [
       assert.equal(stdlibIdent.parallelCtorIsContextFn,  true, "ctx.parallel.constructor must be Context Function");
       assert.equal(stdlibIdent.retryCtorIsContextFn,     true, "ctx.retry.constructor must be Context Function");
       assert.equal(stdlibIdent.sleepCtorIsContextFn,     true, "ctx.sleep.constructor must be Context Function");
+      // Slice 9: ctx.signal wrapper-identity. The runner doesn't supply
+      // a runCtxHost, but the signal IS bound at runScript time — it's
+      // a Context-realm AbortSignal-like polyfill regardless. So the
+      // probe must NOT skip and must show Context Function constructors.
+      const sigIdent = r["wrapper-identity-signal"] as Record<string, unknown>;
+      assert.equal(sigIdent.skipped, undefined, "ctx.signal must be wired (slice 9)");
+      assert.equal(
+        sigIdent.addEventListenerCtorIsContextFn,
+        true,
+        "ctx.signal.addEventListener.constructor must be Context Function",
+      );
+      assert.equal(
+        sigIdent.removeEventListenerCtorIsContextFn,
+        true,
+        "ctx.signal.removeEventListener.constructor must be Context Function",
+      );
+      assert.equal(
+        sigIdent.protoIsCtxObjProto,
+        true,
+        "ctx.signal must be a Context-realm object literal (proto === Context Object.prototype)",
+      );
       // Slice 8b: __pi_install_stdlib must be deleted post-init.
       const stdlibHidden = r["stdlib-factory-hidden"] as Record<string, unknown>;
       assert.equal(stdlibHidden.visibleAsKey, false, "__pi_install_stdlib must be hidden from Reflect.ownKeys");

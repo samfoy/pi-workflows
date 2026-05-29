@@ -74,10 +74,20 @@ single workflow run.
 **Revisit trigger:** documented author workflow that would benefit
 (e.g. CI runs of the same audit workflow against PRs).
 
-## Slice 8a author-API alignment
+## Author-API alignment (slice 9 update)
 
-For reference, the slice-8a public author API (`ctx.agent`,
-`ctx.phase`, `ctx.cache`, `ctx.log`, `ctx.finishCallback`, `ctx.run`,
-`ctx.input`, `ctx.signal`) matches PRD §4.2.1–4.2.5 + §4.2.7 fully.
-The stdlib helpers (`ctx.vote`, `ctx.consensus`, `ctx.parallel`,
-`ctx.retry`, `ctx.sleep` per §4.2.6) land in slice 8b.
+The slice-9 public author API (`ctx.agent`, `ctx.phase`, `ctx.cache`,
+`ctx.log`, `ctx.finishCallback`, `ctx.run`, `ctx.input`, `ctx.signal`)
+matches PRD §4.2.1–§4.2.5 + §4.2.7 + §4 line 420 fully. The stdlib
+helpers (`ctx.vote`, `ctx.consensus`, `ctx.parallel`, `ctx.retry`,
+`ctx.sleep` per §4.2.6) landed in slice 8b. `ctx.signal` is a Context-
+realm AbortSignal-shaped polyfill (built per-runScript by
+`__pi_make_signal()`) that bridges to the host run's AbortSignal
+through a closure-captured abort thunk — same pattern as the timer
+bridge (PRD §8.3.4 host-realm-eval defense). Tests:
+`tests/security/fixtures/host-realm-eval.workflow.js` `ctx-signal`
+rows + `tests/integration/abortSignalE2E.test.ts`.
+
+For reference, before slice 9 the parity-gaps doc claimed slice 8a's
+surface matched the API "fully". That was incorrect — `ctx.signal` was
+deferred to slice 9. The wording above corrects the false claim.

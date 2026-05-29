@@ -102,6 +102,24 @@ tests["wrapper-identity-stdlib"] = {
   sleepCtorIsContextFn:     ctx.sleep.constructor === Function,
 };
 
+// Slice 9: ctx.signal wrapper-identity oracle.
+// If __pi_make_signal()'s addEventListener was ever replaced by a
+// host-realm reference (e.g. someone passes the host AbortSignal
+// directly), .constructor === Function would be false. The signal
+// object itself was built from a Context-realm literal, so its
+// prototype must be the Context's Object.prototype.
+tests["wrapper-identity-signal"] =
+  ctx.signal === undefined || ctx.signal === null
+    ? { skipped: true }
+    : {
+        addEventListenerCtorIsContextFn:
+          ctx.signal.addEventListener.constructor === Function,
+        removeEventListenerCtorIsContextFn:
+          ctx.signal.removeEventListener.constructor === Function,
+        protoIsCtxObjProto:
+          Object.getPrototypeOf(ctx.signal) === Object.prototype,
+      };
+
 // Slice 8b: __pi_install_stdlib must be hidden after init (deleted
 // once __pi_build_ctx captures the helper closures). Mirrors the
 // console-bridge-hidden invariant for __pi_console_log__.

@@ -42,9 +42,13 @@ import { promises as fs } from "node:fs";
 import { join } from "node:path";
 
 import type {
+  ApprovalDecision,
+  ApprovalDialog,
+  ApprovalGateOptions,
   RunManifest,
   RunMetaData,
   RunOptions,
+  TrustStore,
   WorkflowFile,
 } from "./types/internal.js";
 import { CacheStore } from "./runtime/cache.js";
@@ -53,6 +57,7 @@ import { Sandbox } from "./runtime/sandbox.js";
 import { captureError } from "./runtime/realmError.js";
 import { createRunCtxHost } from "./runtime/runCtx.js";
 import { makeSemaphore } from "./runtime/semaphore.js";
+import { runApprovalGate } from "./runtime/approval.js";
 import { sha256 } from "./util/hash.js";
 import { newRunId } from "./util/runId.js";
 import { runDir as runDirFor } from "./util/paths.js";
@@ -68,6 +73,30 @@ export interface Run {
   readonly getFinishCallbackPrompt: () => string | null;
   /** Cancels the run by aborting the controller. */
   cancel(reason?: unknown): void;
+  /** Slice 9: how the run was approved (or `null` for `preApproved`). */
+  readonly approvalDecision: ApprovalDecision | null;
+}
+
+/** Slice 9: emitted to the caller (workflowCmd) when a run is denied. */
+export class RunCancelledError extends Error {
+  readonly runId: string;
+  readonly runDirAbs: string;
+  readonly cancelCause: "user-N" | "disabled";
+  readonly approvalDecision: ApprovalDecision;
+  constructor(opts: {
+    runId: string;
+    runDirAbs: string;
+    cancelCause: "user-N" | "disabled";
+    decision: ApprovalDecision;
+    message: string;
+  }) {
+    super(opts.message);
+    this.name = "RunCancelledError";
+    this.runId = opts.runId;
+    this.runDirAbs = opts.runDirAbs;
+    this.cancelCause = opts.cancelCause;
+    this.approvalDecision = opts.decision;
+  }
 }
 
 export interface RunManagerStartOptions {
@@ -78,11 +107,34 @@ export interface RunManagerStartOptions {
    */
   readonly mockAgents?: boolean;
   /**
-   * Skip the approval dialog. v0.1 ships this as the only way to start
-   * a run (slice 9 lands the actual approval flow). Mandatory for slice
-   * 8a tests. Always logs a warning.
+   * Skip the approval dialog WITHOUT going through the slice-9 gate.
+   * Tests still use this; production callers should pass an `approval`
+   * object instead so bypass detection + trust storage fire.
    */
   readonly preApproved?: boolean;
+  /**
+   * Slice 9: full approval gate. When supplied, RunManager runs
+   * `runApprovalGate` BEFORE transitioning `pending → approved`. If
+   * the decision denies the run, RunManager appends a `cancelled`
+   * ledger entry, transitions `pending → cancelled-pre-run`, and
+   * rejects the run promise with `RunCancelledError`.
+   *
+   * `preApproved: true` skips this entirely; `preApproved: false`
+   * (default) requires `approval` to be set.
+   */
+  readonly approval?: Pick<
+    ApprovalGateOptions,
+    "dialog" | "viewer" | "env" | "home" | "trustOverride" |
+    "projectSettingsPathOverride" | "personalSettingsPathOverride" |
+    "onPersistError"
+  >;
+  /**
+   * Slice 9: emit the bypass banner via this hook. Caller is
+   * responsible for translating to `pi.sendMessage`. Receives the
+   * banner string verbatim. Optional — if unset, the banner is
+   * still attached to the returned `approvalDecision`.
+   */
+  readonly emitBanner?: (banner: string) => void;
   /** PRD §1.2 pin 6 — overridden in tests. Default 1000. */
   readonly perRunAgentCap?: number;
   /** PRD §5.4 default — overridden in tests. Default 16. */
@@ -133,15 +185,6 @@ export async function startWorkflowRun(
   args: string,
   opts: RunManagerStartOptions = {},
 ): Promise<Run> {
-  if (!opts.preApproved) {
-    // Slice 9 will replace this with the real approval flow.
-    // eslint-disable-next-line no-console
-    console.warn(
-      "[pi-workflows] approval bypassed \u2014 slice 9 pending. " +
-        "All slice-8a code paths assume `preApproved: true` from the caller.",
-    );
-  }
-
   const cwd = opts.cwd ?? process.cwd();
   const runId = (opts.newRunIdFactory ?? newRunId)();
   const resolveRunDir = opts.resolveRunDir ?? runDirFor;
@@ -170,6 +213,41 @@ export async function startWorkflowRun(
     );
   }
 
+  // ─── Slice 9 approval gate ───────────────────────────
+  // Decision happens BEFORE we touch the ledger or write the manifest's
+  // first transition. `pending → approved` (or `pending → cancelled-pre-run`)
+  // is the first transition; if denied we still create runDir + ledger
+  // so the overlay (slice 13) sees the cancelled run, but no sandbox
+  // spawns.
+  let approvalDecision: ApprovalDecision | null = null;
+  if (opts.preApproved) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      "[pi-workflows] approval bypassed via preApproved=true — test-only path; " +
+        "production callers should pass an `approval` block instead.",
+    );
+  } else if (opts.approval !== undefined) {
+    approvalDecision = await runApprovalGate({
+      workflowName: workflow.name,
+      absPath: workflow.absPath,
+      sha256: workflowSourceSha256,
+      cwd,
+      ...(opts.mockAgents !== undefined ? { mockAgents: opts.mockAgents } : {}),
+      ...opts.approval,
+    });
+    if (approvalDecision.approved && approvalDecision.banner !== undefined) {
+      try {
+        opts.emitBanner?.(approvalDecision.banner);
+      } catch {
+        /* hook failure must not abort the run */
+      }
+    }
+  } else {
+    throw new Error(
+      "startWorkflowRun: must supply `preApproved: true` or an `approval` block (slice 9)",
+    );
+  }
+
   // Slice 8a-owned manifest fields. Slice 6's dispatcher will merge in
   // parent-liveness on first agent dispatch; we never overwrite those.
   const runOptions: RunOptions = {
@@ -191,7 +269,13 @@ export async function startWorkflowRun(
     piVersion: PI_BUILTIN_VERSION_PROBE,
     piWorkflowsVersion: SLICE_PROJECT_VERSION,
     options: runOptions,
-    trustedAtStart: opts.trustedAtStart === true,
+    trustedAtStart:
+      opts.trustedAtStart === true ||
+      (approvalDecision !== null &&
+        approvalDecision.approved &&
+        (approvalDecision.reason === "trusted" ||
+          approvalDecision.reason === "user-always" ||
+          approvalDecision.reason === "pi-p-trusted")),
   };
   await writeManifestPartial(runDirAbs, partialManifest);
 
@@ -214,6 +298,45 @@ export async function startWorkflowRun(
     at: startedAt,
     manifest: partialManifest as Readonly<Record<string, unknown>>,
   });
+
+  // ─── Slice 9 cancellation path ─────────────────────────
+  // If the gate denied the run, emit `cancelled` + transition to
+  // `cancelled-pre-run` and return a rejected-promise handle. No
+  // sandbox is constructed; no semaphore acquisitions happen.
+  if (approvalDecision !== null && !approvalDecision.approved) {
+    const sm = new RunStateMachine({
+      writer: ledger,
+      ...(opts.nowIso ? { now: opts.nowIso } : {}),
+    });
+    await ledger.append({
+      type: "cancelled",
+      at: (opts.nowIso ?? (() => new Date().toISOString()))(),
+      cause: approvalDecision.cancelCause,
+    });
+    try {
+      await sm.go("cancelled-pre-run");
+    } catch {
+      /* defensive */
+    }
+    await ledger.flush();
+    const errMsg = approvalDecision.error ?? "workflow run cancelled by user";
+    const cancelled = new RunCancelledError({
+      runId,
+      runDirAbs,
+      cancelCause: approvalDecision.cancelCause,
+      decision: approvalDecision,
+      message: errMsg,
+    });
+    return {
+      runId,
+      runDirAbs,
+      promise: Promise.reject(cancelled),
+      signal: AbortSignal.abort(cancelled),
+      getFinishCallbackPrompt: () => null,
+      cancel: () => undefined,
+      approvalDecision,
+    };
+  }
 
   // State machine: pending → approved → running.
   const sm = new RunStateMachine({ writer: ledger, ...(opts.nowIso ? { now: opts.nowIso } : {}) });
@@ -267,59 +390,66 @@ export async function startWorkflowRun(
     },
   });
 
-  // Drive the run.
+  // Drive the run with a real try { ... } finally { sandbox.dispose() }
+  // per slice_8a_concerns#H4 — if ledger.flush() throws, we still
+  // tear down the Context (no host vm.Context leak).
   const promise = (async () => {
     let result: unknown;
+    let runError: unknown = null;
     try {
-      const out = await sandbox.runScript(sourceText);
-      // Clone returnValue back to host realm so callers (and slice-7
-      // ledger.buildResultEntry) don't trip over Context-realm proto-
-      // type chains. JSON-only is fine — PRD §4.2.1 declares main()'s
-      // resolution as JSON-cloneable.
-      result =
-        out.returnValue === undefined
-          ? undefined
-          : JSON.parse(JSON.stringify(out.returnValue));
-    } catch (e) {
-      // Failure path — append `error` entry, transition to failed,
-      // flush, dispose, then RE-THROW.
-      const captured = captureError(e);
-      await ledger
-        .append({
-          type: "error",
-          at: (opts.nowIso ?? (() => new Date().toISOString()))(),
-          error: {
-            name: captured.name,
-            message: captured.message,
-            ...(captured.stack !== null ? { stack: captured.stack } : {}),
-          },
-        })
-        .catch(() => undefined);
       try {
-        await sm.go("failed");
-      } catch {
-        // already failed — ignore
+        const out = await sandbox.runScript(sourceText);
+        // Clone returnValue back to host realm so callers (and slice-7
+        // ledger.buildResultEntry) don't trip over Context-realm proto-
+        // type chains. JSON-only is fine — PRD §4.2.1 declares main()'s
+        // resolution as JSON-cloneable.
+        result =
+          out.returnValue === undefined
+            ? undefined
+            : JSON.parse(JSON.stringify(out.returnValue));
+      } catch (e) {
+        runError = e;
+        const captured = captureError(e);
+        await ledger
+          .append({
+            type: "error",
+            at: (opts.nowIso ?? (() => new Date().toISOString()))(),
+            error: {
+              name: captured.name,
+              message: captured.message,
+              ...(captured.stack !== null ? { stack: captured.stack } : {}),
+            },
+          })
+          .catch(() => undefined);
+        try {
+          await sm.go("failed");
+        } catch {
+          // already failed — ignore
+        }
+      }
+
+      if (runError === null) {
+        // Success path — `result` entry + transition to done.
+        const resultEntry = buildResultEntry(
+          result,
+          opts.nowIso ?? (() => new Date().toISOString()),
+        );
+        await ledger.append(resultEntry).catch(() => undefined);
+        try {
+          await sm.go("done");
+        } catch {
+          // already done — ignore
+        }
       }
       await ledger.flush();
+    } finally {
+      // Slice_8a_concerns#H4: real try/finally so a flush() throw still
+      // runs dispose. Idempotent — safe to call twice.
       sandbox.dispose();
-      // Re-throw the caught value (preserves Context-realm identity if
-      // it was already reconstructed by the sandbox).
-      throw e;
     }
-
-    // Success path — `result` entry + transition to done.
-    const resultEntry = buildResultEntry(
-      result,
-      opts.nowIso ?? (() => new Date().toISOString()),
-    );
-    await ledger.append(resultEntry).catch(() => undefined);
-    try {
-      await sm.go("done");
-    } catch {
-      // already done — ignore
+    if (runError !== null) {
+      throw runError;
     }
-    await ledger.flush();
-    sandbox.dispose();
     return result;
   })();
 
@@ -330,6 +460,7 @@ export async function startWorkflowRun(
     signal: ctrl.signal,
     getFinishCallbackPrompt: ctxHost.getFinishCallbackPrompt,
     cancel: (reason?: unknown) => ctrl.abort(reason),
+    approvalDecision,
   };
 }
 
