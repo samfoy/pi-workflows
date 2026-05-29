@@ -1,7 +1,7 @@
 {
   "name": "@samfp/pi-workflows",
   "version": "0.1.0",
-  "description": "Dynamic workflows for pi — sandboxed JS scripts that drive sub-agent fleets, with TUI inspection and resume",
+  "description": "Dynamic workflows for pi \u2014 sandboxed JS scripts that drive sub-agent fleets, with TUI inspection and resume",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -28,7 +28,9 @@
     "test:unit": "node --import tsx --test tests/unit/*.test.ts",
     "test:integration": "node --import tsx --test tests/integration/*.smoke.ts tests/integration/*.test.ts",
     "test:security": "node --import tsx --test tests/security/*.test.ts",
-    "prepublishOnly": "npm run build && npm test"
+    "prepublishOnly": "npm run build && npm test",
+    "coverage": "c8 --include='src/runtime/**' --include='src/util/**' --reporter=text --reporter=lcov node --import tsx --test tests/unit/*.test.ts tests/integration/*.smoke.ts tests/integration/*.test.ts tests/security/*.test.ts",
+    "coverage:check": "c8 check-coverage --lines 85 --branches 70 --include='src/runtime/**' --include='src/util/**'"
   },
   "peerDependencies": {
     "@earendil-works/pi-coding-agent": "*",
@@ -41,6 +43,7 @@
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "c8": "^11.0.0",
     "esbuild": "^0.24.0",
     "tsx": "^4.0.0",
     "typescript": "^5.5.0"
