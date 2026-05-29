@@ -361,3 +361,132 @@ test("runNow: getRegistry lookup used when registry has the workflow", async () 
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+// ─── save-dir resolution (Bug 1 fix) ────────────────────────────────────
+
+import { mkdirSync } from "node:fs";
+import { workflowsHome } from "../../src/util/paths.js";
+
+const MINIMAL_SCRIPT = `export const meta = { name: "save-dir-wf", description: "test", version: "1.0.0" };
+export async function main(_ctx: any) { return "ok"; }`;
+
+test("save-dir: saves to workflowsHome() when <cwd>/.pi/workflows/ does NOT exist", async () => {
+  const cwd = mkdtempSync(join(tmpdir(), "wf-savedir-no-project-"));
+  const piB = {
+    registerTool: (def: any) => { (piB as any).__tool = def; },
+    appendEntry: () => {},
+  } as unknown as ExtensionAPI;
+
+  registerWriteWorkflowTool({ pi: piB, getCwd: () => cwd });
+
+  const result = await (piB as any).__tool.execute(
+    "td1",
+    { name: "save-dir-wf", script: MINIMAL_SCRIPT },
+    {} as any,
+  );
+
+  const expectedDir = workflowsHome();
+  assert.ok(
+    result.details.path.startsWith(expectedDir),
+    `expected path under workflowsHome() (${expectedDir}), got: ${result.details.path}`,
+  );
+  try { rmSync(result.details.path); } catch { /* best-effort */ }
+  rmSync(cwd, { recursive: true, force: true });
+});
+
+test("save-dir: saves to <cwd>/.pi/workflows/ when that dir exists", async () => {
+  const cwd2 = mkdtempSync(join(tmpdir(), "wf-savedir-project-"));
+  const projDir = join(cwd2, ".pi", "workflows");
+  mkdirSync(projDir, { recursive: true });
+
+  const piC = {
+    registerTool: (def: any) => { (piC as any).__tool = def; },
+    appendEntry: () => {},
+  } as unknown as ExtensionAPI;
+  registerWriteWorkflowTool({ pi: piC, getCwd: () => cwd2 });
+
+  const PROJ_SCRIPT = `export const meta = { name: "proj-wf", description: "test", version: "1.0.0" };
+export async function main(_ctx: any) { return "ok"; }`;
+
+  const result = await (piC as any).__tool.execute(
+    "td2",
+    { name: "proj-wf", script: PROJ_SCRIPT },
+    {} as any,
+  );
+
+  assert.ok(
+    result.details.path.startsWith(projDir),
+    `expected path under ${projDir}, got: ${result.details.path}`,
+  );
+  assert.ok(existsSync(result.details.path), "file should exist at project path");
+  rmSync(cwd2, { recursive: true, force: true });
+});
+
+// ─── result text (Bug 3 fix) ────────────────────────────────────────────
+
+test("result text: does NOT contain 'Run it' instruction", async () => {
+  const dirD = mkdtempSync(join(tmpdir(), "wf-resulttext-"));
+  const piD = {
+    registerTool: (def: any) => { (piD as any).__tool = def; },
+    appendEntry: () => {},
+  } as unknown as ExtensionAPI;
+  registerWriteWorkflowTool({ pi: piD, getCwd: () => dirD, saveDirOverride: dirD });
+
+  const TXT_SCRIPT = `export const meta = { name: "txt-wf", description: "d", version: "1.0.0" };
+export async function main(_ctx: any) { return "ok"; }`;
+
+  const result = await (piD as any).__tool.execute("td3", { name: "txt-wf", script: TXT_SCRIPT }, {} as any);
+  const text = result.content[0].text as string;
+  assert.ok(!text.includes("Run it"), `must not say 'Run it': ${text}`);
+  assert.ok(!text.includes("ask me to run"), `must not say 'ask me to run': ${text}`);
+  rmSync(dirD, { recursive: true, force: true });
+});
+
+// ─── runNow confirm (Bug 2 fix) ─────────────────────────────────────────
+
+test("runNow confirm: calls startRun when ctx.ui.confirm returns true", async () => {
+  const dirE = mkdtempSync(join(tmpdir(), "wf-confirm-"));
+  const piE = {
+    registerTool: (def: any) => { (piE as any).__tool = def; },
+    appendEntry: () => {},
+  } as unknown as ExtensionAPI;
+  let startRunCalled = false;
+  registerWriteWorkflowTool({
+    pi: piE, getCwd: () => dirE, saveDirOverride: dirE,
+    startRun: async () => { startRunCalled = true; },
+  });
+
+  const CONF_SCRIPT = `export const meta = { name: "confirm-wf", description: "d", version: "1.0.0" };
+export async function main(_ctx: any) { return "ok"; }`;
+
+  const ctxE = { ui: { confirm: async (_msg: string) => true } };
+  const result = await (piE as any).__tool.execute("td4", { name: "confirm-wf", script: CONF_SCRIPT }, ctxE);
+
+  assert.ok(startRunCalled, "startRun should be called when confirm=true");
+  assert.ok(result.details.runStarted, "runStarted should be true");
+  assert.ok((result.content[0].text as string).includes("Run started"), "result should mention run started");
+  rmSync(dirE, { recursive: true, force: true });
+});
+
+test("runNow confirm: does NOT call startRun when ctx.ui.confirm returns false", async () => {
+  const dirF = mkdtempSync(join(tmpdir(), "wf-confirm-no-"));
+  const piF = {
+    registerTool: (def: any) => { (piF as any).__tool = def; },
+    appendEntry: () => {},
+  } as unknown as ExtensionAPI;
+  let startRunCalledF = false;
+  registerWriteWorkflowTool({
+    pi: piF, getCwd: () => dirF, saveDirOverride: dirF,
+    startRun: async () => { startRunCalledF = true; },
+  });
+
+  const CONF_NO_SCRIPT = `export const meta = { name: "confirm-no-wf", description: "d", version: "1.0.0" };
+export async function main(_ctx: any) { return "ok"; }`;
+
+  const ctxF = { ui: { confirm: async (_msg: string) => false } };
+  const result = await (piF as any).__tool.execute("td5", { name: "confirm-no-wf", script: CONF_NO_SCRIPT }, ctxF);
+
+  assert.ok(!startRunCalledF, "startRun should NOT be called when confirm=false");
+  assert.ok(!result.details.runStarted, "runStarted should be false");
+  rmSync(dirF, { recursive: true, force: true });
+});

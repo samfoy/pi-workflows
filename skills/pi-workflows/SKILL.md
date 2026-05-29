@@ -1,3 +1,8 @@
+---
+name: pi-workflows
+description: Author and run dynamic workflow scripts in pi. Use when writing multi-agent pipelines, fan-out tasks, parallel research, or anything that benefits from orchestrating multiple agents. Covers the ctx.agent/phase/vote API, write_workflow tool, /workflows TUI, and resume/GC commands.
+---
+
 # pi-workflows skill
 
 ## What this skill covers

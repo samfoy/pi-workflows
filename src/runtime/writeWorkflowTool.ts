@@ -28,7 +28,7 @@ import { join } from "node:path";
 import { Type } from "typebox";
 
 import type { ExtensionAPI, ExtensionContextLike, WorkflowFile } from "../types/internal.js";
-import { projectWorkflowsDir } from "../util/paths.js";
+import { workflowsHome } from "../util/paths.js";
 import { RESERVED_NAMES, classifyFilename } from "../registry.js";
 
 // ─── Validation ──────────────────────────────────────────────────────────────
@@ -252,7 +252,14 @@ export async function main(ctx) {
 
       // 2. Resolve save path
       const cwd = opts.getCwd();
-      const saveDir = opts.saveDirOverride ?? projectWorkflowsDir(cwd);
+      // Bug-fix: do NOT walk parent dirs. projectWorkflowsDir() finds the
+      // user's ~/.pi/ and saves outside the watched directories. Instead:
+      // - if <cwd>/.pi/workflows/ already exists → project scope (user set it up)
+      // - otherwise → personal scope workflowsHome() which is always watched
+      const projectScopeDir = join(cwd, ".pi", "workflows");
+      const saveDir = opts.saveDirOverride ?? (
+        existsSync(projectScopeDir) ? projectScopeDir : workflowsHome()
+      );
       mkdirSync(saveDir, { recursive: true });
 
       const savePath = join(saveDir, `${name}.js`);
@@ -274,38 +281,38 @@ export async function main(ctx) {
         });
       }
 
-      // 6. Run immediately if requested
+      // 6. Offer to run (or run immediately if runNow === true)
       let runStarted = false;
       let runError: string | undefined;
-      if (runNow) {
-        const registry = opts.getRegistry?.();
-        const startRun = opts.startRun;
-        // Look up the freshly-saved workflow — hot-reload may not have fired
-        // yet, so also construct a WorkflowFile inline as fallback.
-        const workflowFile: WorkflowFile | undefined =
-          registry?.get(name) ??
-          {
-            name,
-            absPath: savePath,
-            scope: "project" as const,
-          };
-        if (startRun && workflowFile) {
-          try {
-            await startRun(workflowFile, "", ctx);
-            runStarted = true;
-          } catch (err) {
-            runError = err instanceof Error ? err.message : String(err);
-          }
+      const workflowFile: WorkflowFile =
+        opts.getRegistry?.().get(name) ??
+        { name, absPath: savePath, scope: existsSync(projectScopeDir) ? "project" : "personal" };
+
+      let shouldRun = runNow;
+      if (shouldRun === undefined && opts.startRun) {
+        // Default: ask the user via the tool's confirm dialog.
+        const ctxTyped = ctx as { ui?: { confirm?: (msg: string) => Promise<boolean> } };
+        if (ctxTyped?.ui?.confirm) {
+          shouldRun = await ctxTyped.ui.confirm(`Run /${name} now?`);
+        }
+      }
+      if (shouldRun && opts.startRun) {
+        try {
+          await opts.startRun(workflowFile, "", ctx);
+          runStarted = true;
+        } catch (err) {
+          runError = err instanceof Error ? err.message : String(err);
         }
       }
 
       // 7. Return result card
       const verb = isOverwrite ? "updated" : "saved";
+      // Bug-fix: never say "run it with /name" — the LLM will try bash.
       const runLine = runStarted
-        ? `\n\n▶ Run started — watch the Workflows panel or type \`/workflows\` for status.`
+        ? `\n\n▶ Run started — open \`/workflows\` to monitor progress.`
         : runError
-        ? `\n\n⚠ Save succeeded but run failed to start: ${runError}`
-        : `\n\nRun it now with \`/${name}\`, or ask me to run it for you.`;
+        ? `\n\n⚠ Saved but run failed to start: ${runError}`
+        : `\n\nIt's now registered. Open \`/workflows\` to launch and monitor it.`;
       const resultText =
         `✅ Workflow \`/${name}\` ${verb}.\n\n` +
         `**Path:** \`${savePath}\`` +
