@@ -217,27 +217,51 @@ test("maxRows trims oldest terminal runs but keeps active runs", () => {
   assert.match(out.subtitle, /\+91 hidden/);
 });
 
-// ─── Slice 14: remote-run badge (U3) ──────────────────────────────
+// ─── Slice 15 F1: remote-run badge (U3 — tautology fix) ──────────
+// Prior runId "wf-remote001" contained substring "remote", so
+// `.includes("remote")` passed regardless of the badge. Rewritten to
+// use a runId WITHOUT "remote" in it and assert the full-width glyph
+// ［remote］ specifically. Mutation `isRemote=false` now fails.
 
-test("U3: runs with no local handle render the [remote] badge", () => {
+const REMOTE_BADGE = "［remote］";
+
+test("U3: runs with no local handle render the remote badge glyph", () => {
   const summaries: RunSummary[] = [
-    summary({ runId: "wf-local0001", state: "running" }),
-    summary({ runId: "wf-remote001", state: "running" }),
+    summary({ runId: "wf-loc0000001", state: "running" }),
+    summary({ runId: "wf-ext0000001", state: "running" }), // no 'remote' substring
   ];
   const out = renderRunsList(summaries, {
     nowMs: NOW,
-    localRunIds: new Set(["wf-local0001"]),
+    localRunIds: new Set(["wf-loc0000001"]),
   });
-  const local = out.rows.find((r) => r.runId === "wf-local0001")!;
-  const remote = out.rows.find((r) => r.runId === "wf-remote001")!;
+  const local = out.rows.find((r) => r.runId === "wf-loc0000001")!;
+  const remote = out.rows.find((r) => r.runId === "wf-ext0000001")!;
   assert.ok(
-    !local.line.includes("remote"),
-    `local run must NOT carry remote badge; got: ${local.line}`,
+    !local.line.includes(REMOTE_BADGE),
+    `local run must NOT carry remote badge glyph; got: ${local.line}`,
   );
   assert.ok(
-    remote.line.includes("remote"),
-    `remote run must carry remote badge; got: ${remote.line}`,
+    remote.line.includes(REMOTE_BADGE),
+    `remote run must carry the ［remote］ glyph; got: ${remote.line}`,
   );
+});
+
+test("U3 mutation: isRemote=false (both in localRunIds) → neither has badge", () => {
+  const summaries: RunSummary[] = [
+    summary({ runId: "wf-loc0000001", state: "running" }),
+    summary({ runId: "wf-ext0000001", state: "running" }),
+  ];
+  // Mutation: both are 'local' — neither should get a badge.
+  const out = renderRunsList(summaries, {
+    nowMs: NOW,
+    localRunIds: new Set(["wf-loc0000001", "wf-ext0000001"]),
+  });
+  for (const row of out.rows) {
+    assert.ok(
+      !row.line.includes(REMOTE_BADGE),
+      `no badge expected when isRemote=false; got: ${row.line}`,
+    );
+  }
 });
 
 test("U3: when localRunIds is undefined, NO badge is rendered (slice 13 behavior)", () => {

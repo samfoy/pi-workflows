@@ -48,6 +48,7 @@ export type HotkeyActionKind =
   | "navigate-down"
   | "navigate-back"
   | "open-phase-view"
+  | "open-agent-detail"
   | "close-overlay"
   | "pause"
   | "resume"
@@ -55,6 +56,10 @@ export type HotkeyActionKind =
   | "restart-requested"
   | "save-script-requested"
   | "open-gc-dialog"
+  | "open-transcript"
+  | "copy-prompt"
+  | "gc-apply"
+  | "gc-cancel"
   | "toggle-help";
 
 export interface HotkeyAction {
@@ -75,12 +80,23 @@ export type OverlayView = "runs-list" | "phase-view" | "agent-detail";
  * Inputs to the dispatcher. `runState` is undefined when there is no
  * selected run (empty list); state-guarded keys then return noop with
  * `reason="no-selection"`.
+ *
+ * F2 (slice 15): `isRemote` signals the selected run is a cross-process
+ * summary (no local handle). Restart and save-script are disabled for
+ * remote runs — we can't restart a run we don't own, and the script.js
+ * may not be accessible on this machine.
  */
 export interface DispatchInput {
   readonly key: string;
   readonly view: OverlayView;
   readonly runState?: RunSummaryState | undefined;
   readonly runId?: string | undefined;
+  /**
+   * Slice 15 F2 — true when the selected run has no local handle
+   * (cross-process / remote-registry summary). `r` (restart) and
+   * `s` (save-script) are no-ops on remote runs.
+   */
+  readonly isRemote?: boolean | undefined;
 }
 
 const NORM_KEY = new Map<string, string>([
@@ -106,8 +122,16 @@ const NORM_KEY = new Map<string, string>([
   ["g", "g"],
   ["G", "g"],
   ["?", "?"],
-  ["s", "s"], // slice 14 owns the action; slice 13 emits noop with reason
+  ["s", "s"], // save-script
   ["S", "s"],
+  ["t", "t"],  // slice 15: open transcript in $EDITOR
+  ["T", "t"],
+  ["c", "c"],  // slice 15: copy prompt to clipboard
+  ["C", "c"],
+  ["y", "y"],  // slice 15: GC dialog apply confirm
+  ["Y", "y"],
+  ["n", "n"],  // slice 15: GC dialog cancel
+  ["N", "n"],
 ]);
 
 function normalize(key: string): string {
@@ -139,7 +163,9 @@ export function isHotkeyEnabled(input: DispatchInput): boolean {
     case "escape":
       return input.view === "runs-list";
     case "enter":
-      return input.view === "runs-list" && input.runState !== undefined;
+      if (input.view === "runs-list") return input.runState !== undefined;
+      if (input.view === "phase-view") return input.runState !== undefined;
+      return false;
     case "p":
       // pause/resume only on the runs list, only for running/paused.
       if (input.view !== "runs-list") return false;
@@ -149,6 +175,7 @@ export function isHotkeyEnabled(input: DispatchInput): boolean {
       return input.runState === "running" || input.runState === "paused";
     case "r":
       if (input.view !== "runs-list") return false;
+      if (input.isRemote) return false; // F2: remote runs can't be restarted
       // Slice 14: `r` is enabled on paused (resume) AND terminal (restart).
       if (input.runState === "paused") return true;
       return input.runState !== undefined && TERMINAL.has(input.runState);
@@ -157,8 +184,14 @@ export function isHotkeyEnabled(input: DispatchInput): boolean {
     case "s":
       // Slice 14: `s` (save) is enabled on phase-view, ONLY for terminal
       // states (per PRD §10.4 — `s` saves the run's frozen script.js).
+      // Slice 15 F2: disabled on remote runs.
       if (input.view !== "phase-view") return false;
+      if (input.isRemote) return false;
       return input.runState !== undefined && TERMINAL.has(input.runState);
+    case "t":
+      return input.view === "agent-detail";
+    case "c":
+      return input.view === "agent-detail";
     default:
       return false;
   }
@@ -205,6 +238,14 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
     };
   }
 
+  if (k === "enter" && input.view === "phase-view") {
+    // Slice 15: Enter on phase-view opens agent detail.
+    return {
+      kind: "open-agent-detail",
+      ...(input.runId !== undefined ? { runId: input.runId } : {}),
+    };
+  }
+
   // State-guarded actions — runId is now guaranteed non-undefined.
   const runId = input.runId!;
 
@@ -226,23 +267,42 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
       // `restart-requested` on terminal runs (per PRD §10.4.1). Slice
       // 13 only handled the terminal-restart leg; the resume leg was
       // owned by `p`. Slice 14 unifies per the spec table.
+      // Slice 15 F2: `r` (restart) is disabled on remote runs.
+      if (input.isRemote) {
+        return { kind: "noop", runId, reason: "disabled-for-state" };
+      }
       if (input.runState === "paused")
         return { kind: "resume", runId };
       if (input.runState !== undefined && TERMINAL.has(input.runState))
         return { kind: "restart-requested", runId };
       return { kind: "noop", runId, reason: "disabled-for-state" };
     }
-    case "s": {
+    case "s":
       // Slice 14: `s` on phase-view is enabled only for terminal
       // states per PRD §10.4. On runs-list it remains a no-op.
+      // Slice 15 F2: `s` disabled on remote runs.
       if (input.view !== "phase-view") {
+        return { kind: "noop", runId, reason: "disabled-for-state" };
+      }
+      if (input.isRemote) {
         return { kind: "noop", runId, reason: "disabled-for-state" };
       }
       if (input.runState !== undefined && TERMINAL.has(input.runState)) {
         return { kind: "save-script-requested", runId };
       }
       return { kind: "noop", runId, reason: "disabled-for-state" };
-    }
+    case "t":
+      // Slice 15: open transcript in $EDITOR — only agent-detail view.
+      if (input.view === "agent-detail") {
+        return { kind: "open-transcript", runId };
+      }
+      return { kind: "noop", runId, reason: "disabled-for-state" };
+    case "c":
+      // Slice 15: copy prompt to clipboard — only agent-detail view.
+      if (input.view === "agent-detail") {
+        return { kind: "copy-prompt", runId };
+      }
+      return { kind: "noop", runId, reason: "disabled-for-state" };
     default:
       return { kind: "noop", runId, reason: "unknown-key" };
   }
@@ -297,8 +357,14 @@ export function helpForState(
         enabled("?", "help"),
       ];
     }
-    // Slice 15 (agent detail): stub help — just back + help.
-    return [enabled("Esc", "back"), enabled("?", "help")];
+    // Slice 15 (agent detail): transcript open + copy prompt.
+    return [
+      enabled("↑↓ jk", "scroll"),
+      enabled("t", "open transcript"),
+      enabled("c", "copy prompt"),
+      enabled("Esc", "back"),
+      enabled("?", "help"),
+    ];
   }
 
   const noSel = runState === undefined;

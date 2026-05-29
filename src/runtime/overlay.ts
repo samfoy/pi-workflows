@@ -69,6 +69,9 @@ import {
   type PhaseFeedEntry,
 } from "./phaseRegistry.js";
 import { renderPhaseView } from "./phaseView.js";
+import { renderAgentDetail, type AgentDetailSnapshot } from "./agentDetail.js";
+import { renderGcDialog, loadGcCandidates, applyGc, type GcDialogState } from "./gcDialog.js";
+import { agentTranscriptPath } from "./transcriptOpen.js";
 
 /** Module-level flag enforcing PRD §10.1's "second invocation is no-op". */
 let _overlayOpen = false;
@@ -109,6 +112,12 @@ export interface MountOverlayOpts {
    * overlay doesn't own the file ops — it just signals intent.
    */
   readonly onSaveScriptRequested?: (runId: string) => void | Promise<void>;
+  /**
+   * Slice 15 — GC options forwarded to loadGcCandidates / applyGc.
+   * Defaults to system GC settings.
+   */
+  readonly gcCutoffDays?: number;
+  readonly gcRunsRootOverride?: string;
 }
 
 /** Test-only handle exposing internal overlay state for assertion. */
@@ -289,6 +298,8 @@ export async function mountOverlay(
     onMounted: opts.onMounted,
     onRestartRequested: opts.onRestartRequested,
     onSaveScriptRequested: opts.onSaveScriptRequested,
+    ...(opts.gcCutoffDays !== undefined ? { gcCutoffDays: opts.gcCutoffDays } : {}),
+    ...(opts.gcRunsRootOverride !== undefined ? { gcRunsRootOverride: opts.gcRunsRootOverride } : {}),
   }) as unknown as TuiComponentLike;
   // The custom() return type is Promise<T>; we don't await — the user
   // closing the overlay is what resolves it.
@@ -317,6 +328,8 @@ interface OverlayComponentOpts {
   readonly onSaveScriptRequested?:
     | ((runId: string) => void | Promise<void>)
     | undefined;
+  readonly gcCutoffDays?: number;
+  readonly gcRunsRootOverride?: string;
 }
 
 function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
@@ -324,6 +337,13 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   let cursor = 0;
   let phaseCursor = 0;
   let openedRunId: string | undefined;
+  // Slice 15: agent detail state
+  let openedAgentId: string | undefined;
+  let agentLogTail: string[] = [];
+  let agentDetailDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // Slice 15: GC dialog state
+  let gcDialogState: GcDialogState | null = null;
+  let gcBusy = false;
   let helpVisible = true;
   let banner: string | undefined;
   let lastSnapshot: ReadonlyArray<RunSummary> = opts.registry.listSummaries();
@@ -347,15 +367,62 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   const unsub = opts.registry.subscribe(debouncedRender);
   const unsubPhase = opts.phaseRegistry.subscribe((rid) => {
     // Coalesce phase-view repaints through the same debounce.
-    if (view === "phase-view" && rid === openedRunId) {
+    if ((view === "phase-view" || view === "agent-detail") && rid === openedRunId) {
       debouncedRender();
     }
   });
+
+  // Slice 15: Intercept pi-workflows.agent.log to feed agentLogTail
+  // when agent-detail is open. We wrap appendEntry locally in a thin
+  // shim that peeks at agent.log events; this avoids re-wrapping the
+  // bindRegistryToFeed wrapper.
+  const originalAppendEntry = opts.pi.appendEntry;
+  if (typeof originalAppendEntry === "function") {
+    // @ts-ignore -- runtime shim
+    opts.pi.appendEntry = (customType: string, data?: unknown) => {
+      try {
+        originalAppendEntry.call(opts.pi, customType, data);
+      } finally {
+        if (
+          customType === "pi-workflows.agent.log" &&
+          view === "agent-detail" &&
+          data !== null &&
+          typeof data === "object"
+        ) {
+          const d = data as Record<string, unknown>;
+          if (
+            typeof d.line === "string" &&
+            d.runId === openedRunId &&
+            d.agentId === openedAgentId
+          ) {
+            agentLogTail = [...agentLogTail, d.line].slice(-50);
+            // Debounce per PRD §10.6 — 100ms per (runId, agentId).
+            if (agentDetailDebounceTimer !== null) {
+              clearTimeout(agentDetailDebounceTimer);
+            }
+            agentDetailDebounceTimer = setTimeout(() => {
+              agentDetailDebounceTimer = null;
+              requestRender();
+            }, 100);
+          }
+        }
+      }
+    };
+  }
 
   const close = () => {
     if (renderTimer !== null) {
       clearTimeout(renderTimer);
       renderTimer = null;
+    }
+    if (agentDetailDebounceTimer !== null) {
+      clearTimeout(agentDetailDebounceTimer);
+      agentDetailDebounceTimer = null;
+    }
+    // Restore the original appendEntry shim (slice 15 agent.log intercept).
+    if (typeof originalAppendEntry === "function") {
+      // @ts-ignore -- restoring original
+      opts.pi.appendEntry = originalAppendEntry;
     }
     unsub();
     unsubPhase();
@@ -367,6 +434,49 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   };
 
   const buildRender = () => {
+    // Slice 15: GC dialog takes priority when open.
+    if (gcDialogState !== null) {
+      return { lines: renderGcDialog(gcDialogState).lines };
+    }
+
+    // Slice 15: agent detail view.
+    if (view === "agent-detail" && openedRunId !== undefined && openedAgentId !== undefined) {
+      const summary = opts.registry.getSummary(openedRunId);
+      const phaseSnap = opts.phaseRegistry.getRunSnapshot(openedRunId);
+      // Find agent across all phases.
+      let foundAgent = phaseSnap?.phases
+        .flatMap((p) => p.agents)
+        .find((a) => a.agentId === openedAgentId);
+      if (foundAgent !== undefined) {
+        const phaseName =
+          phaseSnap?.phases.find((p) =>
+            p.agents.some((a) => a.agentId === openedAgentId),
+          )?.phaseName ?? "";
+        const transcriptPath =
+          summary?.runDir !== undefined
+            ? agentTranscriptPath(summary.runDir, openedAgentId)
+            : undefined;
+        const snap: AgentDetailSnapshot = {
+          runId: openedRunId,
+          phaseName,
+          agent: foundAgent,
+          logTail: agentLogTail,
+          ...(transcriptPath !== undefined ? { transcriptPath } : {}),
+        };
+        const detailHelp = helpVisible ? helpForState("agent-detail", undefined) : [];
+        const detailOpts: { nowMs?: number; help?: typeof detailHelp; banner?: string } = {
+          nowMs: opts.nowMs(),
+          help: detailHelp,
+        };
+        if (banner !== undefined) detailOpts.banner = banner;
+        const rendered = renderAgentDetail(snap, detailOpts);
+        return { lines: rendered.lines };
+      }
+      // Agent vanished — fall back to phase view.
+      view = "phase-view";
+      openedAgentId = undefined;
+    }
+
     if (view === "phase-view" && openedRunId !== undefined) {
       const summary = opts.registry.getSummary(openedRunId);
       if (summary !== undefined) {
@@ -396,7 +506,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     const selected = sorted[cursor];
     const help = helpVisible ? helpForState(view, selected?.state) : [];
     const localIds = new Set(
-      lastSnapshot.filter((s) => opts.registry.hasHandle(s.runId)).map((s) => s.runId),
+      lastSnapshot.filter((s) => opts.registry.wasLocalRun(s.runId)).map((s) => s.runId),
     );
     return renderRunsList(sorted, {
       title: "pi-workflows  ·  /workflows overlay",
@@ -442,6 +552,15 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         return;
       }
       case "navigate-back":
+        // Agent detail (slice 15): Esc returns to phase view.
+        if (view === "agent-detail") {
+          view = "phase-view";
+          openedAgentId = undefined;
+          agentLogTail = [];
+          banner = undefined;
+          requestRender();
+          return;
+        }
         // Slice 14 — Esc on phase view returns to runs-list.
         if (view === "phase-view") {
           view = "runs-list";
@@ -451,7 +570,6 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           requestRender();
           return;
         }
-        // Agent detail (slice 15): would return to phase-view here.
         return;
       case "toggle-help":
         helpVisible = !helpVisible;
@@ -477,6 +595,22 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
             }
           }
           requestRender();
+        }
+        return;
+      case "open-agent-detail":
+        // Slice 15: Enter on phase view opens agent detail for cursor-pointed agent.
+        if (action.runId && openedRunId !== undefined) {
+          const phaseSnap = opts.phaseRegistry.getRunSnapshot(openedRunId);
+          const agentEntry = phaseSnap?.phases
+            .flatMap((p) => p.agents)
+            .find((_, idx) => idx === phaseCursor);
+          if (agentEntry !== undefined) {
+            openedAgentId = agentEntry.agentId;
+            agentLogTail = [];
+            view = "agent-detail";
+            banner = undefined;
+            requestRender();
+          }
         }
         return;
       case "pause": {
@@ -542,6 +676,101 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
             /* swallow */
           }
         }
+        // Slice 15: actually load candidates and show the dialog.
+        if (!gcBusy) {
+          gcBusy = true;
+          const activeIds = new Set(
+            lastSnapshot
+              .filter((s) => s.state === "running" || s.state === "paused")
+              .map((s) => s.runId),
+          );
+          loadGcCandidates({
+            ...(opts.gcCutoffDays !== undefined ? { cutoffDays: opts.gcCutoffDays } : {}),
+            ...(opts.gcRunsRootOverride !== undefined ? { runsRootOverride: opts.gcRunsRootOverride } : {}),
+            activeRunIds: activeIds,
+          })
+            .then((result) => {
+              gcDialogState = {
+                candidates: result.candidates,
+                skippedCount: result.skipped.length,
+                totalScanned: result.scanned,
+                cutoffDays: result.cutoffDays,
+                confirming: false,
+              };
+              requestRender();
+            })
+            .catch(() => {
+              banner = "gc: error loading candidates";
+              requestRender();
+            })
+            .finally(() => {
+              gcBusy = false;
+            });
+        }
+        return;
+      case "gc-apply":
+        if (gcDialogState !== null && !gcBusy) {
+          if (!gcDialogState.confirming) {
+            gcDialogState = { ...gcDialogState, confirming: true };
+            requestRender();
+          } else {
+            gcBusy = true;
+            const toDelete = [...gcDialogState.candidates];
+            applyGc(toDelete, {
+              ...(opts.gcCutoffDays !== undefined ? { cutoffDays: opts.gcCutoffDays } : {}),
+              ...(opts.gcRunsRootOverride !== undefined ? { runsRootOverride: opts.gcRunsRootOverride } : {}),
+            })
+              .then(({ deleted, errors }) => {
+                gcDialogState = {
+                  candidates: [],
+                  skippedCount: gcDialogState?.skippedCount ?? 0,
+                  totalScanned: gcDialogState?.totalScanned ?? 0,
+                  cutoffDays: gcDialogState?.cutoffDays ?? 30,
+                  confirming: false,
+                  done: { deleted: deleted.length, errors: errors.length },
+                };
+                requestRender();
+              })
+              .catch(() => {
+                banner = "gc: delete failed";
+                gcDialogState = null;
+                requestRender();
+              })
+              .finally(() => {
+                gcBusy = false;
+              });
+          }
+        }
+        return;
+      case "gc-cancel":
+        gcDialogState = null;
+        requestRender();
+        return;
+      case "open-transcript":
+        // Slice 15: the overlay can't block for the editor; signal to
+        // the banner and let the caller wire a real editor open.
+        // Production: workflowCmd.ts wraps with openTranscriptInEditor.
+        if (action.runId !== undefined && openedRunId !== undefined && openedAgentId !== undefined) {
+          const summary = opts.registry.getSummary(openedRunId);
+          const path = agentTranscriptPath(summary?.runDir, openedAgentId);
+          banner = path !== undefined
+            ? `transcript: ${path}`
+            : "transcript: path unknown";
+          requestRender();
+        }
+        return;
+      case "copy-prompt":
+        // Slice 15: banner with prompt text (clipboard wiring in workflowCmd.ts).
+        if (openedRunId !== undefined && openedAgentId !== undefined) {
+          const phaseSnap = opts.phaseRegistry.getRunSnapshot(openedRunId);
+          const agent = phaseSnap?.phases
+            .flatMap((p) => p.agents)
+            .find((a) => a.agentId === openedAgentId);
+          banner = agent?.summary
+            ? `copied: ${agent.summary.slice(0, 60)}…`
+            : "no prompt to copy";
+          requestRender();
+        }
         return;
       case "noop":
         // Intentional — disabled hotkey or no-selection. The help
@@ -551,11 +780,32 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   };
 
   const handleKey = (key: string): void => {
+    // Slice 15: GC dialog intercepts keys.
+    if (gcDialogState !== null) {
+      const k = key.toLowerCase();
+      if (k === "y" || key === "Enter" || key === "RETURN" || key === "\r") {
+        handleAction({ kind: "gc-apply" });
+      } else if (k === "n" || key === "Escape" || key === "ESC" || key === "\u001b") {
+        handleAction({ kind: "gc-cancel" });
+      } else if (gcDialogState.done !== undefined) {
+        // Any key closes the done screen.
+        handleAction({ kind: "gc-cancel" });
+      }
+      return;
+    }
+    // Agent detail view.
+    if (view === "agent-detail" && openedRunId !== undefined) {
+      const action = dispatchHotkey({ key, view });
+      handleAction(action);
+      return;
+    }
     if (view === "phase-view" && openedRunId !== undefined) {
       const summary = opts.registry.getSummary(openedRunId);
+      const isRemote = !opts.registry.wasLocalRun(openedRunId);
       const action = dispatchHotkey({
         key,
         view,
+        isRemote,
         ...(summary !== undefined
           ? { runState: summary.state, runId: openedRunId }
           : {}),
@@ -565,9 +815,12 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     }
     const sorted = sortAndClamp(lastSnapshot);
     const selected = sorted[cursor];
+    const isRemote =
+      selected !== undefined && !opts.registry.wasLocalRun(selected.runId);
     const action = dispatchHotkey({
       key,
       view,
+      isRemote,
       ...(selected !== undefined
         ? { runState: selected.state, runId: selected.runId }
         : {}),

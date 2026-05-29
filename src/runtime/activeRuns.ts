@@ -135,6 +135,13 @@ export class ActiveRunsRegistry {
   readonly #handles = new Map<string, Run>();
   readonly #summaries = new Map<string, RunSummary>();
   readonly #listeners = new Set<ActiveRunsListener>();
+  /**
+   * Track run IDs that were ever registered locally (even after the
+   * live handle is deleted post-termination). Used by the overlay to
+   * distinguish "was local, now terminal" (r/s OK) from "never had a
+   * local handle" (remote, r/s disabled).
+   */
+  readonly #everLocal = new Set<string>();
   /** Whether `applyEntry` is currently mid-dispatch — used to coalesce
    * notifications when multiple entries arrive in the same microtask. */
   #notifyScheduled = false;
@@ -146,6 +153,7 @@ export class ActiveRunsRegistry {
    */
   register(runId: string, run: Run, summaryPatch?: Partial<RunSummary>): void {
     this.#handles.set(runId, run);
+    this.#everLocal.add(runId); // F2: track local ownership even after handle drops
     const prior = this.#summaries.get(runId);
     const startedAt = summaryPatch?.startedAt ?? prior?.startedAt ?? "";
     const next: RunSummary = {
@@ -222,6 +230,17 @@ export class ActiveRunsRegistry {
 
   hasHandle(runId: string): boolean {
     return this.#handles.has(runId);
+  }
+
+  /**
+   * Slice 15 F2 — returns `true` if this run was ever registered with a
+   * live handle in this process (even if the handle has since been
+   * dropped on termination). Used by the overlay to distinguish
+   * "local-then-terminal" (r/s allowed) from "remote summary only"
+   * (r/s disabled).
+   */
+  wasLocalRun(runId: string): boolean {
+    return this.#everLocal.has(runId);
   }
 
   /**

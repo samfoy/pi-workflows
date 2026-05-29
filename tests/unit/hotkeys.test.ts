@@ -221,3 +221,112 @@ test("helpForState marks disabled bullets per state", () => {
     );
   }
 });
+
+// ─── Slice 15 F2: r/s disabled on remote runs ──────────────────
+
+test("F2: r on runs-list is noop for remote runs (terminal state)", () => {
+  const action = dispatchHotkey({
+    key: "r",
+    view: "runs-list",
+    runState: "done",
+    runId: "wf-ext000001",
+    isRemote: true,
+  });
+  assert.equal(action.kind, "noop", `r should be noop on remote runs; got ${action.kind}`);
+});
+
+test("F2: r on runs-list fires restart-requested for local terminal runs", () => {
+  const action = dispatchHotkey({
+    key: "r",
+    view: "runs-list",
+    runState: "done",
+    runId: "wf-loc000001",
+    isRemote: false,
+  });
+  assert.equal(action.kind, "restart-requested");
+});
+
+test("F2: s on phase-view is noop for remote runs (terminal state)", () => {
+  const action = dispatchHotkey({
+    key: "s",
+    view: "phase-view",
+    runState: "done",
+    runId: "wf-ext000001",
+    isRemote: true,
+  });
+  assert.equal(action.kind, "noop", `s should be noop on remote runs; got ${action.kind}`);
+});
+
+test("F2: s on phase-view fires save-script-requested for local terminal runs", () => {
+  const action = dispatchHotkey({
+    key: "s",
+    view: "phase-view",
+    runState: "done",
+    runId: "wf-loc000001",
+    isRemote: false,
+  });
+  assert.equal(action.kind, "save-script-requested");
+});
+
+test("F2: isHotkeyEnabled r=false for remote runs", () => {
+  const enabled = isHotkeyEnabled({
+    key: "r",
+    view: "runs-list",
+    runState: "done",
+    runId: "wf-ext000001",
+    isRemote: true,
+  });
+  assert.equal(enabled, false, "r should not be enabled for remote runs");
+});
+
+// ─── Slice 15: t/c hotkeys in agent-detail ─────────────────
+
+test("t on agent-detail dispatches open-transcript", () => {
+  const action = dispatchHotkey({
+    key: "t",
+    view: "agent-detail",
+    runId: "wf-abc0000001",
+  });
+  assert.equal(action.kind, "open-transcript");
+});
+
+test("c on agent-detail dispatches copy-prompt", () => {
+  const action = dispatchHotkey({
+    key: "c",
+    view: "agent-detail",
+    runId: "wf-abc0000001",
+  });
+  assert.equal(action.kind, "copy-prompt");
+});
+
+test("t on runs-list is noop", () => {
+  const action = dispatchHotkey({
+    key: "t",
+    view: "runs-list",
+    runState: "done",
+    runId: "wf-abc0000001",
+  });
+  assert.equal(action.kind, "noop");
+});
+
+test("Enter on phase-view dispatches open-agent-detail", () => {
+  const action = dispatchHotkey({
+    key: "Enter",
+    view: "phase-view",
+    runState: "running",
+    runId: "wf-abc0000001",
+  });
+  assert.equal(action.kind, "open-agent-detail");
+});
+
+// ─── Slice 15 F1: U3 remote-badge mutation guard (hotkey layer) ───
+// (The render-layer mutation test lives in runsList.test.ts)
+
+test("F2 mutation-guard: g is still enabled for remote runs", () => {
+  // g (GC) should be unaffected by isRemote — it's not restricted to local.
+  const action = dispatchHotkey({
+    key: "g",
+    view: "runs-list",
+  });
+  assert.equal(action.kind, "open-gc-dialog", "g should open GC dialog");
+});
