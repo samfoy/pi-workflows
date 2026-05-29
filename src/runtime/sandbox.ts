@@ -328,17 +328,33 @@ function violation(
  */
 export function detectShape(source: string): {
   body: string;
-  shape: "A" | "B";
+  shape: "A" | "B" | "C";
 } {
-  // Crude detection: shape B if the source contains a top-level
-  // `export default` (handle both `function` and arrow forms). Strip
-  // line comments first so a JSDoc reference doesn't confuse us.
-  // We do NOT try to handle commonjs `module.exports`; if you wrote
-  // CommonJS, the loader rejects you in slice 1.
+  // Strip line + block comments for shape detection only.
   const stripped = source
-    .replace(/\/\/[^\n]*\n/g, "\n") // line comments
-    .replace(/\/\*[\s\S]*?\*\//g, ""); // block comments
+    .replace(/\/\/[^\n]*\n/g, "\n")
+    .replace(/\/\*[\s\S]*?\*\//g, "");
 
+  // Shape C: meta-header style — `export const meta = {...}; export async function main(ctx)`.
+  // Used by write_workflow tool and bundled /codebase-audit.
+  // Transform: strip `export` keywords from const/function declarations,
+  // append `return await main(ctx);` as the implicit entry point.
+  if (
+    /(^|\n|\r)\s*export\s+const\s+meta\s*=/.test(stripped) &&
+    /(^|\n|\r)\s*export\s+(?:async\s+)?function\s+main\s*\(/.test(stripped)
+  ) {
+    // Remove `export ` prefix from all top-level `export const/let/var/function/async function`.
+    // This makes them plain declarations the vm can run as a script body.
+    const body =
+      source
+        .replace(/^(\s*)export\s+(const|let|var|async\s+function|function)\s/gm, "$1$2 ")
+        // Ensure `async function` is preserved correctly after stripping `export async function`
+        .replace(/^(\s*)export\s+(async)\s+(function)\s/gm, "$1$2 $3 ") +
+      "\nreturn await main(ctx);";
+    return { body, shape: "C" };
+  }
+
+  // Shape B: export default function / arrow.
   if (!/(^|\n|\r)\s*export\s+default\s+/.test(stripped)) {
     return { body: source, shape: "A" };
   }
