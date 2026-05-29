@@ -92,6 +92,8 @@ test("add: new .js file registers command within 200ms", { timeout: 5000 }, asyn
   const ok = await waitFor(() => registered.has("my-new-wf"), 1500);
 
   await handle.dispose();
+  // Small buffer to let chokidar's internal awaitWriteFinish poll fully drain.
+  await new Promise((r) => setTimeout(r, 100));
 
   assert.ok(ok, `command 'my-new-wf' should be registered within 1500ms`);
 });
@@ -155,6 +157,7 @@ test("rapid double-write: debounce coalesces 2 writes into exactly 1 re-register
   await new Promise((r) => setTimeout(r, 400));
 
   await handle.dispose();
+  await new Promise((r) => setTimeout(r, 100));
 
   assert.strictEqual(
     reregisterCount,
@@ -198,6 +201,7 @@ test("unlink: registry entry removed and unregisterCommand called", { timeout: 5
   const ok = await waitFor(() => !registry.has("gone-wf"), 1500);
 
   await handle.dispose();
+  await new Promise((r) => setTimeout(r, 100));
 
   assert.ok(ok, "registry entry should be removed after file deletion");
   assert.ok(
