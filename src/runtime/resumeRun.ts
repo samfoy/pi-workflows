@@ -623,6 +623,21 @@ export async function resumeRun(
               ? { type: "resume", at, reason }
               : { type: "resume", at },
           );
+          // slice_14_concerns W2: re-check sm.state AND signal.aborted
+          // AFTER ledger.append so a stop() that races mid-flush can't
+          // re-enter running.
+          if (sm.state !== "paused" || ctrl.signal.aborted) {
+            pauseGate.pause();
+            await ledger
+              .append({
+                type: "log",
+                at: (opts.nowIso ?? (() => new Date().toISOString()))(),
+                level: "warn",
+                message: `resumePaused aborted: state=${sm.state} aborted=${ctrl.signal.aborted} during ledger append`,
+              })
+              .catch(() => undefined);
+            return false;
+          }
           // slice_12_concerns B1: dedicated paused→running edge.
           try {
             await sm.go("running");

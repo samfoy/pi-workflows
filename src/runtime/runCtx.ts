@@ -91,6 +91,21 @@ export interface RunCtxHostOptions {
   readonly newAgentId?: () => string;
   /** Slice 10 will deliver this; slice 8a captures the prompt only. */
   readonly onFinishCallback?: (prompt: string) => void;
+  /**
+   * Slice 14 — fired on phase/agent state transitions to drive the TUI
+   * overlay's phase view. Optional; when absent (most unit tests),
+   * `ctx.phase` runs without overlay-event emission. RunManager wires
+   * this to `pi.appendEntry` so the phase view's `bindRegistryToFeed`
+   * picks the events up.
+   */
+  readonly emitOverlayEvent?: (
+    customType:
+      | "pi-workflows.phase.started"
+      | "pi-workflows.phase.ended"
+      | "pi-workflows.agent.started"
+      | "pi-workflows.agent.ended",
+    data: Readonly<Record<string, unknown>>,
+  ) => void;
 }
 
 /**
@@ -207,6 +222,17 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         phaseName: nameArg,
         agentCount: handles.length,
       });
+      // Slice 14: emit overlay event so the TUI phase view picks it up.
+      try {
+        opts.emitOverlayEvent?.("pi-workflows.phase.started", {
+          runId: opts.runMeta.id,
+          phaseName: nameArg,
+          agentCount: handles.length,
+          startedAt: phaseStartedAt,
+        });
+      } catch {
+        /* emission failures must not abort the phase */
+      }
 
       // Per-phase abort: aborting other agents when one rejects.
       const phaseCtrl = new AbortController();
@@ -240,13 +266,24 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       if (errors.length > 0) {
         // Abort siblings (best-effort; most are already settled).
         if (!phaseCtrl.signal.aborted) phaseCtrl.abort();
+        const phaseEndedAt = nowIso();
         await opts.ledger.append({
           type: "phase_end",
-          at: nowIso(),
+          at: phaseEndedAt,
           phaseName: nameArg,
           durationMs: phaseDurationMs,
           agentResults: { ok: okCount, error: errCount, cacheHit: cacheHitCount },
         });
+        try {
+          opts.emitOverlayEvent?.("pi-workflows.phase.ended", {
+            runId: opts.runMeta.id,
+            phaseName: nameArg,
+            endedAt: phaseEndedAt,
+            durationMs: phaseDurationMs,
+          });
+        } catch {
+          /* swallow */
+        }
         // Build an AggregateError whose .errors are the original
         // dispatcher errors (preserves MalformedAgentOutputError /
         // AgentSubprocessError class identity for slice-7 ledger
@@ -262,13 +299,24 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       const results = settled.map((s) =>
         s.status === "fulfilled" ? s.value : (null as unknown as AgentResult),
       );
+      const phaseEndedAt = nowIso();
       await opts.ledger.append({
         type: "phase_end",
-        at: nowIso(),
+        at: phaseEndedAt,
         phaseName: nameArg,
         durationMs: phaseDurationMs,
         agentResults: { ok: okCount, error: errCount, cacheHit: cacheHitCount },
       });
+      try {
+        opts.emitOverlayEvent?.("pi-workflows.phase.ended", {
+          runId: opts.runMeta.id,
+          phaseName: nameArg,
+          endedAt: phaseEndedAt,
+          durationMs: phaseDurationMs,
+        });
+      } catch {
+        /* swallow */
+      }
       // Strip non-JSON fields, return plain JSON-cloneable agent results.
       const out: AgentResultLike[] = results.map(
         (r): AgentResultLike => ({
@@ -311,6 +359,16 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       agentId: handle.id,
       promptHash: sha256(handle.prompt),
     });
+    try {
+      opts.emitOverlayEvent?.("pi-workflows.agent.started", {
+        runId: opts.runMeta.id,
+        phaseName,
+        agentId: handle.id,
+        startedAt,
+      });
+    } catch {
+      /* swallow */
+    }
 
     const key = cacheKey({
       workflowSourceSha256: opts.workflowSourceSha256,
@@ -366,6 +424,18 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         durationMs: nowMs() - t0,
         usage: result.usage,
       });
+      try {
+        opts.emitOverlayEvent?.("pi-workflows.agent.ended", {
+          runId: opts.runMeta.id,
+          phaseName,
+          agentId: handle.id,
+          endedAt: nowIso(),
+          durationMs: nowMs() - t0,
+          cached: true,
+        });
+      } catch {
+        /* swallow */
+      }
       return tagged;
     }
 
@@ -432,6 +502,18 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         durationMs: nowMs() - t0,
         usage: result.usage,
       });
+      try {
+        opts.emitOverlayEvent?.("pi-workflows.agent.ended", {
+          runId: opts.runMeta.id,
+          phaseName,
+          agentId: handle.id,
+          endedAt: nowIso(),
+          durationMs: nowMs() - t0,
+          cached: false,
+        });
+      } catch {
+        /* swallow */
+      }
       return { ...result, cached: false } as AgentResult & { cached: boolean };
     } catch (e) {
       // Persist the error before propagating.

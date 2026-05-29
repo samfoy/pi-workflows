@@ -216,3 +216,34 @@ test("maxRows trims oldest terminal runs but keeps active runs", () => {
   );
   assert.match(out.subtitle, /\+91 hidden/);
 });
+
+// ─── Slice 14: remote-run badge (U3) ──────────────────────────────
+
+test("U3: runs with no local handle render the [remote] badge", () => {
+  const summaries: RunSummary[] = [
+    summary({ runId: "wf-local0001", state: "running" }),
+    summary({ runId: "wf-remote001", state: "running" }),
+  ];
+  const out = renderRunsList(summaries, {
+    nowMs: NOW,
+    localRunIds: new Set(["wf-local0001"]),
+  });
+  const local = out.rows.find((r) => r.runId === "wf-local0001")!;
+  const remote = out.rows.find((r) => r.runId === "wf-remote001")!;
+  assert.ok(
+    !local.line.includes("remote"),
+    `local run must NOT carry remote badge; got: ${local.line}`,
+  );
+  assert.ok(
+    remote.line.includes("remote"),
+    `remote run must carry remote badge; got: ${remote.line}`,
+  );
+});
+
+test("U3: when localRunIds is undefined, NO badge is rendered (slice 13 behavior)", () => {
+  const summaries: RunSummary[] = [
+    summary({ runId: "wf-x0001", state: "running" }),
+  ];
+  const out = renderRunsList(summaries, { nowMs: NOW });
+  assert.ok(!out.rows[0]!.line.includes("remote"));
+});

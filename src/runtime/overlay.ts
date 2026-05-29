@@ -63,6 +63,12 @@ import {
   type OverlayView,
 } from "./hotkeys.js";
 import { renderRunsList } from "./runsList.js";
+import {
+  PhaseRegistry,
+  getPhaseRegistry,
+  type PhaseFeedEntry,
+} from "./phaseRegistry.js";
+import { renderPhaseView } from "./phaseView.js";
 
 /** Module-level flag enforcing PRD §10.1's "second invocation is no-op". */
 let _overlayOpen = false;
@@ -81,6 +87,8 @@ export interface MountOverlayOpts {
   readonly pi: ExtensionAPI;
   readonly ctx: ExtensionCommandContextLike;
   readonly registry?: ActiveRunsRegistry;
+  /** Slice 14 — phase registry (per-run state). Defaults to singleton. */
+  readonly phaseRegistry?: PhaseRegistry;
   /** Render debounce window in ms (PRD §10.6 — defaults to 30). */
   readonly renderDebounceMs?: number;
   /** Test seam — `false` forces non-TTY path even when stdout is a TTY. */
@@ -89,6 +97,18 @@ export interface MountOverlayOpts {
   readonly nowMs?: () => number;
   /** Test seam — capture overlay handle for stale-tick smoke. */
   readonly onMounted?: (api: OverlayHandleForTest) => void;
+  /**
+   * Slice 14 — callback fired when the user hits `r` (restart) on a
+   * terminal run. Production wiring: `runtime/restart.ts`. The overlay
+   * doesn't own the dispatch loop — it just signals intent.
+   */
+  readonly onRestartRequested?: (runId: string) => void | Promise<void>;
+  /**
+   * Slice 14 — callback fired when the user hits `s` (save) on a
+   * terminal run. Production wiring: `runtime/saveScript.ts`. The
+   * overlay doesn't own the file ops — it just signals intent.
+   */
+  readonly onSaveScriptRequested?: (runId: string) => void | Promise<void>;
 }
 
 /** Test-only handle exposing internal overlay state for assertion. */
@@ -111,10 +131,15 @@ export interface MountResult {
  * local registry. Cross-process feed (other windows' emissions) would
  * need a real pub/sub channel; this binding is the in-process
  * mirror that gets us 100% of the slice-13 acceptance.
+ *
+ * Slice 14 extends the binding to also drive the per-run
+ * {@link PhaseRegistry} from `pi-workflows.phase.{started,ended}` and
+ * `pi-workflows.agent.{started,ended}` events.
  */
 export function bindRegistryToFeed(
   pi: ExtensionAPI,
   registry: ActiveRunsRegistry = getActiveRuns(),
+  phaseRegistry: PhaseRegistry = getPhaseRegistry(),
 ): () => void {
   const original = pi.appendEntry;
   if (typeof original !== "function") {
@@ -130,12 +155,45 @@ export function bindRegistryToFeed(
       // registry update atomically.
       const entry = narrowEntry(customType, data);
       if (entry !== null) registry.applyEntry(entry);
+      const phaseEntry = narrowPhaseEntry(customType, data);
+      if (phaseEntry !== null) phaseRegistry.applyEntry(phaseEntry);
     }
   };
   return () => {
     // @ts-ignore -- restoring original
     pi.appendEntry = original;
   };
+}
+
+function narrowPhaseEntry(
+  customType: string,
+  data: unknown,
+): PhaseFeedEntry | null {
+  if (data === null || typeof data !== "object") return null;
+  const d = data as Record<string, unknown>;
+  if (typeof d.runId !== "string") return null;
+  switch (customType) {
+    case "pi-workflows.phase.started":
+      if (typeof d.phaseName !== "string" || typeof d.agentCount !== "number")
+        return null;
+      return { customType, data: d as never } as PhaseFeedEntry;
+    case "pi-workflows.phase.ended":
+      if (typeof d.phaseName !== "string") return null;
+      return { customType, data: d as never } as PhaseFeedEntry;
+    case "pi-workflows.agent.started":
+      if (typeof d.phaseName !== "string" || typeof d.agentId !== "string")
+        return null;
+      return { customType, data: d as never } as PhaseFeedEntry;
+    case "pi-workflows.agent.ended":
+      if (typeof d.phaseName !== "string" || typeof d.agentId !== "string")
+        return null;
+      return { customType, data: d as never } as PhaseFeedEntry;
+    case "pi-workflows.run.log":
+      if (typeof d.message !== "string") return null;
+      return { customType, data: d as never } as PhaseFeedEntry;
+    default:
+      return null;
+  }
 }
 
 function narrowEntry(customType: string, data: unknown): RunFeedEntry | null {
@@ -190,6 +248,11 @@ export async function mountOverlay(
     // Render the list once, send as a sendMessage card.
     const view = renderRunsList(registry.listSummaries(), {
       ...(opts.nowMs ? { nowMs: opts.nowMs() } : {}),
+      localRunIds: new Set(
+        registry.listSummaries()
+          .filter((s) => registry.hasHandle(s.runId))
+          .map((s) => s.runId),
+      ),
     });
     opts.pi.sendMessage(
       {
@@ -219,10 +282,13 @@ export async function mountOverlay(
     kb: kb as unknown as TuiKeybindingsLike,
     done: done as () => void,
     registry,
+    phaseRegistry: opts.phaseRegistry ?? getPhaseRegistry(),
     pi: opts.pi,
     nowMs: opts.nowMs ?? Date.now,
     debounceMs: opts.renderDebounceMs ?? 30,
     onMounted: opts.onMounted,
+    onRestartRequested: opts.onRestartRequested,
+    onSaveScriptRequested: opts.onSaveScriptRequested,
   }) as unknown as TuiComponentLike;
   // The custom() return type is Promise<T>; we don't await — the user
   // closing the overlay is what resolves it.
@@ -240,16 +306,26 @@ interface OverlayComponentOpts {
   readonly kb: TuiKeybindingsLike;
   readonly done: () => void;
   readonly registry: ActiveRunsRegistry;
+  readonly phaseRegistry: PhaseRegistry;
   readonly pi: ExtensionAPI;
   readonly nowMs: () => number;
   readonly debounceMs: number;
   readonly onMounted?: ((api: OverlayHandleForTest) => void) | undefined;
+  readonly onRestartRequested?:
+    | ((runId: string) => void | Promise<void>)
+    | undefined;
+  readonly onSaveScriptRequested?:
+    | ((runId: string) => void | Promise<void>)
+    | undefined;
 }
 
 function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   let view: OverlayView = "runs-list";
   let cursor = 0;
+  let phaseCursor = 0;
+  let openedRunId: string | undefined;
   let helpVisible = true;
+  let banner: string | undefined;
   let lastSnapshot: ReadonlyArray<RunSummary> = opts.registry.listSummaries();
 
   const requestRender = () => {
@@ -269,6 +345,12 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   };
 
   const unsub = opts.registry.subscribe(debouncedRender);
+  const unsubPhase = opts.phaseRegistry.subscribe((rid) => {
+    // Coalesce phase-view repaints through the same debounce.
+    if (view === "phase-view" && rid === openedRunId) {
+      debouncedRender();
+    }
+  });
 
   const close = () => {
     if (renderTimer !== null) {
@@ -276,6 +358,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       renderTimer = null;
     }
     unsub();
+    unsubPhase();
     try {
       opts.done();
     } catch {
@@ -284,28 +367,73 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   };
 
   const buildRender = () => {
+    if (view === "phase-view" && openedRunId !== undefined) {
+      const summary = opts.registry.getSummary(openedRunId);
+      if (summary !== undefined) {
+        const phaseSnap = opts.phaseRegistry.getRunSnapshot(openedRunId);
+        const help = helpVisible
+          ? helpForState("phase-view", summary.state)
+          : [];
+        const opts2: Parameters<typeof renderPhaseView>[2] = {
+          nowMs: opts.nowMs(),
+          help,
+        };
+        if (banner !== undefined) (opts2 as { banner?: string }).banner = banner;
+        if (
+          phaseSnap !== undefined &&
+          phaseCursor >= 0 &&
+          phaseSnap.totalAgents > 0
+        ) {
+          (opts2 as { cursor?: number }).cursor = phaseCursor;
+        }
+        const rendered = renderPhaseView(summary, phaseSnap, opts2);
+        return { lines: rendered.lines };
+      }
+      // Run vanished from registry — fall back to runs list.
+      view = "runs-list";
+    }
     const sorted = sortAndClamp(lastSnapshot);
     const selected = sorted[cursor];
-    const help = helpVisible
-      ? helpForState(view, selected?.state)
-      : [];
+    const help = helpVisible ? helpForState(view, selected?.state) : [];
+    const localIds = new Set(
+      lastSnapshot.filter((s) => opts.registry.hasHandle(s.runId)).map((s) => s.runId),
+    );
     return renderRunsList(sorted, {
       title: "pi-workflows  ·  /workflows overlay",
       nowMs: opts.nowMs(),
       ...(sorted.length > 0 ? { cursor } : {}),
       help,
+      localRunIds: localIds,
     });
   };
 
   const handleAction = (action: HotkeyAction): void => {
     switch (action.kind) {
       case "navigate-up":
+        if (view === "phase-view") {
+          if (phaseCursor > 0) {
+            phaseCursor--;
+            requestRender();
+          }
+          return;
+        }
         if (cursor > 0) {
           cursor--;
           requestRender();
         }
         return;
       case "navigate-down": {
+        if (view === "phase-view") {
+          if (openedRunId !== undefined) {
+            const snap = opts.phaseRegistry.getRunSnapshot(openedRunId);
+            const total = snap?.totalAgents ?? 0;
+            if (phaseCursor < Math.max(0, total - 1)) {
+              phaseCursor++;
+              requestRender();
+            }
+          }
+          return;
+        }
         const sorted = sortAndClamp(lastSnapshot);
         if (cursor < sorted.length - 1) {
           cursor++;
@@ -313,6 +441,18 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         }
         return;
       }
+      case "navigate-back":
+        // Slice 14 — Esc on phase view returns to runs-list.
+        if (view === "phase-view") {
+          view = "runs-list";
+          openedRunId = undefined;
+          phaseCursor = 0;
+          banner = undefined;
+          requestRender();
+          return;
+        }
+        // Agent detail (slice 15): would return to phase-view here.
+        return;
       case "toggle-help":
         helpVisible = !helpVisible;
         requestRender();
@@ -321,16 +461,22 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         close();
         return;
       case "open-phase-view":
-        // Slice 14 owns the actual phase view; emit an entry so a
-        // future overlay can subscribe.
-        if (typeof opts.pi.appendEntry === "function" && action.runId) {
-          try {
-            opts.pi.appendEntry("pi-workflows.overlay.open-phase-view", {
-              runId: action.runId,
-            });
-          } catch {
-            /* swallow */
+        // Slice 14: actually open the phase view in this overlay.
+        if (action.runId) {
+          openedRunId = action.runId;
+          view = "phase-view";
+          phaseCursor = 0;
+          banner = undefined;
+          if (typeof opts.pi.appendEntry === "function") {
+            try {
+              opts.pi.appendEntry("pi-workflows.overlay.open-phase-view", {
+                runId: action.runId,
+              });
+            } catch {
+              /* swallow */
+            }
           }
+          requestRender();
         }
         return;
       case "pause": {
@@ -355,16 +501,37 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         return;
       }
       case "restart-requested":
-        // Slice 14/15 wires the actual restart. Slice 13 emits the
-        // intent so future code can subscribe.
-        if (typeof opts.pi.appendEntry === "function" && action.runId) {
-          try {
-            opts.pi.appendEntry("pi-workflows.overlay.restart-requested", {
-              runId: action.runId,
-            });
-          } catch {
-            /* swallow */
+        // Slice 14: emit the appendEntry stub for cross-process awareness
+        // AND fire the on-restart callback so the host can start a fresh run.
+        if (action.runId) {
+          if (typeof opts.pi.appendEntry === "function") {
+            try {
+              opts.pi.appendEntry("pi-workflows.overlay.restart-requested", {
+                runId: action.runId,
+              });
+            } catch {
+              /* swallow */
+            }
           }
+          if (opts.onRestartRequested !== undefined) {
+            const runIdCopy = action.runId;
+            Promise.resolve(opts.onRestartRequested(runIdCopy)).catch(() => undefined);
+            banner = `restarting run ${shortenId(runIdCopy)}…`;
+            requestRender();
+          }
+        }
+        return;
+      case "save-script-requested":
+        if (action.runId && opts.onSaveScriptRequested !== undefined) {
+          const runIdCopy = action.runId;
+          Promise.resolve(opts.onSaveScriptRequested(runIdCopy)).catch(
+            () => undefined,
+          );
+          banner = `saving script for run ${shortenId(runIdCopy)}…`;
+          requestRender();
+        } else if (action.runId) {
+          banner = `save-script not wired (slice 14 callback missing)`;
+          requestRender();
         }
         return;
       case "open-gc-dialog":
@@ -384,6 +551,18 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   };
 
   const handleKey = (key: string): void => {
+    if (view === "phase-view" && openedRunId !== undefined) {
+      const summary = opts.registry.getSummary(openedRunId);
+      const action = dispatchHotkey({
+        key,
+        view,
+        ...(summary !== undefined
+          ? { runState: summary.state, runId: openedRunId }
+          : {}),
+      });
+      handleAction(action);
+      return;
+    }
     const sorted = sortAndClamp(lastSnapshot);
     const selected = sorted[cursor];
     const action = dispatchHotkey({
@@ -443,6 +622,10 @@ function sortAndClamp(snap: ReadonlyArray<RunSummary>): RunSummary[] {
     return ia - ib;
   });
   return sortedAll;
+}
+
+function shortenId(runId: string): string {
+  return runId.length > 12 ? runId.slice(0, 12) : runId;
 }
 
 /**

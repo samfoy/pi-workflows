@@ -140,6 +140,16 @@ export function registerWorkflowCommands(
             // per-process active-runs registry so the overlay's hotkey
             // wiring (`p`/`x`/`r`) and `/workflows kill` find it.
             activeRuns: getActiveRuns(),
+            // Slice 14: forward phase/agent overlay events to pi.appendEntry
+            // so the TUI overlay's bindRegistryToFeed picks them up.
+            emitOverlayEvent: (customType, data) => {
+              if (typeof pi.appendEntry !== "function") return;
+              try {
+                pi.appendEntry(customType, data);
+              } catch {
+                /* swallow — emission failures must not abort the run */
+              }
+            },
           });
           // Slice 10: active-runs index entry on start (PRD §6.6).
           if (typeof pi.appendEntry === "function") {

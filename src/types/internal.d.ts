@@ -227,6 +227,14 @@ export interface RunManifest {
   readonly parentStartTime: string;
   /** Per-boot identifier; empty string if unavailable on the host. */
   readonly parentBootId: string;
+
+  // ─── slice 14 (restart lineage) ───────────────────────────────
+  /**
+   * If this run was started via the `r` (restart) hotkey on a
+   * terminal-state run, this is the prior runId. Set by
+   * `restartFromRunDir`; not set on fresh-start runs.
+   */
+  readonly restartedFrom?: string;
 }
 
 /**

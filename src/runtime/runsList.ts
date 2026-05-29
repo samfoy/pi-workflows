@@ -78,6 +78,14 @@ export interface RenderOpts {
    * recent runs (active runs are never trimmed). Default 50.
    */
   readonly maxRows?: number;
+  /**
+   * Slice 14 — set of runIds for which this process holds a live `Run`
+   * handle. Runs in `runs` whose runId is NOT in this set get a
+   * "[remote]" badge in the approval cell so users can tell which runs
+   * they can pause/stop directly. When undefined, no badge is
+   * rendered (slice 13 behavior).
+   */
+  readonly localRunIds?: ReadonlySet<string>;
 }
 
 const DEFAULT_MAX = 50;
@@ -208,8 +216,11 @@ export function renderRunsList(
       if (Number.isFinite(start)) return fmtDuration(nowMs - start);
       return "—";
     })();
+    const isRemote =
+      opts.localRunIds !== undefined && !opts.localRunIds.has(r.runId);
     const approvalCell =
       r.approvalReason !== undefined ? r.approvalReason : "—";
+    const remoteBadge = isRemote ? " ［remote］" : "";
     const cursor =
       opts.cursor !== undefined && opts.cursor === idx ? "▸ " : "  ";
     const cells = [
@@ -218,7 +229,7 @@ export function renderRunsList(
       pad(r.state, COL_STATE),
       pad(startedRel, COL_REL),
       pad(dur, COL_DURATION),
-      approvalCell,
+      approvalCell + remoteBadge,
     ];
     return {
       runId: r.runId,

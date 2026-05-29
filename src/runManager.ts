@@ -243,6 +243,26 @@ export interface RunManagerStartOptions {
   readonly activeRuns?: import("./runtime/activeRuns.js").ActiveRunsRegistry;
   /** Slice 8a doesn't flush approval dialogs; this is purely for tests. */
   readonly trustedAtStart?: boolean;
+  /**
+   * Slice 14 — lineage marker set by the `r` (restart) hotkey. When
+   * set, RunManager writes `restartedFrom: <prior runId>` into the
+   * manifest.json so audit + GC can identify the chain.
+   */
+  readonly restartedFrom?: string;
+  /**
+   * Slice 14 — callback fired when the run emits a phase/agent
+   * overlay event. Defaults to a no-op when undefined; the extension
+   * wires this to `pi.appendEntry` at registration so the TUI
+   * overlay's `bindRegistryToFeed` picks them up. Tests can capture.
+   */
+  readonly emitOverlayEvent?: (
+    customType:
+      | "pi-workflows.phase.started"
+      | "pi-workflows.phase.ended"
+      | "pi-workflows.agent.started"
+      | "pi-workflows.agent.ended",
+    data: Readonly<Record<string, unknown>>,
+  ) => void;
 }
 
 const SLICE_PROJECT_VERSION = "0.1.0";
@@ -363,6 +383,7 @@ export async function startWorkflowRun(
         (approvalDecision.reason === "trusted" ||
           approvalDecision.reason === "user-always" ||
           approvalDecision.reason === "pi-p-trusted")),
+    ...(opts.restartedFrom !== undefined ? { restartedFrom: opts.restartedFrom } : {}),
   };
   await writeManifestPartial(runDirAbs, partialManifest);
 
@@ -502,6 +523,9 @@ export async function startWorkflowRun(
     ...(opts.dispatch ? { dispatch: opts.dispatch } : {}),
     ...(opts.nowIso ? { nowIso: opts.nowIso } : {}),
     ...(opts.nowMs ? { nowMs: opts.nowMs } : {}),
+    ...(opts.emitOverlayEvent
+      ? { emitOverlayEvent: opts.emitOverlayEvent }
+      : {}),
   });
 
   const sandbox = new Sandbox({
@@ -682,6 +706,26 @@ export async function startWorkflowRun(
             ? { type: "resume", at, reason }
             : { type: "resume", at },
         );
+        // slice_14_concerns W2: re-check `sm.state === "paused"` AND
+        // `ctrl.signal.aborted` AFTER ledger.append. A concurrent
+        // `stop()` / `cancel()` flips `aborted` synchronously even
+        // though the corresponding sm.go("stopped") is queued behind
+        // our resume entry on the ledger writeQueue. Without this
+        // recheck we'd transition paused→running for a doomed run.
+        if (sm.state !== "paused" || ctrl.signal.aborted) {
+          // Roll back the gate so the run isn't left in a half-released
+          // state if a future control op observes it.
+          pauseGate.pause();
+          await ledger
+            .append({
+              type: "log",
+              at: (opts.nowIso ?? (() => new Date().toISOString()))(),
+              level: "warn",
+              message: `resumePaused aborted: state=${sm.state} aborted=${ctrl.signal.aborted} during ledger append`,
+            })
+            .catch(() => undefined);
+          return false;
+        }
         // slice_12_concerns B1: this is the dedicated `paused →
         // running` edge per PRD §5.7. Slice 11's `failed → running`
         // advisory rollback is reachable ONLY from `failed` state

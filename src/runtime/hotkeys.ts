@@ -46,12 +46,14 @@ export type HotkeyActionKind =
   | "noop"
   | "navigate-up"
   | "navigate-down"
+  | "navigate-back"
   | "open-phase-view"
   | "close-overlay"
   | "pause"
   | "resume"
   | "stop"
   | "restart-requested"
+  | "save-script-requested"
   | "open-gc-dialog"
   | "toggle-help";
 
@@ -147,13 +149,16 @@ export function isHotkeyEnabled(input: DispatchInput): boolean {
       return input.runState === "running" || input.runState === "paused";
     case "r":
       if (input.view !== "runs-list") return false;
+      // Slice 14: `r` is enabled on paused (resume) AND terminal (restart).
+      if (input.runState === "paused") return true;
       return input.runState !== undefined && TERMINAL.has(input.runState);
     case "g":
       return input.view === "runs-list";
     case "s":
-      // Slice 14 wires `s` on the phase view; on the runs list it's
-      // disabled per PRD §10.4 (the `s` row is `(no-op)` for runs list).
-      return false;
+      // Slice 14: `s` (save) is enabled on phase-view, ONLY for terminal
+      // states (per PRD §10.4 — `s` saves the run's frozen script.js).
+      if (input.view !== "phase-view") return false;
+      return input.runState !== undefined && TERMINAL.has(input.runState);
     default:
       return false;
   }
@@ -177,10 +182,10 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
       return { kind: "toggle-help" };
     case "escape":
       if (input.view === "runs-list") return { kind: "close-overlay" };
-      // Phase/agent detail will return their own actions in slices
-      // 14/15; for slice 13 the overlay only mounts runs-list and
-      // close-overlay is the only Esc that's wired.
-      return { kind: "close-overlay" };
+      // Phase view: Esc returns to runs list. Slice 14 wires this.
+      if (input.view === "phase-view") return { kind: "navigate-back" };
+      // Agent detail (slice 15): Esc returns to phase view.
+      return { kind: "navigate-back" };
   }
 
   // From here on, every key needs a selected run *or* operates on
@@ -217,17 +222,25 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
       return { kind: "noop", runId, reason: "disabled-for-state" };
     }
     case "r": {
-      // Slice 13 emits `restart-requested` only — the actual restart
-      // (script.js copy + new runId mint) lives in slice 14/15 per the
-      // brief. Disabled if not terminal.
+      // Slice 14: `r` overloads to `resume` on paused runs and
+      // `restart-requested` on terminal runs (per PRD §10.4.1). Slice
+      // 13 only handled the terminal-restart leg; the resume leg was
+      // owned by `p`. Slice 14 unifies per the spec table.
+      if (input.runState === "paused")
+        return { kind: "resume", runId };
       if (input.runState !== undefined && TERMINAL.has(input.runState))
         return { kind: "restart-requested", runId };
       return { kind: "noop", runId, reason: "disabled-for-state" };
     }
     case "s": {
-      // Slice 13 doesn't wire `s` (slice 14 owns save-script). Always
-      // a no-op; surface a `disabled-for-state` reason so help can
-      // call out "save lives in phase view".
+      // Slice 14: `s` on phase-view is enabled only for terminal
+      // states per PRD §10.4. On runs-list it remains a no-op.
+      if (input.view !== "phase-view") {
+        return { kind: "noop", runId, reason: "disabled-for-state" };
+      }
+      if (input.runState !== undefined && TERMINAL.has(input.runState)) {
+        return { kind: "save-script-requested", runId };
+      }
       return { kind: "noop", runId, reason: "disabled-for-state" };
     }
     default:
@@ -259,7 +272,32 @@ export function helpForState(
     dis(key, label, false);
 
   if (view !== "runs-list") {
-    // Slices 14/15 own these views; we stub a help line that closes.
+    // Phase view (slice 14): full hotkey set.
+    if (view === "phase-view") {
+      const noSel = runState === undefined;
+      const isRunning = runState === "running";
+      const isPaused = runState === "paused";
+      const isTerminal = runState !== undefined && TERMINAL.has(runState);
+      return [
+        enabled("↑↓ jk", "agents"),
+        dis("Enter", "agent detail", noSel),
+        dis(
+          "p",
+          isPaused ? "resume" : "pause",
+          noSel || (!isRunning && !isPaused),
+        ),
+        dis(
+          "r",
+          isPaused ? "resume" : "restart",
+          noSel || (!isPaused && !isTerminal),
+        ),
+        dis("x", "stop", noSel || (!isRunning && !isPaused)),
+        dis("s", "save script", noSel || !isTerminal),
+        enabled("Esc", "back"),
+        enabled("?", "help"),
+      ];
+    }
+    // Slice 15 (agent detail): stub help — just back + help.
     return [enabled("Esc", "back"), enabled("?", "help")];
   }
 

@@ -127,10 +127,13 @@ test("F1: `x` matrix — only running/paused are stoppable", () => {
 
 // ─── State-guarded `r` (restart-requested) ─────────────────────────
 
-test("F1: `r` matrix — only terminal states emit restart-requested", () => {
+test("F1: `r` matrix — paused emits resume; terminal emits restart-requested", () => {
   for (const state of STATES) {
     const action = dispatch("r", state);
-    if (TERMINAL.has(state)) {
+    if (state === "paused") {
+      // Slice 14 / PRD §10.4.1: r overloads on paused → resume.
+      assert.equal(action.kind, "resume", `state=${state}`);
+    } else if (TERMINAL.has(state)) {
       assert.equal(action.kind, "restart-requested", `state=${state}`);
     } else {
       assert.equal(action.kind, "noop");
