@@ -31,6 +31,9 @@ import {
 } from "./commands/workflowCmd.js";
 import { sweepCrashedRuns } from "./runtime/crashSweep.js";
 import { bindRegistryToFeed } from "./runtime/overlay.js";
+import { createHotReloadWatcher } from "./runtime/hotReload.js";
+import { getActiveRuns } from "./runtime/activeRuns.js";
+import { projectWorkflowsDir, workflowsHome } from "./util/paths.js";
 import type {
   ExtensionAPI,
   ExtensionContextLike,
@@ -72,6 +75,11 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
   // `/workflows` so its handler can return the documented error
   // message; we just don't expose `/<workflowName>`.
   const recursive = initialCfg.recursive;
+
+  // Slice 16: hot-reload watcher handle — created in session_start,
+  // closed in session_shutdown. Using `let` + outer scope so the
+  // shutdown handler can reference it.
+  let hotReloadHandle: { dispose(): Promise<void> } | null = null;
 
   pi.on("session_start", async (_event, ctx) => {
     const cwd = (ctx as ExtensionContextLike).cwd ?? process.cwd();
@@ -155,6 +163,30 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     // Per-workflow `/<name>` stubs — skipped in recursive children.
     const count = registerWorkflowCommands(pi, registry, { recursive });
 
+    // Slice 16: start hot-reload watcher. Session-locked (disable
+    // checked at extension load). The mutable registry map is passed
+    // by reference so hot-reload events mutate the same map that
+    // registerWorkflowCommands registered from.
+    try {
+      const mutableRegistry = registry as Map<string, import("./types/internal.js").WorkflowFile>;
+      hotReloadHandle = await createHotReloadWatcher({
+        projectDir: projectWorkflowsDir(cwd),
+        personalDir: workflowsHome(),
+        registry: mutableRegistry,
+        pi,
+        activeRuns: getActiveRuns(),
+        recursive,
+        log: (level, msg) => {
+          if (level === "warn" || level === "error") {
+            ctx.ui.notify(`[pi-workflows] ${msg}`, level === "error" ? "error" : "warning");
+          }
+        },
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.ui.notify(`[pi-workflows] hot-reload failed to start: ${msg}`, "warning");
+    }
+
     // Emit a single info line on first successful registration so users
     // running `pi -e ./dist/index.js` get visible feedback.
     if (recursive) {
@@ -180,6 +212,11 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
   // pass; for slice 10 we only emit a notify line so users see the
   // hook firing in their session log.
   pi.on("session_shutdown", (_event, ctx) => {
+    // Slice 16: close the hot-reload watcher.
+    if (hotReloadHandle !== null) {
+      hotReloadHandle.dispose().catch(() => { /* ignore shutdown errors */ });
+      hotReloadHandle = null;
+    }
     try {
       ctx.ui.notify("[pi-workflows] session shutdown", "info");
     } catch {

@@ -35,7 +35,9 @@
     "typebox": "^1.0.0"
   },
   "peerDependenciesMeta": {
-    "typebox": { "optional": true }
+    "typebox": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -44,12 +46,17 @@
     "typescript": "^5.5.0"
   },
   "pi": {
-    "extensions": ["./dist/index.js"]
+    "extensions": [
+      "./dist/index.js"
+    ]
   },
   "files": [
     "dist/",
     "README.md",
     "PRD.md",
     "LICENSE"
-  ]
+  ],
+  "dependencies": {
+    "chokidar": "^5.0.0"
+  }
 }
