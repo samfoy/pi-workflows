@@ -48,6 +48,7 @@ import type {
   RunManifest,
   RunMetaData,
   RunOptions,
+  RunOutcome,
   TrustStore,
   WorkflowFile,
 } from "./types/internal.js";
@@ -75,6 +76,34 @@ export interface Run {
   cancel(reason?: unknown): void;
   /** Slice 9: how the run was approved (or `null` for `preApproved`). */
   readonly approvalDecision: ApprovalDecision | null;
+  /**
+   * Slice 10: resolves AFTER `promise` settles AND the ledger has
+   * been flushed. Always resolves (never rejects) with the full
+   * terminal classification. Slice 10's `deliverRunResult` consumes
+   * this; slice 13's TUI overlay subscribes via runs-index entries
+   * but can also await this directly.
+   */
+  readonly terminated: Promise<RunTerminalInfo>;
+}
+
+/** Slice 10: full terminal classification of a finished run. */
+export interface RunTerminalInfo {
+  readonly runId: string;
+  readonly workflowName: string;
+  readonly runDirAbs: string;
+  readonly outcome: RunOutcome;
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly durationMs: number;
+  /** Defined for `outcome=done`; `undefined` otherwise. */
+  readonly result: unknown;
+  /** Defined for `failed` and `cancelled-pre-run`; `null` otherwise. */
+  readonly error:
+    | { readonly name: string; readonly message: string; readonly stack?: string }
+    | null;
+  readonly agentCount: number;
+  readonly finishCallbackPrompt: string | null;
+  readonly approval: ApprovalDecision | null;
 }
 
 /** Slice 9: emitted to the caller (workflowCmd) when a run is denied. */
@@ -308,9 +337,10 @@ export async function startWorkflowRun(
       writer: ledger,
       ...(opts.nowIso ? { now: opts.nowIso } : {}),
     });
+    const cancelledAt = (opts.nowIso ?? (() => new Date().toISOString()))();
     await ledger.append({
       type: "cancelled",
-      at: (opts.nowIso ?? (() => new Date().toISOString()))(),
+      at: cancelledAt,
       cause: approvalDecision.cancelCause,
     });
     try {
@@ -327,14 +357,32 @@ export async function startWorkflowRun(
       decision: approvalDecision,
       message: errMsg,
     });
+    const terminalInfo: RunTerminalInfo = {
+      runId,
+      workflowName: workflow.name,
+      runDirAbs,
+      outcome: "cancelled-pre-run",
+      startedAt,
+      endedAt: cancelledAt,
+      durationMs: 0,
+      result: undefined,
+      error: { name: cancelled.name, message: cancelled.message },
+      agentCount: 0,
+      finishCallbackPrompt: null,
+      approval: approvalDecision,
+    };
+    // Pre-suppress unhandled rejection on the synthetic Promise.reject.
+    const rejectedPromise = Promise.reject(cancelled);
+    rejectedPromise.catch(() => undefined);
     return {
       runId,
       runDirAbs,
-      promise: Promise.reject(cancelled),
+      promise: rejectedPromise,
       signal: AbortSignal.abort(cancelled),
       getFinishCallbackPrompt: () => null,
       cancel: () => undefined,
       approvalDecision,
+      terminated: Promise.resolve(terminalInfo),
     };
   }
 
@@ -343,8 +391,11 @@ export async function startWorkflowRun(
   await sm.go("approved");
   await sm.go("running");
 
-  // Run-level abort.
+  // Run-level abort. Slice 10: track whether `cancel()` was called so
+  // the terminal classifier can distinguish `stopped` (user) from
+  // `failed` (script error).
   const ctrl = new AbortController();
+  let userStopRequested = false;
 
   // Build runCtx host bridge.
   const runMeta: RunMetaData = {
@@ -393,9 +444,14 @@ export async function startWorkflowRun(
   // Drive the run with a real try { ... } finally { sandbox.dispose() }
   // per slice_8a_concerns#H4 — if ledger.flush() throws, we still
   // tear down the Context (no host vm.Context leak).
+  let terminalResolve!: (info: RunTerminalInfo) => void;
+  const terminated = new Promise<RunTerminalInfo>((res) => {
+    terminalResolve = res;
+  });
   const promise = (async () => {
     let result: unknown;
     let runError: unknown = null;
+    let outcome: RunOutcome = "done";
     try {
       try {
         const out = await sandbox.runScript(sourceText);
@@ -421,10 +477,12 @@ export async function startWorkflowRun(
             },
           })
           .catch(() => undefined);
+        // Distinguish user-cancel (stopped) from script error (failed).
+        outcome = userStopRequested ? "stopped" : "failed";
         try {
-          await sm.go("failed");
+          await sm.go(outcome === "stopped" ? "stopped" : "failed");
         } catch {
-          // already failed — ignore
+          // already terminal — ignore
         }
       }
 
@@ -446,6 +504,39 @@ export async function startWorkflowRun(
       // Slice_8a_concerns#H4: real try/finally so a flush() throw still
       // runs dispose. Idempotent — safe to call twice.
       sandbox.dispose();
+      // Resolve the terminal info regardless of whether ledger.flush()
+      // threw — slice 10's deliverRunResult must always observe a
+      // settled run.
+      const endedAt = (opts.nowIso ?? (() => new Date().toISOString()))();
+      const startMs = Date.parse(startedAt);
+      const endMs = Date.parse(endedAt);
+      const durationMs =
+        Number.isFinite(startMs) && Number.isFinite(endMs)
+          ? Math.max(0, endMs - startMs)
+          : 0;
+      const captured = runError === null ? null : captureError(runError);
+      const errOut =
+        captured === null
+          ? null
+          : {
+              name: captured.name,
+              message: captured.message,
+              ...(captured.stack !== null ? { stack: captured.stack } : {}),
+            };
+      terminalResolve({
+        runId,
+        workflowName: workflow.name,
+        runDirAbs,
+        outcome,
+        startedAt,
+        endedAt,
+        durationMs,
+        result: outcome === "done" ? result : undefined,
+        error: errOut,
+        agentCount: ctxHost.getAgentCount(),
+        finishCallbackPrompt: ctxHost.getFinishCallbackPrompt(),
+        approval: approvalDecision,
+      });
     }
     if (runError !== null) {
       throw runError;
@@ -459,8 +550,12 @@ export async function startWorkflowRun(
     promise,
     signal: ctrl.signal,
     getFinishCallbackPrompt: ctxHost.getFinishCallbackPrompt,
-    cancel: (reason?: unknown) => ctrl.abort(reason),
+    cancel: (reason?: unknown) => {
+      userStopRequested = true;
+      ctrl.abort(reason);
+    },
     approvalDecision,
+    terminated,
   };
 }
 

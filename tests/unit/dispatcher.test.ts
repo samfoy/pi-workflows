@@ -17,6 +17,7 @@ import {
   buildPiArgs,
   dispatchAgent,
   PI_FINAL_RESULT_EVENT_TYPE,
+  PROPAGATED_BYPASS_ENV,
   RECURSION_GUARD_ENV,
   extractAssistantText,
 } from "../../src/runtime/dispatcher.js";
@@ -65,6 +66,67 @@ test("RECURSION_GUARD_ENV is the canonical pair", () => {
     PI_DISABLE_WORKFLOWS: "1",
     PI_WORKFLOWS_RECURSIVE: "1",
   });
+});
+
+// ─── Slice 10 W1 witnesses ─────────────────────────────────────
+
+test("buildChildEnv W1: PROPAGATED_BYPASS_ENV is load-bearing — removing PI_BYPASS_PERMISSIONS strips it", () => {
+  // Witness: the propagation list is the ONLY thing that keeps
+  // PI_BYPASS_PERMISSIONS in the child env. The strip-then-allowlist
+  // algorithm in buildChildEnv removes every PI_* var EXCEPT names
+  // explicitly enumerated here. If a future refactor drops
+  // "PI_BYPASS_PERMISSIONS" from the constant, the next assertion
+  // ("propagated") fails.
+  assert.ok(
+    PROPAGATED_BYPASS_ENV.includes("PI_BYPASS_PERMISSIONS"),
+    "PI_BYPASS_PERMISSIONS must be in PROPAGATED_BYPASS_ENV",
+  );
+  const env = buildChildEnv({
+    PI_BYPASS_PERMISSIONS: "1",
+    PI_FOO_OTHER: "y",  // arbitrary other PI_* var — must be stripped
+    UNRELATED: "x",      // non-PI — must inherit
+  });
+  assert.equal(env.PI_BYPASS_PERMISSIONS, "1", "propagated");
+  assert.equal(
+    env.PI_FOO_OTHER,
+    undefined,
+    "non-allowlisted PI_* must be stripped",
+  );
+  assert.equal(env.UNRELATED, "x", "non-PI vars passthrough");
+});
+
+test("buildChildEnv W1: every PI_* not in allowlist is stripped", () => {
+  // Comprehensive witness: a parent with several PI_* vars (none in
+  // the allowlist except the recursion-guard-overwritten pair) sees
+  // all stripped except the propagation list + the guard pair.
+  const env = buildChildEnv({
+    PI_BYPASS_PERMISSIONS: "1",
+    PI_DISABLE_WORKFLOWS: "0",     // overwritten to "1" by guard
+    PI_WORKFLOWS_RECURSIVE: "0",   // overwritten to "1" by guard
+    PI_DEBUG: "on",                // stripped
+    PI_FOO: "bar",                 // stripped
+    PI_TELEMETRY_KEY: "xyz",       // stripped
+    PATH: "/usr/bin",              // passthrough
+    HOME: "/home/x",               // passthrough
+  });
+  assert.equal(env.PI_BYPASS_PERMISSIONS, "1");
+  assert.equal(env.PI_DISABLE_WORKFLOWS, "1");
+  assert.equal(env.PI_WORKFLOWS_RECURSIVE, "1");
+  assert.equal(env.PI_DEBUG, undefined);
+  assert.equal(env.PI_FOO, undefined);
+  assert.equal(env.PI_TELEMETRY_KEY, undefined);
+  assert.equal(env.PATH, "/usr/bin");
+  assert.equal(env.HOME, "/home/x");
+});
+
+test("buildChildEnv W1: extra param overwrites parent and is then overwritten by recursion guard for the guard pair only", () => {
+  const env = buildChildEnv(
+    { PI_BYPASS_PERMISSIONS: "1", FOO: "old" },
+    { FOO: "new", PI_DISABLE_WORKFLOWS: "0" /* still overwritten to 1 */ },
+  );
+  assert.equal(env.FOO, "new");
+  assert.equal(env.PI_DISABLE_WORKFLOWS, "1");
+  assert.equal(env.PI_BYPASS_PERMISSIONS, "1");
 });
 
 test("PI_FINAL_RESULT_EVENT_TYPE is agent_end (real pi 0.74.0)", () => {

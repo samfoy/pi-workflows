@@ -89,6 +89,7 @@ export interface ExtensionAPI {
     },
   ): void;
   on(event: "session_start", handler: (event: unknown, ctx: ExtensionContextLike) => void | Promise<void>): void;
+  on(event: "session_shutdown", handler: (event: unknown, ctx: ExtensionContextLike) => void | Promise<void>): void;
   sendMessage<T = unknown>(
     message: {
       customType: string;
@@ -98,6 +99,15 @@ export interface ExtensionAPI {
     },
     options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
   ): void;
+  /**
+   * Slice 10: queue a follow-up user message into the LLM's next
+   * turn. Used by `ctx.finishCallback(prompt)` to bridge "workflow
+   * finished" → "LLM continues the conversation" per PRD §3.9.
+   * Optional in the type because pi versions <0.74.0 may not expose
+   * it; result delivery falls back to a plain `sendMessage` card if
+   * undefined.
+   */
+  sendUserMessage?(prompt: string): void;
   appendEntry?<T = unknown>(customType: string, data?: T): void;
 }
 
@@ -1017,4 +1027,98 @@ export interface ApprovalGateOptions {
   /** Surface persistence I/O failures (non-fatal). */
   readonly onPersistError?: (e: unknown) => void;
 }
+
+// ───────────────────────────────────────────────────────────────────────
+// Slice 10 — Result delivery
+// ───────────────────────────────────────────────────────────────────────
+
+/**
+ * The four user-visible terminal outcomes a run can settle into. Maps
+ * one-to-one to the four outcome cards (PRD §3.8 + slice-10 plan):
+ *
+ *   - `done`               → ✅ resolved with a value
+ *   - `failed`             → ❌ rejected (error before / during main())
+ *   - `stopped`            → ⏹ user-initiated cancel of a running run
+ *   - `cancelled-pre-run`  → ⊘ approval gate denied / disabled
+ *
+ * Resume + crash sweep land in slice 11; their terminal classification
+ * (`failed: parent-crash`) collapses into `failed` for the card.
+ */
+export type RunOutcome = "done" | "failed" | "stopped" | "cancelled-pre-run";
+
+/**
+ * Persisted summary of a finished run. Written atomically (tmp+rename)
+ * to `<runDir>/result.json` after `main()` settles. Slice 11's resume
+ * skips runs whose `result.json` already exists — they're terminal.
+ */
+export interface RunResultFile {
+  readonly runId: string;
+  readonly workflowName: string;
+  readonly outcome: RunOutcome;
+  readonly startedAt: string;
+  readonly endedAt: string;
+  readonly durationMs: number;
+  /**
+   * The user-visible result. For `outcome=done`:
+   *   - String → stored verbatim.
+   *   - Other JSON value → JSON.stringify result.
+   *   - undefined → null.
+   * For non-`done` outcomes: null.
+   */
+  readonly result: string | null;
+  /** Set on `failed` / `cancelled-pre-run`. */
+  readonly error: { readonly name: string; readonly message: string; readonly stack?: string } | null;
+  /** Slice 9 approval audit trail. */
+  readonly approval: ApprovalDecision | null;
+  /** Total agents `ctx.phase` dispatched (cache hits + misses). */
+  readonly agentCount: number;
+  /** Optional `ctx.finishCallback(prompt)` queued by main(). */
+  readonly finishCallbackPrompt: string | null;
+}
+
+/**
+ * Inputs the result-card builder needs. Pure function — no I/O, no
+ * Date.now() (caller supplies durationMs + endedAt). Lets unit tests
+ * assert exact output strings.
+ */
+export interface ResultCardInputs {
+  readonly outcome: RunOutcome;
+  readonly workflowName: string;
+  readonly runId: string;
+  readonly runDirAbs: string;
+  readonly durationMs: number;
+  readonly agentCount: number;
+  readonly result: unknown;
+  readonly error: { readonly name: string; readonly message: string } | null;
+  readonly approval: ApprovalDecision | null;
+}
+
+export interface ResultCardOutput {
+  readonly customType: string;
+  readonly content: string;
+  readonly details: Readonly<{
+    workflowName: string;
+    runId: string;
+    runDir: string;
+    outcome: RunOutcome;
+    durationMs: number;
+    agentCount: number;
+    approval: ApprovalDecision | null;
+    error?: { name: string; message: string };
+    truncated: boolean;
+  }>;
+}
+
+/**
+ * Slice 10 result-delivery custom-type identifier. Stable across
+ * versions (the TUI overlay in slice 13 filters on this prefix).
+ *
+ * NOTE: value-form runtime constants live in `runtime/resultDelivery.ts`
+ * (this file is `.d.ts` and cannot host runtime exports). Importers
+ * should reference them from there; the names below are kept as
+ * type-level documentation only.
+ */
+// export const RESULT_CUSTOM_TYPE = "pi-workflows.result"; // see resultDelivery.ts
+// export const RUN_STARTED_ENTRY = "pi-workflows.run.started"; // see resultDelivery.ts
+// export const RUN_ENDED_ENTRY = "pi-workflows.run.ended"; // see resultDelivery.ts
 

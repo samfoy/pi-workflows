@@ -1,29 +1,22 @@
 /**
- * pi-workflows — slash-command registration (slice 1 stubs).
+ * pi-workflows — slash-command registration.
  *
- * Slice 1 registers two kinds of slash commands:
+ * Slice 1 registered stubs; slice 9 added the approval gate; slice 10
+ * wires:
  *
- *   1. `/<workflowName>` for every discovered workflow file. Handler is
- *      a stub — emits a `pi.sendMessage` card explaining that the
- *      runtime is not yet wired. Slice 10 replaces the stub handler
- *      with the real fire-and-forget run trigger.
+ *   - End-to-end result delivery via `deliverRunResult` (cards +
+ *     `result.json` + `pi.appendEntry("pi-workflows.run.ended")` +
+ *     `pi.sendUserMessage(finishCallbackPrompt)`).
+ *   - Active-runs index `pi.appendEntry("pi-workflows.run.started")`
+ *     emitted as soon as `startWorkflowRun` returns a Run handle.
+ *   - PRD §3.6 / §13.7 recursion guard: when the extension was
+ *     loaded with `PI_WORKFLOWS_RECURSIVE=1`, no per-workflow
+ *     `/<name>` is registered and `/workflows` returns the documented
+ *     error message.
  *
- *   2. `/workflows` — the umbrella command. Slice 1 ships only the
- *      "list discovered workflows" path, which prints names + sources
- *      to the conversation. Slice 13 replaces this with the TUI
- *      overlay; slice 11 adds `resume`/`gc`/`list`/`show`/`kill`
- *      sub-commands. The slice-1 stub explicitly tells the user the
- *      overlay isn't available yet.
- *
- * The recursion-ban check (PRD §13.7) lives in `index.ts` — when
- * `PI_WORKFLOWS_RECURSIVE=1` is set we skip calling
- * `registerWorkflowCommands` for the per-workflow `/<name>` commands.
- * `/workflows` itself is still registered in nested sessions, and it
- * always errors with the documented message.
- *
- * Slice 2 carry-forward: helpers/constants previously exported via
- * `__testInternals` were moved to `workflowCmd.internal.ts`. See that
- * file's header for the convention.
+ * Slice 2 carry-forward: helpers/constants live in
+ * `workflowCmd.internal.ts`. Slice 13 will replace `/workflows` with
+ * the TUI overlay; slice 11 adds resume/list/show/kill sub-commands.
  */
 
 import type {
@@ -39,6 +32,7 @@ import {
   stubMessage,
 } from "./workflowCmd.internal.js";
 import { startWorkflowRun, RunCancelledError } from "../runManager.js";
+import { deliverRunResult, RUN_STARTED_ENTRY } from "../runtime/resultDelivery.js";
 import { makeConfirmDialog } from "../runtime/approval.js";
 import type { ApprovalDialog } from "../types/internal.js";
 
@@ -119,61 +113,89 @@ export function registerWorkflowCommands(
             approval,
             emitBanner,
           });
+          // Slice 10: active-runs index entry on start (PRD §6.6).
+          if (typeof pi.appendEntry === "function") {
+            try {
+              pi.appendEntry(RUN_STARTED_ENTRY, {
+                runId: run.runId,
+                workflowName: file.name,
+                runDir: run.runDirAbs,
+                approval: run.approvalDecision,
+                args,
+              });
+            } catch {
+              /* swallow */
+            }
+          }
           pi.sendMessage(
             {
               customType: STUB_CUSTOM_TYPE,
               content:
-                `started workflow "${file.name}" (runId=${run.runId})\n\n` +
-                "TUI overlay is slice-13 pending; tail " +
-                `${run.runDirAbs}/ledger.jsonl manually for now.`,
+                `▶ Workflow "${file.name}" started (runId=${run.runId})\n` +
+                `  Run dir: ${run.runDirAbs}`,
               display: true,
               details: {
                 workflowName: file.name,
                 runId: run.runId,
                 runDir: run.runDirAbs,
                 approval: run.approvalDecision,
-                slice: "9",
+                kind: "run-started",
               },
             },
             { triggerTurn: false, deliverAs: "nextTurn" },
           );
-          // Fire-and-forget the run; result delivery is slice 10.
-          run.promise.catch((err: unknown) => {
-            if (err instanceof RunCancelledError) return; // already surfaced below
+          // Slice 10: deliver the result asynchronously via
+          // `Run.terminated` so the slash-command handler returns
+          // immediately (fire-and-forget). The terminal info promise
+          // never rejects, so we don't have to chain a .catch.
+          run.promise.catch(() => undefined); // suppress unhandled
+          void run.terminated.then(async (info) => {
             try {
-              const msg = err instanceof Error ? err.message : String(err);
-              pi.sendMessage(
-                {
-                  customType: STUB_CUSTOM_TYPE,
-                  content: `workflow "${file.name}" (${run.runId}) failed: ${msg}`,
-                  display: true,
-                  details: { workflowName: file.name, runId: run.runId },
-                },
-                { triggerTurn: false, deliverAs: "nextTurn" },
-              );
+              await deliverRunResult({
+                pi,
+                outcome: info.outcome,
+                workflowName: info.workflowName,
+                runId: info.runId,
+                runDirAbs: info.runDirAbs,
+                startedAt: info.startedAt,
+                endedAt: info.endedAt,
+                durationMs: info.durationMs,
+                agentCount: info.agentCount,
+                result: info.result,
+                error: info.error,
+                approval: info.approval,
+                finishCallbackPrompt: info.finishCallbackPrompt,
+              });
             } catch {
-              // ignore
+              /* never let delivery crash the session */
             }
           });
         } catch (err) {
           if (err instanceof RunCancelledError) {
-            pi.sendMessage(
-              {
-                customType: STUB_CUSTOM_TYPE,
-                content:
-                  `workflow "${file.name}" cancelled: ${err.message}`,
-                display: true,
-                details: {
-                  workflowName: file.name,
-                  runId: err.runId,
-                  runDir: err.runDirAbs,
-                  cancelCause: err.cancelCause,
-                  approval: err.approvalDecision,
-                  slice: "9",
-                },
-              },
-              { triggerTurn: false, deliverAs: "nextTurn" },
-            );
+            // Slice 10: route the cancelled-pre-run path through
+            // `deliverRunResult` so the card matches the same template
+            // (and `result.json` exists). RunCancelledError doesn't
+            // carry timing info; fabricate a minimal block.
+            try {
+              const nowIso = new Date().toISOString();
+              await deliverRunResult({
+                pi,
+                outcome: "cancelled-pre-run",
+                workflowName: file.name,
+                runId: err.runId,
+                runDirAbs: err.runDirAbs,
+                startedAt: nowIso,
+                endedAt: nowIso,
+                durationMs: 0,
+                agentCount: 0,
+                result: undefined,
+                error: { name: err.name, message: err.message },
+                approval: err.approvalDecision,
+                finishCallbackPrompt: null,
+              });
+            } catch {
+              /* swallow */
+            }
             return;
           }
           // Stub fallback so a runtime-init failure doesn't crash the

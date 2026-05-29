@@ -58,6 +58,10 @@ export interface FakeAppendEntry {
   readonly data: unknown;
 }
 
+export interface FakeUserMessage {
+  readonly prompt: string;
+}
+
 export interface FakeContext {
   readonly cwd: string;
   readonly ui: {
@@ -78,6 +82,7 @@ export interface FakePi {
     message: { customType: string; content: string; display?: boolean; details?: T },
     options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
   ): void;
+  sendUserMessage(prompt: string): void;
   appendEntry<T = unknown>(customType: string, data?: T): void;
 
   // ── Inspection ────────────────────────────────────────────────
@@ -86,10 +91,13 @@ export interface FakePi {
   readonly messages: ReadonlyArray<FakeSentMessage>;
   readonly notifications: ReadonlyArray<FakeNotification>;
   readonly entries: ReadonlyArray<FakeAppendEntry>;
+  readonly userMessages: ReadonlyArray<FakeUserMessage>;
 
   // ── Drivers ───────────────────────────────────────────────────
   /** Fires every `session_start` handler in registration order. */
   fireSessionStart(cwd: string): Promise<void>;
+  /** Slice 10: fires `session_shutdown` handlers in registration order. */
+  fireSessionShutdown(cwd: string): Promise<void>;
   /** Invokes a registered slash command's handler. */
   invokeCommand(name: string, args?: string): Promise<void>;
   /** Resets observed-call buffers without forgetting registrations. */
@@ -107,6 +115,7 @@ export function makeFakePi(_opts: MakeFakePiOpts = {}): FakePi {
   const messages: FakeSentMessage[] = [];
   const notifications: FakeNotification[] = [];
   const entries: FakeAppendEntry[] = [];
+  const userMessages: FakeUserMessage[] = [];
 
   const makeCtx = (cwd: string): FakeCommandContext => ({
     cwd,
@@ -132,6 +141,9 @@ export function makeFakePi(_opts: MakeFakePiOpts = {}): FakePi {
         : { ...message };
       messages.push(entry);
     },
+    sendUserMessage(prompt) {
+      userMessages.push({ prompt });
+    },
     appendEntry(customType, data) {
       entries.push({ customType, data });
     },
@@ -141,9 +153,17 @@ export function makeFakePi(_opts: MakeFakePiOpts = {}): FakePi {
     messages,
     notifications,
     entries,
+    userMessages,
 
     async fireSessionStart(cwd) {
       const list = handlers.get("session_start") ?? [];
+      const ctx = makeCtx(cwd);
+      for (const h of list) {
+        await h({}, ctx);
+      }
+    },
+    async fireSessionShutdown(cwd) {
+      const list = handlers.get("session_shutdown") ?? [];
       const ctx = makeCtx(cwd);
       for (const h of list) {
         await h({}, ctx);
@@ -159,6 +179,7 @@ export function makeFakePi(_opts: MakeFakePiOpts = {}): FakePi {
       messages.length = 0;
       notifications.length = 0;
       entries.length = 0;
+      userMessages.length = 0;
     },
   };
   return pi;

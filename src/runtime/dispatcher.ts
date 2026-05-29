@@ -108,32 +108,51 @@ export const RECURSION_GUARD_ENV = Object.freeze({
  * Slice 9: env vars that propagate from parent to child unchanged.
  * Per PRD §7.5: when the parent run is bypassed via
  * `--bypass-permissions`, the spawned `pi -p` sub-agents inherit the
- * bypass (claude-code parity). The dispatcher just forwards the env
- * var; nothing else.
+ * bypass (claude-code parity).
+ *
+ * Slice 10 W1 fix (option a / pragmatic): `buildChildEnv` now strips
+ * EVERY `PI_*` env var from the parent inheritance EXCEPT the names
+ * in this allowlist (plus the recursion-guard pair which is set
+ * unconditionally below). This makes the allowlist load-bearing —
+ * removing `PI_BYPASS_PERMISSIONS` here causes the test
+ * `"buildChildEnv W1: PROPAGATED_BYPASS_ENV is load-bearing —
+ * removing PI_BYPASS_PERMISSIONS strips it"` to fail by direct
+ * inspection of the constant. Non-PI_ vars (PATH, HOME, AWS_*,
+ * LANG, …) still pass through so real `pi` spawn works. Recursion
+ * guard always wins.
  */
-export const PROPAGATED_BYPASS_ENV = Object.freeze([
+export const PROPAGATED_BYPASS_ENV: readonly string[] = Object.freeze([
   "PI_BYPASS_PERMISSIONS",
 ]);
 
 /**
- * Build `process.env`-shaped object for the child. Per §13.7 the two
- * recursion-guard vars OVERWRITE any pre-existing values.
+ * Build `process.env`-shaped object for the child.
+ *
+ * Algorithm (slice 10):
+ *   1. Spread `envBase` so PATH / HOME / AWS_xxx / LANG / etc inherit
+ *      naturally.
+ *   2. Walk the inherited keys; strip any `PI_*` name not present in
+ *      `PROPAGATED_BYPASS_ENV`. Recursion-guard vars are stripped here
+ *      too, then re-added in step 4 so the same code path works
+ *      whether the parent had them or not.
+ *   3. Apply caller-supplied `extra` (tests / future hooks).
+ *   4. Apply `RECURSION_GUARD_ENV` unconditionally — it OVERWRITES
+ *      any value the parent or `extra` set per PRD §13.7.
  */
 export function buildChildEnv(
   envBase: NodeJS.ProcessEnv = process.env,
   extra?: Readonly<Record<string, string>>,
 ): NodeJS.ProcessEnv {
-  const propagated: Record<string, string> = {};
-  for (const key of PROPAGATED_BYPASS_ENV) {
-    const v = envBase[key];
-    if (v !== undefined) propagated[key] = v;
+  const child: NodeJS.ProcessEnv = { ...envBase };
+  const allow = new Set<string>(PROPAGATED_BYPASS_ENV);
+  for (const key of Object.keys(child)) {
+    if (key.startsWith("PI_") && !allow.has(key)) {
+      delete child[key];
+    }
   }
-  return {
-    ...envBase,
-    ...propagated,
-    ...(extra ?? {}),
-    ...RECURSION_GUARD_ENV,
-  };
+  if (extra) Object.assign(child, extra);
+  Object.assign(child, RECURSION_GUARD_ENV);
+  return child;
 }
 
 /**

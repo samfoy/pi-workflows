@@ -100,8 +100,8 @@ test("smoke: drops foo.js → /foo registered → invoking returns stub", async 
         assert.ok(stubMsg, "expected a stub message after /foo invocation");
         assert.match(
           stubMsg!.content,
-          /started workflow|runtime-init failed/,
-          "slice-8a stub body should report run-start or init-failure",
+          /Workflow "foo" started|started workflow|runtime-init failed/,
+          "slice-10 stub body should report run-start or init-failure",
         );
         assert.deepEqual(
           (stubMsg!.details as { workflowName: string }).workflowName,

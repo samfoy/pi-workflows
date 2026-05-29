@@ -1,21 +1,22 @@
 /**
- * pi-workflows — extension entry point (slice 1 skeleton).
+ * pi-workflows — extension entry point.
  *
  * Wires up:
  *
- *   - Disable knobs (env first, then setting) per PRD §3.6.
+ *   - Disable knobs (env first, then setting) per PRD §3.6. Slice 10
+ *     audit confirms env wins unconditionally; project setting then
+ *     user setting; recursion guard never disables, only suppresses.
  *   - Recursion ban (`PI_WORKFLOWS_RECURSIVE=1`) per PRD §13.7. The
  *     extension still loads in nested sessions; we just skip
  *     `registerCommand` for per-workflow `/<name>` commands and route
  *     `/workflows` to the documented error message.
- *   - One-shot workflow discovery on `session_start`. Hot-reload lands
- *     in slice 16.
- *   - Per-workflow stub slash commands (slice 10 replaces the handler).
- *   - The `/workflows` umbrella command (slice 13 replaces with TUI).
- *   - A startup warning if pi-conductor is also installed (PRD pin #2).
- *
- * Slice 1 deliberately does **no** runtime work — no sandbox, no cache,
- * no dispatcher, no ledger. Invoking a workflow returns a stub card.
+ *   - One-shot workflow discovery on `session_start`. Hot-reload
+ *     lands in slice 16.
+ *   - `session_shutdown` lifecycle hook: a slim cleanup pass that
+ *     surfaces a final notify line. Slice 11 will replace this with
+ *     the real "abort active runs" + crash-sweep entry point.
+ *   - Per-workflow stub slash commands; `/workflows` umbrella;
+ *     conductor-coexistence warning.
  */
 
 import { existsSync, readdirSync } from "node:fs";
@@ -111,6 +112,18 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
         "[pi-workflows] no workflows discovered — try /workflows for help",
         "info",
       );
+    }
+  });
+
+  // Slice 10: install a `session_shutdown` lifecycle hook stub. Slice
+  // 11 will replace this with the real crash-sweep + abort-active-runs
+  // pass; for slice 10 we only emit a notify line so users see the
+  // hook firing in their session log.
+  pi.on("session_shutdown", (_event, ctx) => {
+    try {
+      ctx.ui.notify("[pi-workflows] session shutdown", "info");
+    } catch {
+      /* ignore */
     }
   });
 }
