@@ -36,8 +36,8 @@ export class MalformedAgentOutputError extends Error {
     | "trailing"
     | "empty-stdout-success"
     | "empty-stdout-failure"
-    | "no-agent-end-event"
-    | "unexpected-schema";
+    | "no-agent-end-event" // reserved for v2 — see docs/parity-gaps.md
+    | "unexpected-schema"; // reserved for v2 — see docs/parity-gaps.md
 
   constructor(opts: {
     agentId: string;

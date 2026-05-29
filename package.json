@@ -9,7 +9,7 @@
     "subagents",
     "claude-code-parity"
   ],
-  "private": true,
+  "private": false,
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -48,12 +48,19 @@
   "pi": {
     "extensions": [
       "./dist/index.js"
+    ],
+    "skills": [
+      "./skills/pi-workflows/SKILL.md"
     ]
   },
   "files": [
     "dist/",
+    "docs/",
+    "examples/",
+    "skills/",
     "README.md",
-    "PRD.md",
+    "CHANGELOG.md",
+    "CONTRIBUTING.md",
     "LICENSE"
   ],
   "dependencies": {

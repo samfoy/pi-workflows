@@ -1,22 +1,18 @@
-# Source files (built into dist/) — only ship the compiled bundle.
+# Source TypeScript (dist/ is what ships)
 src/
+tsconfig*.json
+esbuild.config.js
+
+# Tests and fixtures
 tests/
 scripts/
+
+# Internal docs (PRD, plan — not user-facing)
+PRD.md
 plan.md
 SPIKE-FINDINGS.md
 
-# Configs
-tsconfig.json
-tsconfig.build.json
-tsconfig.test.json
-
-# Dev artifacts
-*.tsbuildinfo
-coverage/
-.vscode/
-.idea/
-
-# OS
-.DS_Store
-*.swp
-*.swo
+# Dev tooling
+node_modules/
+*.log
+.env

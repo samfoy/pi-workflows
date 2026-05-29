@@ -294,6 +294,27 @@ test("bundled codebase-audit: second run gets cache hits on analyze agents", asy
   const cacheHits1 = entries1.filter((e) => e.type === "agent_cache_hit");
   assert.equal(cacheHits1.length, 0, "first run should have 0 cache hits");
 
+  // H3 (slice 18): vote and summarize agents must NOT appear in cache.jsonl
+  // on the first run — their prompts embed run-specific JSON (findings list
+  // derived from analyze results) so they should always miss on a fresh run.
+  const cacheJsonlPath = join(run1.runDirAbs, "cache.jsonl");
+  const { existsSync, readFileSync } = await import("node:fs");
+  if (existsSync(cacheJsonlPath)) {
+    const cacheLines = readFileSync(cacheJsonlPath, "utf-8")
+      .split("\n")
+      .filter(Boolean)
+      .map((l) => { try { return JSON.parse(l); } catch { return null; } })
+      .filter(Boolean) as Array<{ agentId?: string }>;
+    const voteOrSummarizeInCache = cacheLines.filter(
+      (e) => typeof e.agentId === "string" && (e.agentId.startsWith("voter-") || e.agentId === "summarize"),
+    );
+    assert.equal(
+      voteOrSummarizeInCache.length,
+      0,
+      `vote/summarize agents should not be in cache on first run, found: ${voteOrSummarizeInCache.map((e) => e.agentId).join(", ")}`,
+    );
+  }
+
   // Second run: reuse the SAME runDir (which has cache.jsonl from first run).
   // Force same runId via newRunIdFactory. CacheStore replays the existing
   // cache.jsonl and the analyze agents hit cache on the second pass.

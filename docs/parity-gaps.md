@@ -91,3 +91,62 @@ rows + `tests/integration/abortSignalE2E.test.ts`.
 For reference, before slice 9 the parity-gaps doc claimed slice 8a's
 surface matched the API "fully". That was incorrect — `ctx.signal` was
 deferred to slice 9. The wording above corrects the false claim.
+
+## v1 UX gap — r/s hotkeys on remote runs are silent
+
+**Trigger:** slice 14 carry-forward U3, slice 15 F2.
+
+**v1 behavior:** when a remote run is selected in the runs-list overlay,
+pressing `r` (restart) or `s` (save-script) shows the message "operation
+requires local handle" and takes no action. There is no toast or explicit
+visual feedback beyond the status-line message.
+
+**Why deferred:** implementing a full cross-process restart/save requires
+IPC. Slice 14 chose option (a) — enforce rejection at the hotkey layer —
+over option (b) (implement cross-process). The UX gap is the absence of a
+proper toast.
+
+**Revisit trigger:** user complaints about silent rejection on remote runs.
+
+## v1 doc gap — `--no-color` and `--no-loading` flags removed
+
+**Trigger:** slice 18 docs review.
+
+**v1 behavior:** the PRD §5.5 originally documented `--no-color` and
+`--no-loading` as flags on the pi subprocess invocation. Both were removed
+from the implementation (the subprocess fleet uses `pi --mode json` which
+has no color/loading output). The docs now correctly omit these flags.
+
+**Why:** `pi --mode json` suppresses all interactive output by design; the
+flags are redundant.
+
+## v1 behavior note — `agent_end` as final event type
+
+**Trigger:** slice 18 docs review.
+
+**v1 behavior:** the JSON-stream parser (slice 5) treats `agent_end` as
+the sentinel event that terminates an agent's event stream. This matches
+the actual pi `--mode json` output vocabulary. Earlier drafts of the PRD
+used `run_end` — the implementation uses `agent_end`.
+
+## v1 behavior note — save-script silently skips `git add`
+
+**Trigger:** slice 14 save-script implementation.
+
+**v1 behavior:** the `s` save-script hotkey writes the script to
+`.pi/workflows/<name>.js` but silently skips `git add` when the project
+has no `.git` root (e.g. home directory, tmpdir). This is intentional —
+forcing a `git add` in a non-git tree would fail noisily. The TUI shows
+the save path regardless.
+
+**Revisit trigger:** user wants auto-staging in git repos.
+
+## v1 behavior note — `pi.exec` vs `child_process.spawn`
+
+**Trigger:** slice 18 docs review.
+
+**v1 behavior:** workflow scripts do NOT have access to `pi.exec` or any
+child_process API. The sandbox explicitly excludes `child_process`.
+If a workflow needs to run a shell command, it should use `ctx.agent`
+to ask pi to run it via a tool call. This matches the security model
+(sandboxed scripts should not get unmediated shell access).
