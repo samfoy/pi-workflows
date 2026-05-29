@@ -229,3 +229,135 @@ test("registerWriteWorkflowTool: degrades gracefully when registerTool absent", 
   // Must not throw
   assert.doesNotThrow(() => registerWriteWorkflowTool({ pi, getCwd: () => "/tmp" }));
 });
+
+// ─── runNow flow ──────────────────────────────────────────────────────────────
+
+test("runNow: calls startRun with the saved WorkflowFile", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ww-runnow-"));
+  try {
+    const pi = makeFakePi();
+    let startRunCalled = false;
+    let startRunWorkflow: unknown = null;
+    let startRunCtxArg: unknown = null;
+
+    registerWriteWorkflowTool({
+      pi,
+      getCwd: () => dir,
+      saveDirOverride: dir,
+      startRun: async (workflow, _input, ctx) => {
+        startRunCalled = true;
+        startRunWorkflow = workflow;
+        startRunCtxArg = ctx;
+      },
+    });
+
+    const script = [
+      `export const meta = { name: "run-now-wf", description: "x", version: "1.0.0" };`,
+      `export async function main(ctx) { return "done"; }`,
+    ].join("\n");
+    const fakeCtx = { ui: { confirm: async () => true } };
+    const result = await pi.registeredTool!.execute(
+      "id-rn",
+      { name: "run-now-wf", script, runNow: true },
+      fakeCtx as any,
+    );
+
+    assert.ok(startRunCalled, "startRun should have been called");
+    assert.equal((startRunWorkflow as any)?.name, "run-now-wf");
+    assert.equal((startRunWorkflow as any)?.absPath, join(dir, "run-now-wf.js"));
+    assert.ok(startRunCtxArg === fakeCtx, "ctx should be passed through");
+    assert.ok(result.details?.runStarted === true, "runStarted should be true in result");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runNow: absent — startRun not called", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ww-nornow-"));
+  try {
+    const pi = makeFakePi();
+    let startRunCalled = false;
+    registerWriteWorkflowTool({
+      pi,
+      getCwd: () => dir,
+      saveDirOverride: dir,
+      startRun: async () => { startRunCalled = true; },
+    });
+
+    const script = [
+      `export const meta = { name: "no-run-wf", description: "x", version: "1.0.0" };`,
+      `export async function main(ctx) { return "ok"; }`,
+    ].join("\n");
+    await pi.registeredTool!.execute("id-nr", { name: "no-run-wf", script }, {} as any);
+
+    assert.ok(!startRunCalled, "startRun should NOT be called when runNow is absent");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runNow: startRun throws — result contains runError, runStarted false", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ww-runerr-"));
+  try {
+    const pi = makeFakePi();
+    registerWriteWorkflowTool({
+      pi,
+      getCwd: () => dir,
+      saveDirOverride: dir,
+      startRun: async () => { throw new Error("approval denied"); },
+    });
+
+    const script = [
+      `export const meta = { name: "err-wf", description: "x", version: "1.0.0" };`,
+      `export async function main(ctx) { return "ok"; }`,
+    ].join("\n");
+    const result = await pi.registeredTool!.execute(
+      "id-err",
+      { name: "err-wf", script, runNow: true },
+      {} as any,
+    );
+
+    assert.ok(result.details?.runStarted !== true, "runStarted should not be true");
+    assert.ok(
+      typeof result.details?.runError === "string" &&
+      result.details.runError.includes("approval denied"),
+      "runError should propagate",
+    );
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("runNow: getRegistry lookup used when registry has the workflow", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "ww-reglu-"));
+  try {
+    const pi = makeFakePi();
+    const fakeRegistry = new Map([
+      ["reg-wf", { name: "reg-wf", absPath: "/custom/path/reg-wf.js", scope: "project" as const }],
+    ]);
+    let passedWorkflow: unknown = null;
+
+    registerWriteWorkflowTool({
+      pi,
+      getCwd: () => dir,
+      saveDirOverride: dir,
+      getRegistry: () => fakeRegistry,
+      startRun: async (wf) => { passedWorkflow = wf; },
+    });
+
+    const script = [
+      `export const meta = { name: "reg-wf", description: "x", version: "1.0.0" };`,
+      `export async function main(ctx) { return "ok"; }`,
+    ].join("\n");
+    await pi.registeredTool!.execute(
+      "id-reg",
+      { name: "reg-wf", script, runNow: true },
+      {} as any,
+    );
+
+    // Registry entry takes precedence over the inline fallback.
+    assert.equal((passedWorkflow as any)?.absPath, "/custom/path/reg-wf.js");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
