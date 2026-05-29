@@ -116,6 +116,10 @@ test("state machine: every illegal transition is rejected", () => {
     "approved→running",
     "running→paused", "running→done", "running→failed", "running→stopped",
     "paused→running", "paused→stopped", "paused→failed",
+    // Slice 11 advisory rollback edge for the resume-rollback case
+    // (PRD §5.8.2). Other failed runs remain non-resumable per slice
+    // 11's resumability gate.
+    "failed→running",
   ]);
   let rejectedCount = 0;
   for (const from of all) {
@@ -129,8 +133,12 @@ test("state machine: every illegal transition is rejected", () => {
   assert.ok(rejectedCount > 0);
 });
 
-test("state machine: terminal states have no outgoing edges", () => {
-  for (const t of TERMINAL_STATES) {
+test("state machine: truly-terminal states (done/stopped/cancelled-pre-run) have no outgoing edges", () => {
+  // Slice 11 added `failed → running` for the advisory resume-
+  // rollback path; the OTHER three terminal states remain truly
+  // terminal.
+  const trulyTerminal: RunState[] = ["done", "stopped", "cancelled-pre-run"];
+  for (const t of trulyTerminal) {
     for (const to of ["pending", "approved", "running", "paused", "done", "failed", "stopped", "cancelled-pre-run"] as RunState[]) {
       assert.equal(isValidTransition(t, to), false, `${t} should not transition to ${to}`);
     }

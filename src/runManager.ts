@@ -226,6 +226,13 @@ export async function startWorkflowRun(
   const sourceText = await fs.readFile(workflow.absPath, "utf8");
   const workflowSourceSha256 = sha256(sourceText);
 
+  // Slice 11 (resume support): freeze a copy of the script bytes into
+  // `<runDir>/script.js`. PRD §6.1 declares this the canonical resume
+  // input; §5.8 step 2 mandates that resume reads from this frozen
+  // copy (NOT the live `.pi/workflows/`) so author edits don't break
+  // bit-exact replay. Atomic via writeFile (the file is small).
+  await fs.writeFile(join(runDirAbs, "script.js"), sourceText, "utf8");
+
   // Optional fixture seeding (mock-agents tests).
   if (opts.seedFixturesJsonl !== undefined) {
     await fs.writeFile(

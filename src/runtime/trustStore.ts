@@ -33,6 +33,7 @@
 
 import { promises as fs, existsSync } from "node:fs";
 import { homedir } from "node:os";
+import { randomBytes } from "node:crypto";
 import { join, sep } from "node:path";
 
 import type {
@@ -158,9 +159,58 @@ export class TrustWriteError extends Error {
 }
 
 /**
+ * Per-settings-file in-process mutex. Slice 11 [C2] fix: serializes
+ * the read-modify-write window of `addTrust()` so two concurrent
+ * `Promise.all([...])` writers can't lose rows to last-writer-wins.
+ *
+ * Mutex is keyed by the absolute path of the target settings file so
+ * a project-scope writer and a personal-scope writer don't block
+ * each other.
+ *
+ * Cross-PROCESS races are explicitly out of scope (PRD §7 — trust
+ * storage is single-process; cross-process is v2). The mutex covers
+ * the in-process / async-concurrent case which is what slice 9's
+ * tests already exercise.
+ */
+const writeQueues: Map<string, Promise<void>> = new Map();
+
+function acquireWriteSlot(target: string): {
+  readonly wait: Promise<void>;
+  readonly release: () => void;
+} {
+  const prior = writeQueues.get(target) ?? Promise.resolve();
+  let releaseFn!: () => void;
+  const next = new Promise<void>((resolve) => {
+    releaseFn = resolve;
+  });
+  // Chain `next` after `prior` so the next caller waits for the
+  // current writer to release. We don't `.catch` prior — if a writer
+  // rejected, the chain still advances (we only need ordering, not
+  // dependency).
+  const chained = prior.then(() => undefined, () => undefined).then(() => next);
+  writeQueues.set(target, chained);
+  return {
+    wait: prior.then(() => undefined, () => undefined),
+    release: () => {
+      // If we are the tail of the queue, evict the entry so the map
+      // doesn't grow unboundedly with old resolved Promises.
+      if (writeQueues.get(target) === chained) {
+        writeQueues.delete(target);
+      }
+      releaseFn();
+    },
+  };
+}
+
+/**
  * Append a `(absPath, name, sha256)` row to the trust store. Atomic via
  * tmp+rename. Refuses to write if the existing file is malformed JSON
  * (we never overwrite user settings we can't parse).
+ *
+ * Slice 11 [C2]: the read-modify-write window is serialized through a
+ * per-target-path in-process mutex. Concurrent `Promise.all([
+ * addTrust(A), addTrust(B)])` calls under the same scope used to
+ * silently drop the earlier row; the mutex ensures both rows persist.
  */
 export async function addTrust(opts: {
   readonly cwd: string;
@@ -185,6 +235,30 @@ export async function addTrust(opts: {
       : opts.personalSettingsPathOverride ??
         personalSettingsPath(opts.home ?? homedir());
 
+  // [C2] mutex — per-target serialization of the read-modify-write.
+  const slot = acquireWriteSlot(path);
+  await slot.wait;
+  try {
+    return await addTrustUnlocked(opts, path, scope);
+  } finally {
+    slot.release();
+  }
+}
+
+async function addTrustUnlocked(
+  opts: {
+    readonly cwd: string;
+    readonly absPath: string;
+    readonly name: string;
+    readonly sha256: string;
+    readonly scope?: TrustScope;
+    readonly home?: string;
+    readonly projectSettingsPathOverride?: string;
+    readonly personalSettingsPathOverride?: string;
+  },
+  path: string,
+  scope: TrustScope,
+): Promise<{ readonly path: string; readonly scope: TrustScope }> {
   // Read existing settings file (any keys, not just ours).
   let parsed: Record<string, unknown> = {};
   if (existsSync(path)) {
@@ -249,7 +323,7 @@ export async function addTrust(opts: {
 
   // Atomic write.
   await fs.mkdir(dirOf(path), { recursive: true });
-  const tmp = path + ".tmp-" + process.pid + "-" + Date.now();
+  const tmp = path + ".tmp-" + process.pid + "-" + Date.now() + "-" + randomBytes(4).toString("hex");
   try {
     await fs.writeFile(tmp, JSON.stringify(parsed, null, 2) + "\n", "utf-8");
     await fs.rename(tmp, path);

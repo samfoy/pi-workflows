@@ -29,6 +29,7 @@ import {
   registerWorkflowCommands,
   registerWorkflowsCommand,
 } from "./commands/workflowCmd.js";
+import { sweepCrashedRuns } from "./runtime/crashSweep.js";
 import type {
   ExtensionAPI,
   ExtensionContextLike,
@@ -66,6 +67,57 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     const cwd = (ctx as ExtensionContextLike).cwd ?? process.cwd();
+
+    // Slice 11: crash-sweep BEFORE workflow discovery so any
+    // sweep-flipped runs are visible to a same-tick `/workflows list`.
+    // The sweep is best-effort — errors are surfaced via notify but
+    // never block extension load.
+    try {
+      const sweep = await sweepCrashedRuns({
+        log: (level, message, details) => {
+          // Best-effort surface of warn/error lines.
+          if (level === "warn" || level === "error") {
+            ctx.ui.notify(
+              `[pi-workflows] ${message}`,
+              level === "warn" ? "warning" : "error",
+            );
+          }
+          void details;
+        },
+      });
+      if (sweep.transitioned.length > 0) {
+        ctx.ui.notify(
+          `[pi-workflows] crash-sweep: ${sweep.transitioned.length} orphan run(s) transitioned to failed: parent-crash`,
+          "warning",
+        );
+        // Also append an active-runs index entry per transitioned run
+        // so the slice-13 overlay can surface them as "recent".
+        if (typeof pi.appendEntry === "function") {
+          for (const t of sweep.transitioned) {
+            try {
+              pi.appendEntry("pi-workflows.run.transitioned", {
+                runId: t.runId,
+                fromState: t.fromState,
+                toState: "failed",
+                reason: "parent-crash",
+              });
+            } catch {
+              /* swallow */
+            }
+          }
+        }
+      }
+      for (const e of sweep.errors) {
+        ctx.ui.notify(
+          `[pi-workflows] crash-sweep error in ${e.runId}: ${e.message}`,
+          "warning",
+        );
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.ui.notify(`[pi-workflows] crash-sweep failed: ${msg}`, "error");
+    }
+
     const { registry, errors } = discoverWorkflows({ cwd });
 
     // Notify user of any skipped files. PRD §3.2 — hidden files were

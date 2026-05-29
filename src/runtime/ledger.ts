@@ -118,6 +118,12 @@ export const RESUMABLE_STATES: ReadonlySet<RunState> = new Set<RunState>([
  *                                       back to `running`. Reserved for
  *                                       slice 11 sweep that may decide to
  *                                       fail-fast on resume conflict.)
+ *   failed        → running            SYSTEM (slice 11 advisory
+ *                                       resume-rollback per PRD §5.8.2;
+ *                                       only emitted by `resumeRun` when
+ *                                       the sweep flipped a run to
+ *                                       `failed: parent-crash`. Other
+ *                                       `failed` runs are non-resumable.)
  *
  * Resume-after-crash specifically does NOT cross any edge — slice 11
  * picks up at the last-seen state directly. Hence no `<terminal> → X`
@@ -128,9 +134,11 @@ const TRANSITIONS: ReadonlyMap<RunState, ReadonlySet<RunState>> = new Map([
   ["approved", new Set<RunState>(["running"])],
   ["running", new Set<RunState>(["paused", "done", "failed", "stopped"])],
   ["paused", new Set<RunState>(["running", "stopped", "failed"])],
-  // Terminal states have no outgoing edges:
+  // Slice 11: `failed` has a single advisory outgoing edge for the
+  // resume-rollback case. `done`, `stopped`, `cancelled-pre-run`
+  // remain truly terminal (no outgoing edges).
+  ["failed", new Set<RunState>(["running"])],
   ["done", new Set<RunState>()],
-  ["failed", new Set<RunState>()],
   ["stopped", new Set<RunState>()],
   ["cancelled-pre-run", new Set<RunState>()],
 ]);
