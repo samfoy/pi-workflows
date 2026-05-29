@@ -36,6 +36,27 @@ JSON-stream parser (5), sub-agent dispatcher (6), ledger (7), `RunCtx` + the
 resume (11), pause (12), TUI overlay (13–15), hot-reload (16), bundled
 `/codebase-audit` (17), and docs/skills/publish (18).
 
+## Bundled workflow: `/codebase-audit`
+
+pi-workflows ships a bundled `/codebase-audit` workflow as a reference
+implementation. On first load, the extension automatically copies it into
+`~/.pi/agent/workflows/codebase-audit.js` so it's immediately available.
+
+```
+/codebase-audit              # audit current working directory
+/codebase-audit ./src        # audit a specific subtree
+```
+
+The audit runs four phases — `recon` (1 agent surveys module boundaries),
+`analyze` (one agent per area in parallel), `vote` (3 judges rank findings
+via Borda count → top 10), and `summarize` (1 agent writes the final report).
+Full source + docs in [`examples/codebase-audit/`](./examples/codebase-audit/).
+
+The workflow demonstrates the full author API in ~80 lines of plain JS:
+`ctx.phase`, `ctx.agent`, `ctx.cache`, `ctx.log`, `cacheKeyExtra`, and
+`inheritSkills`. Two other example workflows in [`examples/`](./examples/):
+`hello` (minimal single-agent) and `parallel-translation` (fan-out + `ctx.vote()`).
+
 ## Disable knobs
 
 | Knob | Effect |

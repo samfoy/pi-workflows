@@ -26,6 +26,10 @@ import { join } from "node:path";
 import { loadConfig } from "./config.js";
 import { discoverWorkflows } from "./registry.js";
 import {
+  installBundledWorkflows,
+  resolveBundledWorkflows,
+} from "./runtime/bundledWorkflows.js";
+import {
   registerWorkflowCommands,
   registerWorkflowsCommand,
 } from "./commands/workflowCmd.js";
@@ -132,6 +136,28 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
       ctx.ui.notify(`[pi-workflows] crash-sweep failed: ${msg}`, "error");
+    }
+
+    // Slice 17: self-install bundled workflows into ~/.pi/agent/workflows/
+    // before discovery so `/codebase-audit` is available on first run.
+    // SPIKE-FINDINGS.md Q2: pi-core does not read pi.workflows manifest field;
+    // we own the copy step. Never overwrites user-modified files.
+    try {
+      const bundled = resolveBundledWorkflows(import.meta.url);
+      if (bundled.length > 0) {
+        installBundledWorkflows(bundled, workflowsHome(), {
+          log: (msg) => {
+            // Surface installs/upgrades as info; skip alreadyCurrent noise.
+            if (msg.includes("installed") || msg.includes("upgraded") || msg.includes("user-modified")) {
+              ctx.ui.notify(msg, "info");
+            }
+          },
+        });
+      }
+    } catch (err) {
+      // Non-fatal — user still gets the extension, just without the bundled workflow.
+      const msg = err instanceof Error ? err.message : String(err);
+      ctx.ui.notify(`[pi-workflows] bundled workflow install failed: ${msg}`, "warning");
     }
 
     const { registry, errors } = discoverWorkflows({ cwd });
