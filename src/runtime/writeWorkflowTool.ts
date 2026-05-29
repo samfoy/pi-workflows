@@ -176,8 +176,9 @@ export function registerWriteWorkflowTool(opts: WriteWorkflowToolOpts): void {
         "statement — pi-workflows reads it to register the slash command.",
       "Workflows run in a sandboxed vm.Context — no direct fs/child_process/network. " +
         "Use ctx.agent(prompt) to spawn a real pi sub-agent that CAN use those tools.",
-      "ctx.phase(label, [promise, ...]) runs agents in parallel and waits for all. " +
-        "ctx.vote(results) picks the plurality winner. ctx.agent(prompt) spawns one agent.",
+      "ctx.agent(prompt) returns { ok, output, tokens, durationMs } — always use .output to get the text. " +
+        "ctx.phase(label, agents) runs agents in parallel and returns AgentResult[] — map to .output for strings. " +
+        "ctx.vote(results) picks the plurality winner from AgentResult[].",
       "Return a string, object, or array from main(ctx) — it becomes the workflow result " +
         "shown in the dashboard and in the chat card.",
       "After calling write_workflow, tell the user the workflow was saved and is already running — " +
@@ -185,7 +186,8 @@ export function registerWriteWorkflowTool(opts: WriteWorkflowToolOpts): void {
     ],
 
     promptSnippet: `
-// Example: parallel codebase audit
+// KEY: ctx.agent() returns { ok, output, tokens, durationMs } — use .output for the text.
+// ctx.phase() returns AgentResult[] — map .output to get strings.
 export const meta = {
   name: "codebase-audit",
   description: "Audit every top-level source directory in parallel",
@@ -193,21 +195,20 @@ export const meta = {
 };
 
 export async function main(ctx) {
-  // Recon: enumerate areas
+  // Recon — always access .output for the agent's text response.
   const recon = await ctx.agent(
-    "List every top-level source directory in this repo as a JSON array of strings. " +
-    "Return ONLY the JSON array, no prose."
+    "List every top-level source directory as a JSON array. Return ONLY the array."
   );
-  const areas = JSON.parse(recon);
+  const areas = JSON.parse(recon.output);  // .output, not recon directly
 
-  // Parallel analysis
-  const findings = await ctx.phase(
+  // Parallel analysis — ctx.phase returns AgentResult[], map to .output for text.
+  const results = await ctx.phase(
     "analyze",
     areas.map((area) =>
-      ctx.agent(\`Audit \${area} for security issues, dead code, and missing tests. ` +
-        `Return a JSON object: { area, issues: string[], severity: "low"|"medium"|"high" }.\`)
+      ctx.agent(\`Audit \${area} for issues. Return JSON: { area, issues: string[] }.\`)
     )
   );
+  const findings = results.map(r => JSON.parse(r.output));  // r.output, not r
 
   return { areas: areas.length, findings };
 }
