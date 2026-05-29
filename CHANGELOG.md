@@ -5,6 +5,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.2.0] - 2026-05-29
+
+### Added
+- `write_workflow` LLM tool — the model can now write and save workflow scripts
+  directly when the user asks for fan-out, multi-agent, or parallel tasks.
+  The tool validates the `export const meta = {...}` header, saves to
+  `.pi/workflows/<name>.js`, and offers to run the workflow immediately.
+  This is the "keyword trigger" equivalent for pi (analogous to Claude Code's
+  `workflow` keyword detection).
+- `promptGuidelines` teach the model when to invoke the tool and how to write
+  correct workflow syntax using the full `ctx.*` API surface.
+- `hasMetaFirst()` strip-then-check validates that `export const meta` is the
+  first meaningful statement — correctly rejects scripts with imports or
+  function declarations before the meta export.
+- `runNow: boolean` parameter — when `true`, the tool invokes `startWorkflowRun`
+  immediately after saving, going through the standard slice-9 approval gate.
+  The freshly-saved `WorkflowFile` is looked up from the live registry first;
+  falls back to an inline stub if hot-reload hasn't fired yet.
+- `.gitignore` update: first save of any workflow adds a comment block so
+  developers can opt-in to committing workflow scripts intentionally.
+- `pi-workflows.workflow-saved` appendEntry emission for dashboard live-update.
+
+**pi-dashboard plugin (`plugins/pi-workflows/`)**
+- `WriteWorkflowRenderer` — rich tool-renderer card for `write_workflow` calls:
+  shows workflow name, save path, overwrite/saved badge, expandable script
+  preview, and run command hint. Handles loading/error states.
+- `WorkflowResultCard` — system-message-renderer for `pi-workflows.result`
+  messages: outcome icon + badge, duration, agent count, cache hits, error line.
+- `WorkflowsPanel` — sidebar panel that tracks active/recent runs and saved
+  workflows from the `pi-dashboard:system-message` event stream. Subscribes to
+  `pi-workflows.run.{started,ended,transitioned}` and `pi-workflows.workflow-saved`.
+- Dashboard shell changes (already in pi-dashboard): `system-message-renderer`
+  slot type, `SystemMessageRendererSlot` consumer, `details` propagation in
+  `pi-manager.ts`, and `SystemMessage.tsx` routing.
+
 ## [0.1.0] - 2026-05-29
 
 Initial release of pi-workflows — dynamic workflow scripting for pi.

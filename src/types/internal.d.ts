@@ -109,6 +109,19 @@ export interface ExtensionAPI {
    */
   sendUserMessage?(prompt: string): void;
   appendEntry?<T = unknown>(customType: string, data?: T): void;
+  /** Register an LLM-invokable tool (pi v0.74+). */
+  registerTool?(tool: {
+    name: string;
+    label?: string;
+    description: string;
+    promptGuidelines?: string[];
+    promptSnippet?: string;
+    parameters: import("@sinclair/typebox").TSchema;
+    execute(id: string, params: unknown, ctx: ExtensionContextLike): Promise<{
+      content: Array<{ type: "text"; text: string }>;
+      details?: Record<string, unknown>;
+    }>;
+  }): void;
 }
 
 /** Subset of `ExtensionContext` needed by slice-1 code. */

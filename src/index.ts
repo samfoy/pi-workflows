@@ -33,14 +33,18 @@ import {
   registerWorkflowCommands,
   registerWorkflowsCommand,
 } from "./commands/workflowCmd.js";
+import { makeConfirmDialog } from "./runtime/approval.js";
 import { sweepCrashedRuns } from "./runtime/crashSweep.js";
 import { bindRegistryToFeed } from "./runtime/overlay.js";
 import { createHotReloadWatcher } from "./runtime/hotReload.js";
 import { getActiveRuns } from "./runtime/activeRuns.js";
+import { registerWriteWorkflowTool } from "./runtime/writeWorkflowTool.js";
+import { startWorkflowRun } from "./runManager.js";
 import { projectWorkflowsDir, workflowsHome } from "./util/paths.js";
 import type {
   ExtensionAPI,
   ExtensionContextLike,
+  WorkflowFile,
 } from "./types/internal.js";
 
 /**
@@ -75,7 +79,38 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
   // tolerated (the wrap returns a no-op disposer).
   bindRegistryToFeed(pi);
 
-  // PRD §13.7: in a recursive (sub-agent child) load, we still register
+  // write_workflow tool: register once at extension load (not session-locked).
+  // Hot-reload watcher (slice 16) picks up the saved file automatically.
+  // In recursive sessions we still register the tool but restrict the save
+  // path to project scope only (same as command registration policy).
+  let sessionCwd = process.cwd();
+  // registry is set later (session_start); capture by reference via getter.
+  let _registry: Map<string, WorkflowFile> | null = null;
+  registerWriteWorkflowTool({
+    pi,
+    getCwd: () => sessionCwd,
+    getRegistry: () => _registry ?? new Map(),
+    startRun: async (workflow, input, ctx) => {
+      // Mirror the slash-command handler's approval gate setup.
+      const toolCtx = ctx as { ui?: { confirm?: (msg: string) => Promise<boolean> } };
+      const ctxConfirm = toolCtx?.ui?.confirm;
+      const approval = typeof ctxConfirm === "function"
+        ? {
+            dialog: makeConfirmDialog({ confirm: (msg) => ctxConfirm(msg) }),
+            viewer: () => undefined as void,
+          }
+        : {
+            dialog: async () => "no" as const,
+            viewer: () => undefined as void,
+          };
+      await startWorkflowRun(workflow, input, {
+        cwd: sessionCwd,
+        approval,
+        activeRuns: getActiveRuns(),
+      });
+    },
+  });
+
   // `/workflows` so its handler can return the documented error
   // message; we just don't expose `/<workflowName>`.
   const recursive = initialCfg.recursive;
@@ -87,6 +122,7 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
 
   pi.on("session_start", async (_event, ctx) => {
     const cwd = (ctx as ExtensionContextLike).cwd ?? process.cwd();
+    sessionCwd = cwd; // update for write_workflow tool
 
     // Slice 11: crash-sweep BEFORE workflow discovery so any
     // sweep-flipped runs are visible to a same-tick `/workflows list`.
@@ -161,6 +197,8 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     }
 
     const { registry, errors } = discoverWorkflows({ cwd });
+    // Make the registry available to the write_workflow tool's runNow path.
+    _registry = registry as Map<string, WorkflowFile>;
 
     // Notify user of any skipped files. PRD §3.2 — hidden files were
     // already filtered silently inside the registry.
