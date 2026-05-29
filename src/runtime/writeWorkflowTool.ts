@@ -288,14 +288,11 @@ export async function main(ctx) {
         opts.getRegistry?.().get(name) ??
         { name, absPath: savePath, scope: existsSync(projectScopeDir) ? "project" : "personal" };
 
-      let shouldRun = runNow;
-      if (shouldRun === undefined && opts.startRun) {
-        // Default: ask the user via the tool's confirm dialog.
-        const ctxTyped = ctx as { ui?: { confirm?: (msg: string) => Promise<boolean> } };
-        if (ctxTyped?.ui?.confirm) {
-          shouldRun = await ctxTyped.ui.confirm(`Run /${name} now?`);
-        }
-      }
+      // Run immediately when startRun is wired, unless caller explicitly
+      // passes runNow:false. ctx.ui.confirm is not available in tool execute
+      // context so we skip the dialog — the approval TUI modal (fired inside
+      // startRun) is the real consent gate.
+      const shouldRun = runNow !== false && !!opts.startRun;
       if (shouldRun && opts.startRun) {
         try {
           await opts.startRun(workflowFile, "", ctx);

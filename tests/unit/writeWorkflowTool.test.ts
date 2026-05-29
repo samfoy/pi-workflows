@@ -272,7 +272,7 @@ test("runNow: calls startRun with the saved WorkflowFile", async () => {
   }
 });
 
-test("runNow: absent — startRun not called", async () => {
+test("runNow: absent + startRun wired — starts immediately", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ww-nornow-"));
   try {
     const pi = makeFakePi();
@@ -290,7 +290,7 @@ test("runNow: absent — startRun not called", async () => {
     ].join("\n");
     await pi.registeredTool!.execute("id-nr", { name: "no-run-wf", script }, {} as any);
 
-    assert.ok(!startRunCalled, "startRun should NOT be called when runNow is absent");
+    assert.ok(startRunCalled, "startRun SHOULD be called when startRun is wired and runNow is not false");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -468,8 +468,8 @@ export async function main(_ctx: any) { return "ok"; }`;
   rmSync(dirE, { recursive: true, force: true });
 });
 
-test("runNow confirm: does NOT call startRun when ctx.ui.confirm returns false", async () => {
-  const dirF = mkdtempSync(join(tmpdir(), "wf-confirm-no-"));
+test("runNow:false — startRun NOT called even when startRun is wired", async () => {
+  const dirF = mkdtempSync(join(tmpdir(), "wf-runnow-false-"));
   const piF = {
     registerTool: (def: any) => { (piF as any).__tool = def; },
     appendEntry: () => {},
@@ -483,10 +483,9 @@ test("runNow confirm: does NOT call startRun when ctx.ui.confirm returns false",
   const CONF_NO_SCRIPT = `export const meta = { name: "confirm-no-wf", description: "d", version: "1.0.0" };
 export async function main(_ctx: any) { return "ok"; }`;
 
-  const ctxF = { ui: { confirm: async (_msg: string) => false } };
-  const result = await (piF as any).__tool.execute("td5", { name: "confirm-no-wf", script: CONF_NO_SCRIPT }, ctxF);
+  const result = await (piF as any).__tool.execute("td5", { name: "confirm-no-wf", script: CONF_NO_SCRIPT, runNow: false }, {});
 
-  assert.ok(!startRunCalledF, "startRun should NOT be called when confirm=false");
+  assert.ok(!startRunCalledF, "startRun should NOT be called when runNow:false");
   assert.ok(!result.details.runStarted, "runStarted should be false");
   rmSync(dirF, { recursive: true, force: true });
 });
