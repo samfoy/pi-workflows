@@ -2053,7 +2053,7 @@ Remove the second .replace() call and its comment. Optionally add a test asserti
 
 ---
 
-## BUG-111 — globalThis.budget convenience alias is mutable and can be poisoned across runs
+## BUG-111 ✅ FIXED — globalThis.budget convenience alias is mutable and can be poisoned across runs
 
 **Area:** Sandbox / Security
 **Severity:** Low
@@ -2087,7 +2087,7 @@ Either add `'approved'` and `'pending'` to `RESUMABLE_STATES` in `ledger.ts` and
 
 ---
 
-## BUG-113 — TOCTOU race: ledger is read before the resume lock is acquired, `finalState` can be stale
+## BUG-113 ✅ FIXED — TOCTOU race: ledger is read before the resume lock is acquired, `finalState` can be stale
 
 **Area:** Runtime / resumeRun
 **Severity:** High
