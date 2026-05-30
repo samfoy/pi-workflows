@@ -384,6 +384,42 @@ test("cache: compaction is atomic — panic before rename leaves original intact
   }
 });
 
+// ─── BUG-126: stale snapshot must not erase a concurrent write ─────────
+
+test("cache: concurrent setAgentResult calls both survive threshold-triggered compaction (BUG-126)", async () => {
+  // Threshold of 1 means compaction fires after every write.
+  // K1 and K2 are started concurrently (both Promises launched before
+  // either is awaited). The bug: compaction built its snapshot from
+  // in-memory maps BEFORE chaining onto writeQueue, so the snapshot
+  // could be taken before K2's agentResults.set() ran, causing the
+  // compaction rename to silently erase K2's append.
+  const { runDir, cleanup, opts } = makeRunDir();
+  try {
+    const store = await CacheStore.open({ ...opts(), compactionThreshold: 1 });
+    // Launch both writes without awaiting to simulate concurrent callers.
+    const p1 = store.setAgentResult("k1", { agentId: "a", text: "v1" });
+    const p2 = store.setAgentResult("k2", { agentId: "b", text: "v2" });
+    await Promise.all([p1, p2]);
+    await store.flush();
+
+    // Both keys must survive on disk after the compaction snapshot.
+    const lines = readLines(join(runDir, "cache.jsonl"));
+    const keys = lines.map((l) => JSON.parse(l).key).sort();
+    assert.deepEqual(keys, ["k1", "k2"], "both keys on disk after concurrent writes + compaction");
+
+    // Both keys visible in-memory.
+    assert.ok(store.getAgentResult("k1"), "k1 in memory");
+    assert.ok(store.getAgentResult("k2"), "k2 in memory");
+
+    // Replay also recovers both keys.
+    const store2 = await CacheStore.open(opts());
+    assert.deepEqual(store2.getAgentResult("k1"), { agentId: "a", text: "v1" });
+    assert.deepEqual(store2.getAgentResult("k2"), { agentId: "b", text: "v2" });
+  } finally {
+    cleanup();
+  }
+});
+
 // ─── append durability (defensive — fsync is on the path) ────────────
 
 test("cache: append flushes file size synchronously before resolving", async () => {
