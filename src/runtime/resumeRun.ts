@@ -230,50 +230,55 @@ export async function resumeRun(
   const manifest = await readManifestStrict(runDirAbs);
   const cwd = opts.cwdOverride ?? manifest.cwd ?? process.cwd();
 
-  // 1. Read ledger \u2014 derive current state.
-  const reader = new LedgerReader({
-    runId,
-    ...(opts.resolveLedgerPath
-      ? { resolveLedgerPath: opts.resolveLedgerPath }
-      : {}),
-  });
-  const { entries, finalState } = await reader.read();
-
-  // 2. Resumability check.
-  // - cancelled-pre-run, done, stopped: terminal-non-resumable.
-  // - failed: resumable ONLY if the most recent transition's reason
-  //   is "parent-crash" (advisory crash-sweep rollback).
-  // - paused, running, approved, pending: resumable.
-  let resumable = false;
-  if (RESUMABLE_STATES.has(finalState)) {
-    resumable = true;
-  } else if (finalState === "failed") {
-    // Look for the latest transition with `to=failed` and check its
-    // reason field.
-    for (let i = entries.length - 1; i >= 0; i--) {
-      const e = entries[i]!;
-      if (e.type === "transition" && e.to === "failed") {
-        if (e.reason === "parent-crash") resumable = true;
-        break;
-      }
-    }
-  }
-  if (!resumable) {
-    const resultFile = join(runDirAbs, "result.json");
-    throw new ResumeNotAllowedError({
-      runId,
-      runDirAbs,
-      currentState: finalState,
-      resultFilePath: existsSync(resultFile) ? resultFile : null,
-    });
-  }
-
-  // 3. Lock the runDir.
+  // 3. Lock the runDir FIRST (before reading ledger) to eliminate the TOCTOU
+  // race in BUG-113. If we read the ledger before acquiring the lock, another
+  // pi process could acquire the lock, complete/transition the run, and release
+  // between our read and our lock acquisition -- leaving us with a stale
+  // finalState that causes us to resume an already-terminal run.
   const lock = acquireResumeLock({ runDirAbs, runId });
   // BUG-070: declared outside the try block so the catch can inspect it.
   let iifeLaunched = false;
 
   try {
+    // 1. Read ledger \u2014 derive current state (inside the lock; state is
+    //    now stable because no concurrent process can mutate it).
+    const reader = new LedgerReader({
+      runId,
+      ...(opts.resolveLedgerPath
+        ? { resolveLedgerPath: opts.resolveLedgerPath }
+        : {}),
+    });
+    const { entries, finalState } = await reader.read();
+
+    // 2. Resumability check.
+    // - cancelled-pre-run, done, stopped: terminal-non-resumable.
+    // - failed: resumable ONLY if the most recent transition's reason
+    //   is "parent-crash" (advisory crash-sweep rollback).
+    // - paused, running, approved, pending: resumable.
+    let resumable = false;
+    if (RESUMABLE_STATES.has(finalState)) {
+      resumable = true;
+    } else if (finalState === "failed") {
+      // Look for the latest transition with `to=failed` and check its
+      // reason field.
+      for (let i = entries.length - 1; i >= 0; i--) {
+        const e = entries[i]!;
+        if (e.type === "transition" && e.to === "failed") {
+          if (e.reason === "parent-crash") resumable = true;
+          break;
+        }
+      }
+    }
+    if (!resumable) {
+      const resultFile = join(runDirAbs, "result.json");
+      throw new ResumeNotAllowedError({
+        runId,
+        runDirAbs,
+        currentState: finalState,
+        resultFilePath: existsSync(resultFile) ? resultFile : null,
+      });
+    }
+
     // 4. Source resolution \u2014 frozen vs live.
     let sourceText: string;
     let workflowAbsPath: string;
