@@ -27,6 +27,7 @@ import {
   STUBBED_GLOBALS,
   INSTALLED_WEB_APIS,
 } from "../../src/runtime/sandbox.ts";
+import type { RunCtxHost } from "../../src/types/internal.js";
 
 function fresh(): { ctrl: AbortController; signal: AbortSignal } {
   const ctrl = new AbortController();
@@ -397,19 +398,41 @@ test("§8.3.1 Function-constructor escape returns Context's globalThis only", as
 });
 
 // ─── BUG-109: __pi_clone_into_ctx undefined preservation + circular ref ────
+// After BUG-023 (IIFE helpers), __pi_clone_into_ctx is closure-local and NOT
+// accessible as a globalThis property. Tests exercise it indirectly via the
+// ctx.cache.get() host-roundtrip path (wrapHostAsync → __pi_unwrap → __pi_clone_into_ctx).
+
+/** Build a minimal RunCtxHost where cacheGet returns a fixed value. */
+function hostReturning(value: unknown): RunCtxHost {
+  const ok = <T>(v: T) => ({ ok: true as const, value: v });
+  return {
+    runMeta: { id: 'bug109', workflowName: 'test', startedAt: '1970-01-01T00:00:00Z', cwd: '.', resumed: false },
+    input: '',
+    agent: () => ok({ kind: 'agent' as const, id: 'a', prompt: '', opts: Object.freeze({}) }),
+    phase: async () => ok([]),
+    cacheGet: async () => ok(value),
+    cacheSet: async () => ok(null),
+    cacheHas: async () => ok(false),
+    cacheDelete: async () => ok(null),
+    log: () => ok(null),
+    finishCallback: () => ok(null),
+    getBudgetSpent: () => 0,
+    tokenBudget: null,
+  };
+}
 
 test("BUG-109: __pi_clone_into_ctx preserves undefined object values (not dropped)", async () => {
   const { signal } = fresh();
   const r = await runScript(
     `
-      const cloned = __pi_clone_into_ctx({ a: undefined, b: 1 });
+      const cloned = await ctx.cache.get('key');
       return JSON.stringify({
         hasA: Object.prototype.hasOwnProperty.call(cloned, 'a'),
         aIsUndefined: cloned.a === undefined,
         b: cloned.b,
       });
     `,
-    { signal },
+    { signal, runCtxHost: hostReturning({ a: undefined, b: 1 }) },
   );
   const result = JSON.parse(r.returnValue as string);
   assert.equal(result.hasA, true, "key 'a' with undefined value must be preserved");
@@ -421,8 +444,7 @@ test("BUG-109: __pi_clone_into_ctx preserves undefined array elements (not coerc
   const { signal } = fresh();
   const r = await runScript(
     `
-      const arr = [undefined, 1, undefined];
-      const cloned = __pi_clone_into_ctx(arr);
+      const cloned = await ctx.cache.get('key');
       return JSON.stringify({
         length: cloned.length,
         e0IsUndefined: cloned[0] === undefined,
@@ -430,7 +452,7 @@ test("BUG-109: __pi_clone_into_ctx preserves undefined array elements (not coerc
         e2IsUndefined: cloned[2] === undefined,
       });
     `,
-    { signal },
+    { signal, runCtxHost: hostReturning([undefined, 1, undefined]) },
   );
   const result = JSON.parse(r.returnValue as string);
   assert.equal(result.length, 3, "cloned array length must be 3");
@@ -441,19 +463,21 @@ test("BUG-109: __pi_clone_into_ctx preserves undefined array elements (not coerc
 
 test("BUG-109: __pi_clone_into_ctx throws descriptive error on circular reference", async () => {
   const { signal } = fresh();
+  // Inject a circular object through the host bridge — __pi_clone_into_ctx
+  // traverses it and must detect the cycle.
+  const circular: Record<string, unknown> = { a: 1 };
+  circular.self = circular;
   const r = await runScript(
     `
-      const obj = { a: 1 };
-      obj.self = obj;
       let threw = null;
       try {
-        __pi_clone_into_ctx(obj);
+        await ctx.cache.get('key');
       } catch (e) {
         threw = e.message;
       }
       return threw;
     `,
-    { signal },
+    { signal, runCtxHost: hostReturning(circular) },
   );
   assert.ok(
     typeof r.returnValue === "string" &&
@@ -464,19 +488,19 @@ test("BUG-109: __pi_clone_into_ctx throws descriptive error on circular referenc
 
 test("BUG-109: __pi_clone_into_ctx circular array detection throws", async () => {
   const { signal } = fresh();
+  const arr: unknown[] = [1, 2];
+  arr.push(arr);
   const r = await runScript(
     `
-      const arr = [1, 2];
-      arr.push(arr);
       let threw = null;
       try {
-        __pi_clone_into_ctx(arr);
+        await ctx.cache.get('key');
       } catch (e) {
         threw = e.message;
       }
       return threw;
     `,
-    { signal },
+    { signal, runCtxHost: hostReturning(arr) },
   );
   assert.ok(
     typeof r.returnValue === "string" &&
@@ -488,15 +512,14 @@ test("BUG-109: __pi_clone_into_ctx circular array detection throws", async () =>
 test("BUG-109: __pi_clone_into_ctx handles nested objects correctly (sibling re-use allowed)", async () => {
   // Same object appearing as two separate siblings must NOT throw.
   const { signal } = fresh();
+  const inner = { v: 42 };
+  const outer = { x: inner, y: inner };
   const r = await runScript(
     `
-      // obj appears as both .x and .y — shared but not circular.
-      const inner = { v: 42 };
-      const outer = { x: inner, y: inner };
-      const cloned = __pi_clone_into_ctx(outer);
+      const cloned = await ctx.cache.get('key');
       return JSON.stringify({ xv: cloned.x.v, yv: cloned.y.v });
     `,
-    { signal },
+    { signal, runCtxHost: hostReturning(outer) },
   );
   const result = JSON.parse(r.returnValue as string);
   assert.equal(result.xv, 42, "cloned.x.v must be 42");
