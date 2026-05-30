@@ -41,20 +41,22 @@ material, signatures)". In practice, the Node.js vm.Context boundary already
 provides adequate isolation; `subtle` methods are stateless transforms that
 don't escalate sandbox privileges.
 
-## v1 deferred — `worker_threads` / interrupt-on-tick
+✅ PARTIALLY FIXED — worker_threads / interrupt-on-tick
 
 **Trigger:** PRD §1.2 pin 5 + §8.3.6.
 
-**v1 behavior:** sandbox is a `vm.Context`; a synchronous infinite
-loop wedges the entire pi event loop. User must SIGINT pi from another
-terminal.
+**What's fixed:** `vm.Script.runInContext` now runs with a `runScriptTimeoutMs`
+timeout (default 5 000 ms). Synchronous infinite loops — including tight loops
+inside `async function main()` before the first `await` — are terminated and
+raise a `SandboxViolationError` with reason `"sync-timeout"`.
 
-**Why deferred:** `worker_threads` would solve this but adds a deep
-re-architecture (different IPC model, no shared globals, async-only).
-Out of scope for v1's "production-quality on a single host" bar.
+**Still unaddressed:** after the first `await`, control returns to the Node.js
+event loop and the sync timeout no longer applies. An async infinite loop
+(`while(true) { await ctx.sleep(0); }`) still wedges the workflow process.
+Full fix requires running the sandbox in a `worker_thread` so it can be killed
+externally. That re-architecture is deferred to v2.
 
-**Revisit trigger:** persistent operator complaints about wedging, or
-clear evidence of malicious DoS use cases.
+**Workaround for async loops:** SIGINT pi from another terminal.
 
 ## v1 deferred — true cross-run cache
 
