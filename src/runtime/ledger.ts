@@ -188,6 +188,15 @@ export class RunStateMachine {
   private currentState: RunState;
   private readonly writer: LedgerWriter;
   private readonly now: () => string;
+  /**
+   * Serialization queue for `go()` calls. Concurrent callers chain
+   * onto this promise so that validate+append+advance is atomic with
+   * respect to other callers (BUG-027). The queue tail is kept as a
+   * settled promise (`.catch(() => undefined)`) so a failed step does
+   * not block subsequent valid transitions — mirrors the pattern used
+   * by `LedgerWriter.writeQueue`.
+   */
+  private goQueue: Promise<void> = Promise.resolve();
 
   constructor(opts: {
     readonly writer: LedgerWriter;
@@ -213,18 +222,30 @@ export class RunStateMachine {
    * `reason` is intended for involuntary transitions (e.g. crash
    * sweep emits `"parent-crash"` per PRD §5.8.2). Slice 7 doesn't
    * enforce a vocabulary — that's downstream.
+   *
+   * Concurrency: calls are serialized through `goQueue` so that the
+   * validate+append+advance sequence is atomic w.r.t. concurrent
+   * callers. Each `step` promise still rejects to its individual
+   * caller; the queue tail is kept settled so a failed step does not
+   * block future transitions.
    */
   async go(to: RunState, opts?: { readonly reason?: string }): Promise<void> {
-    const from = this.currentState;
-    if (!isValidTransition(from, to)) {
-      throw new InvalidStateTransitionError(from, to);
-    }
-    const entry: LedgerEntry =
-      opts?.reason !== undefined
-        ? { type: "transition", at: this.now(), from, to, reason: opts.reason }
-        : { type: "transition", at: this.now(), from, to };
-    await this.writer.append(entry);
-    this.currentState = to;
+    const step = this.goQueue.then(async () => {
+      const from = this.currentState;
+      if (!isValidTransition(from, to)) {
+        throw new InvalidStateTransitionError(from, to);
+      }
+      const entry: LedgerEntry =
+        opts?.reason !== undefined
+          ? { type: "transition", at: this.now(), from, to, reason: opts.reason }
+          : { type: "transition", at: this.now(), from, to };
+      await this.writer.append(entry);
+      this.currentState = to;
+    });
+    // Keep the queue alive even when this step rejects, so future
+    // go() calls are not blocked by an earlier invalid-transition error.
+    this.goQueue = step.catch(() => undefined);
+    return step;
   }
 }
 
