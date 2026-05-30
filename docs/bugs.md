@@ -2359,7 +2359,7 @@ Replace `if (decision.approved) return "approval denied"` with `if (decision.app
 
 ---
 
-## BUG-129 — gitignore check in `runSaveScript` fires after the 'Add to git?' prompt
+## BUG-129 ✅ FIXED — gitignore check in `runSaveScript` fires after the 'Add to git?' prompt
 
 **Area:** Runtime / saveScript
 **Severity:** Medium
@@ -2376,7 +2376,7 @@ Move the `readGitIgnore` + `gitignoreCoversPi` check above the `ui.prompt('...Ad
 
 ---
 
-## BUG-130 — Unused import `_tmpdir` in `manifestWriter.ts`
+## BUG-130 ✅ FIXED — Unused import `_tmpdir` in `manifestWriter.ts`
 
 **Area:** Runtime / manifestWriter
 **Severity:** Low
@@ -2393,7 +2393,7 @@ Remove the `tmpdir as _tmpdir` import. If `os` is not imported for any other rea
 
 ---
 
-## BUG-131 — TOCTOU in `addTrustUnlocked`: `existsSync` then async `readFile` races with file deletion
+## BUG-131 ✅ FIXED — TOCTOU in `addTrustUnlocked`: `existsSync` then async `readFile` races with file deletion
 
 **Area:** Runtime / trustStore
 **Severity:** Low
@@ -2648,7 +2648,7 @@ Change `examples/codebase-audit.js` to `examples/codebase-audit/codebase-audit.j
 
 ---
 
-## BUG-146 — authoring.md section 5 says vote phase uses a judge agent but codebase-audit uses JS Borda count
+## BUG-146 ✅ FIXED — authoring.md section 5 says vote phase uses a judge agent but codebase-audit uses JS Borda count
 
 **Area:** Docs
 **Severity:** Low
@@ -2665,7 +2665,7 @@ Change "The judge aggregates the ranking lists" to "A Borda-count aggregation in
 
 ---
 
-## BUG-147 — SKILL.md testing example uses `sha256` without defining its source
+## BUG-147 ✅ FIXED — SKILL.md testing example uses `sha256` without defining its source
 
 **Area:** Docs / SKILL
 **Severity:** Low
