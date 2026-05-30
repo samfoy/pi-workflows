@@ -1281,7 +1281,7 @@ Write the lock body to a temp file first, then `renameSync` into the lock path a
 
 ---
 
-## BUG-070 — resumeRun: resume lock released prematurely if post-IIFE synchronous code throws while run promise is already executing
+## BUG-070 ✅ FIXED — resumeRun: resume lock released prematurely if post-IIFE synchronous code throws while run promise is already executing
 
 **Area:** runtime / resumeRun
 **Severity:** low
@@ -1298,7 +1298,7 @@ Move `opts.activeRuns?.register(...)` into the IIFE's setup (before `sandbox.run
 
 ---
 
-## BUG-071 — activeRuns: `run.ended` applyEntry lacks terminal-state guard — duplicate or out-of-order entries can overwrite summary
+## BUG-071 ✅ FIXED — activeRuns: `run.ended` applyEntry lacks terminal-state guard — duplicate or out-of-order entries can overwrite summary
 
 **Area:** runtime / activeRuns
 **Severity:** low
