@@ -196,7 +196,7 @@ Either (a) extend `RESUMABLE_STATES` to include `'pending'` and `'approved'` and
 
 ---
 
-## BUG-007 — dispose() leaks phase subscription, appendEntry shim, and agentDetailDebounceTimer
+## BUG-007 ✅ FIXED — dispose() leaks phase subscription, appendEntry shim, and agentDetailDebounceTimer
 
 **Area:** overlay / TUI
 **Severity:** high
@@ -210,6 +210,10 @@ The TUI component's `dispose()` method — called by pi-tui when it tears down t
 ### Suggested Fix
 
 Extract the cleanup body of `close()` into a shared `cleanup()` helper (guarded by a `let cleaned = false` flag for idempotency). Call `cleanup()` from both `close()` and `dispose()`. The guard prevents double-unsubscription when the user presses Esc and pi-tui also fires `dispose()`.
+
+### Fix Applied
+
+`cleanup()` helper extracted in the BUG-001/010 batch fix (df3e993) with `let cleaned = false` idempotency guard — covers `renderTimer`, `agentDetailDebounceTimer`, `appendEntry` shim restore, `unsub()`, and `unsubPhase()`. `dispose()` updated to call `close()` (which calls `cleanup()`) in BUG-072 fix (d5d87df) so `opts.done()` also fires and `_overlayOpen` is cleared. Regression tests added: `BUG-007: dispose() cleans up phase subscription, appendEntry shim, and debounce timers` and `BUG-007: cleanup() is idempotent`.
 
 ---
 
