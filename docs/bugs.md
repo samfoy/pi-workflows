@@ -1077,7 +1077,7 @@ Change the return type of the host bridge method to `RunCtxBridgeResult<readonly
 
 ---
 
-## BUG-058 — runtime-api.md ctx.phase signature missing opts third parameter — failMode undiscoverable from docs
+## BUG-058 ✅ FIXED — runtime-api.md ctx.phase signature missing opts third parameter — failMode undiscoverable from docs
 
 **Area:** docs
 **Severity:** low
@@ -1094,7 +1094,7 @@ Update the docs signature to `phase(name: string, agents: ReadonlyArray<AgentHan
 
 ---
 
-## BUG-059 — runtime-api.md ConsensusOpts and ConsensusResult document non-existent fields; wrong threshold default
+## BUG-059 ✅ FIXED — runtime-api.md ConsensusOpts and ConsensusResult document non-existent fields; wrong threshold default
 
 **Area:** docs
 **Severity:** medium
@@ -1111,7 +1111,7 @@ Remove `similarity` from ConsensusOpts, remove `scores` from ConsensusResult, co
 
 ---
 
-## BUG-060 — runtime-api.md RetryOpts documents wrong field name maxAttempts and wrong backoffMs default 500
+## BUG-060 ✅ FIXED — runtime-api.md RetryOpts documents wrong field name maxAttempts and wrong backoffMs default 500
 
 **Area:** docs
 **Severity:** high
