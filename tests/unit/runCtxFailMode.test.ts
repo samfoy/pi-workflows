@@ -12,7 +12,7 @@ import { createRunCtxHost } from "../../src/runtime/runCtx.js";
 import { CacheStore } from "../../src/runtime/cache.js";
 import { LedgerWriter } from "../../src/runtime/ledger.js";
 import { makeSemaphore } from "../../src/runtime/semaphore.js";
-import type { AgentResult, DispatcherOptions } from "../../src/types/internal.js";
+import type { AgentResult, AgentResultLike, DispatcherOptions } from "../../src/types/internal.js";
 
 /** A fake dispatcher that always rejects. */
 function failingDispatch(_opts: DispatcherOptions): Promise<AgentResult> {
@@ -179,7 +179,7 @@ test("opts.schema: output is parsed from ```json fence in agent text", async () 
     assert.ok(handleRes.ok);
     const results = await host.phase("work", [handleRes.value]);
     assert.ok(results.ok);
-    const r = results.value[0] as AgentResult & { output?: unknown };
+    const r = results.value[0] as AgentResultLike & { output?: unknown };
     assert.equal(r.text, jsonText);
     assert.deepEqual(r.output, { items: ["x", "y"], count: 2 });
   } finally {
@@ -195,7 +195,7 @@ test("opts.schema: no output field when schema absent", async () => {
     assert.ok(handleRes.ok);
     const results = await host.phase("work", [handleRes.value]);
     assert.ok(results.ok);
-    const r = results.value[0] as AgentResult & { output?: unknown };
+    const r = results.value[0] as AgentResultLike & { output?: unknown };
     assert.equal(r.output, undefined);
   } finally {
     rmSync(dir, { recursive: true, force: true });
