@@ -1451,7 +1451,7 @@ Append a randomBytes(4).toString('hex') suffix identical to the pattern in manif
 
 ---
 
-## BUG-080 — writeResultFile uses fs.writeFile without fsync — result.json silently losable on power failure
+## BUG-080 ✅ FIXED — writeResultFile uses fs.writeFile without fsync — result.json silently losable on power failure
 
 **Area:** runtime / resultDelivery
 **Severity:** medium
@@ -1468,7 +1468,7 @@ After writeFile and before rename, open the file and fsyncSync it (mirror the pa
 
 ---
 
-## BUG-081 — writeParentLivenessFields uses fs.writeFile without fsync — manifest.json durability gap
+## BUG-081 ✅ FIXED — writeParentLivenessFields uses fs.writeFile without fsync — manifest.json durability gap
 
 **Area:** runtime / manifestWriter
 **Severity:** medium
