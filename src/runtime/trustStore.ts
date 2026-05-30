@@ -94,18 +94,18 @@ export async function loadTrust(opts: {
   const personal = await readScope(personalPath);
   const project = await readScope(projectPath);
   const merged: TrustStore = {};
-  for (const [absPath, rows] of Object.entries(personal)) {
+  // Seed with project entries first — project wins on sha256 conflict.
+  for (const [absPath, rows] of Object.entries(project)) {
     merged[absPath] = rows.slice();
   }
-  for (const [absPath, rows] of Object.entries(project)) {
+  // Iterate personal rows, skipping sha256s already present from project.
+  for (const [absPath, rows] of Object.entries(personal)) {
     const existing = merged[absPath] ?? [];
-    // Project entries win — append rows that aren't already present
-    // by sha256, with project rows taking precedence at lookup time.
     const seenShas = new Set(existing.map((r) => r.sha256));
     const combined = existing.slice();
     for (const r of rows) {
       if (!seenShas.has(r.sha256)) {
-        combined.unshift(r); // project rows at the front
+        combined.push(r); // personal rows appended after project rows
         seenShas.add(r.sha256);
       }
     }
