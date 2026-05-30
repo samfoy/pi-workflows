@@ -1866,7 +1866,7 @@ Replace `.exec(text)` with a global match (`` /```json\s*([\s\S]*?)```/g ``) and
 
 ---
 
-## BUG-100 — budgetSpent charges cached token usage — cache replays can exhaust the token budget
+## BUG-100 ✅ FIXED — budgetSpent charges cached token usage — cache replays can exhaust the token budget
 
 **Area:** Runtime / runCtx
 **Severity:** Medium
@@ -1883,7 +1883,7 @@ Skip `budgetSpent` accumulation on cache hits, or only count cached tokens again
 
 ---
 
-## BUG-101 — timeoutMs included in opts hash for cache key — innocent timeout changes invalidate valid cache entries
+## BUG-101 ✅ FIXED — timeoutMs included in opts hash for cache key — innocent timeout changes invalidate valid cache entries
 
 **Area:** Runtime / cache
 **Severity:** Medium
