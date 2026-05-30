@@ -284,6 +284,7 @@ export interface RunManagerStartOptions {
       | "pi-workflows.phase.ended"
       | "pi-workflows.agent.started"
       | "pi-workflows.agent.ended"
+      | "pi-workflows.agent.log"
       | "pi-workflows.meta.phases",
     data: Readonly<Record<string, unknown>>,
   ) => void;

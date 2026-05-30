@@ -31,6 +31,7 @@ import type { Config } from "./types/internal.js";
 const ENV_DISABLE = "PI_DISABLE_WORKFLOWS";
 const ENV_RECURSIVE = "PI_WORKFLOWS_RECURSIVE";
 const SETTING_DISABLED = "pi-workflows.disabled";
+const SETTING_AUTO_RESUME = "pi-workflows.autoResumeCrashedWorkflows";
 
 export interface LoadConfigOpts {
   /** Overrides `process.env` — used by tests. */
@@ -49,27 +50,38 @@ export function loadConfig(opts: LoadConfigOpts = {}): Config {
       disabled: true,
       recursive: truthy(env[ENV_RECURSIVE]),
       disabledBy: "env",
+      autoResumeCrashedWorkflows: false,
     };
   }
 
   // Step 2: settings. Project then user (project would shadow user, but
   // for a boolean kill-switch we only care that *someone* set it true).
+  const projectSettings = projectSettingsPath(cwd);
+  const userSettings = userSettingsPath();
+
   const settingDisabled =
-    readDisabledFromSettings(projectSettingsPath(cwd)) ||
-    readDisabledFromSettings(userSettingsPath());
+    readBoolSetting(projectSettings, SETTING_DISABLED) ||
+    readBoolSetting(userSettings, SETTING_DISABLED);
 
   if (settingDisabled) {
     return {
       disabled: true,
       recursive: truthy(env[ENV_RECURSIVE]),
       disabledBy: "setting",
+      autoResumeCrashedWorkflows: false,
     };
   }
+
+  // Read optional feature flags — project shadow user (first truthy wins).
+  const autoResumeCrashedWorkflows =
+    readBoolSetting(projectSettings, SETTING_AUTO_RESUME) ||
+    readBoolSetting(userSettings, SETTING_AUTO_RESUME);
 
   return {
     disabled: false,
     recursive: truthy(env[ENV_RECURSIVE]),
     disabledBy: null,
+    autoResumeCrashedWorkflows,
   };
 }
 
@@ -93,7 +105,7 @@ function userSettingsPath(): string {
   return join(homedir(), ".pi", "agent", "settings.json");
 }
 
-function readDisabledFromSettings(path: string): boolean {
+function readBoolSetting(path: string, key: string): boolean {
   if (!existsSync(path)) return false;
   let raw: string;
   try {
@@ -108,6 +120,6 @@ function readDisabledFromSettings(path: string): boolean {
     return false; // Malformed JSON — never crash a session over this.
   }
   if (!parsed || typeof parsed !== "object") return false;
-  const v = (parsed as Record<string, unknown>)[SETTING_DISABLED];
+  const v = (parsed as Record<string, unknown>)[key];
   return v === true;
 }
