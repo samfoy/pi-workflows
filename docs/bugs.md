@@ -2019,7 +2019,7 @@ Add the following lines to the freeze block: `Object.freeze(Object.getPrototypeO
 
 ---
 
-## BUG-109 — __pi_clone_into_ctx silently drops undefined values via JSON round-trip
+## BUG-109 ✅ FIXED — __pi_clone_into_ctx silently drops undefined values via JSON round-trip
 
 **Area:** Sandbox
 **Severity:** Medium
