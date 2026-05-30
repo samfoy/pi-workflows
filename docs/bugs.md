@@ -673,7 +673,7 @@ Extend the 'r' case to also return true when `input.view === 'phase-view' && !in
 
 ---
 
-## BUG-034 — navigate-up/down in agent-detail view adjusts the runs-list cursor, not a log-scroll offset
+## BUG-034 ✅ FIXED — navigate-up/down in agent-detail view adjusts the runs-list cursor, not a log-scroll offset
 
 **Area:** overlay / TUI
 **Severity:** medium
@@ -707,7 +707,7 @@ To protect the source: for each candidate C, check whether any active run B has 
 
 ---
 
-## BUG-036 — applyGc deletes without re-validating candidates against current active run state
+## BUG-036 ✅ FIXED — applyGc deletes without re-validating candidates against current active run state
 
 **Area:** gcDialog
 **Severity:** high
@@ -741,7 +741,7 @@ Move the snapshot construction inside the .then() callback so it executes after 
 
 ---
 
-## BUG-038 — writeParentLivenessFields read-merge-write is unguarded — concurrent slice-6 and slice-8a manifest writes lose each other's fields
+## BUG-038 ✅ FIXED — writeParentLivenessFields read-merge-write is unguarded — concurrent slice-6 and slice-8a manifest writes lose each other's fields
 
 **Area:** manifestWriter
 **Severity:** medium
