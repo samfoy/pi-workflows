@@ -28,7 +28,7 @@
  * merging the existing fields under our owned set.
  */
 
-import { promises as fs, existsSync, readFileSync } from "node:fs";
+import { closeSync, fsyncSync, openSync, promises as fs, existsSync, readFileSync } from "node:fs";
 import { tmpdir as _tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
@@ -117,6 +117,8 @@ export async function writeParentLivenessFields(
   );
   const json = JSON.stringify(merged, null, 2) + "\n";
   await fs.writeFile(tmpName, json, "utf8");
+  const fd = openSync(tmpName, "r+");
+  try { fsyncSync(fd); } finally { closeSync(fd); }
   await fs.rename(tmpName, target);
 }
 
