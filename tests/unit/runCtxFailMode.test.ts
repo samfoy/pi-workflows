@@ -277,6 +277,47 @@ test("budget: total and remaining reflect configured tokenBudget", async () => {
   }
 });
 
+// BUG-055: parallel phase budget race
+test("tokenBudget: budgetReserved prevents parallel overshoot (BUG-055)", async () => {
+  // Budget=1. Each agent spends totalTokens=2 (via successDispatch).
+  // Without budgetReserved: all 3 agents check budgetSpent=0 < 1 simultaneously
+  // (synchronously during .map()), all pass, all run → 6 tokens spent.
+  // With budgetReserved: agent 1 increments budgetReserved=1 before its first
+  // await; agents 2+3 check budgetSpent+budgetReserved=0+1=1 >= 1 → throw.
+  // Only 1 dispatch should occur.
+  const dir = mkdtempSync(join(tmpdir(), "wf-bug055-"));
+  try {
+    let dispatchCount = 0;
+    const countingDispatch = (opts: DispatcherOptions): Promise<AgentResult> => {
+      dispatchCount++;
+      return successDispatch(opts);
+    };
+    const { host } = await makeCtxWithBudget(dir, countingDispatch, 1);
+
+    const h1 = host.agent("a1", { id: "p1" });
+    const h2 = host.agent("a2", { id: "p2" });
+    const h3 = host.agent("a3", { id: "p3" });
+    assert.ok(h1.ok && h2.ok && h3.ok);
+
+    // All three launched in a single parallel phase with failMode:'null' so
+    // budget-throws for agents 2+3 become nulls instead of aborting the phase.
+    const r = await host.phase("work", [h1.value, h2.value, h3.value], { failMode: "null" });
+    assert.ok(r.ok, "phase should succeed in failMode:null even with budget blocks");
+
+    // Only the first agent should have reached the real dispatcher.
+    assert.equal(dispatchCount, 1, `expected 1 dispatch (got ${dispatchCount}); budgetReserved not preventing parallel overshoot`);
+
+    // One real result, two nulls (blocked by budget).
+    const nonNull = r.value.filter((v) => v !== null);
+    assert.equal(nonNull.length, 1, "expected exactly 1 non-null result");
+    assert.equal(r.value[0]?.agentId, "p1");
+    assert.equal(r.value[1], null);
+    assert.equal(r.value[2], null);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ─── extractMetaPhases static parser ────────────────────────────────────────
 
 import { extractMetaPhases } from "../../src/runManager.js";
