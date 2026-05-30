@@ -187,3 +187,38 @@ The key practical differences:
 - No `/effort ultracode` modifier (v2)
 - `crypto.subtle` not available (v2)
 - Synchronous infinite loops wedge the event loop (no worker-thread interrupt)
+
+---
+
+## 8. Timeouts and rate limits
+
+**Default timeout: 600 seconds (10 minutes) per agent.**
+
+This is fine for quick summarisation tasks, but too short for agents that need
+to read multiple large files and make edits. Always set `timeoutMs` explicitly
+for complex agents:
+
+```js
+// For agents doing multi-file reads + edits (up to 30 min)
+ctx.agent(`Fix this bug in src/runtime/foo.ts...`, { timeoutMs: 30 * 60 * 1000 })
+
+// For quick summarisation (default is fine, but explicit is clearer)
+ctx.agent(`Summarise this file`, { timeoutMs: 5 * 60 * 1000 })
+```
+
+**Rate limit and concurrency:** When a phase spawns many agents (>10), they all
+compete for API capacity. Agents that queue behind rate-limited requests consume
+their timeout budget while waiting. With 38 agents and a 600s timeout, agents
+that don't get API capacity within 10 minutes are killed having done no work.
+
+Mitigations:
+- Set a generous `timeoutMs` on agents doing real work (≥ 20 min)
+- Keep phase sizes reasonable (≤ 16 agents) — this matches the default `maxConcurrent`
+- Use `failMode: 'null'` on large phases so timeouts don't kill the whole run
+
+```js
+// Large fan-out: failMode + generous timeout
+const results = await ctx.phase("analyze", files.map(f =>
+  ctx.agent(`Analyze ${f}`, { timeoutMs: 20 * 60 * 1000 })
+), { failMode: "null" });
+```

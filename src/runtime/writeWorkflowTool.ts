@@ -179,6 +179,8 @@ export function registerWriteWorkflowTool(opts: WriteWorkflowToolOpts): void {
       "`ctx.agent(prompt, opts?)` is SYNCHRONOUS — it builds a handle, does NOT spawn anything. " +
         "Use `ctx.phase(name, handles[])` to actually run handles in parallel. " +
         "AgentResult has `.text` (string), `.output?` (parsed object — only set when opts.schema was provided), `.usage`, `.durationMs`, `.cached`.",
+      "Default agent timeout is 600s — always pass `{ timeoutMs: 20 * 60 * 1000 }` (or more) for agents that read files or make edits. " +
+        "For large phases (>10 agents), also pass `{ failMode: 'null' }` to ctx.phase() so timeouts don't discard all results.",
       "`ctx.parallel(items, fn)` maps items to handles and runs them in one phase — shorthand for ctx.phase + map.",
       "`ctx.pipeline(items, ...stages)` runs sequential stages per item, concurrently across items.",
       "ALL variables must be declared inside `export default async function (ctx)` — " +
