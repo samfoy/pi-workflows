@@ -1485,7 +1485,7 @@ Add an fsync step after writeFile and before rename, matching the pattern establ
 
 ---
 
-## BUG-082 — cancelReasonText returns 'approval denied' when decision.approved is true — incorrect audit text
+## BUG-082 ✅ FIXED — cancelReasonText returns 'approval denied' when decision.approved is true — incorrect audit text
 
 **Area:** runtime / resultDelivery
 **Severity:** low
@@ -1502,7 +1502,7 @@ Replace the approved=true guard with `if (decision.approved) return '(unexpected
 
 ---
 
-## BUG-083 — loadTrust sha256 dedup keeps personal entry when project has same sha256 — contradicts 'project wins' contract
+## BUG-083 ✅ FIXED — loadTrust sha256 dedup keeps personal entry when project has same sha256 — contradicts 'project wins' contract
 
 **Area:** runtime / trustStore
 **Severity:** low
@@ -1781,7 +1781,7 @@ pi-workflows SKILL.md.
 
 ---
 
-## BUG-095 — ctx.log level option silently ignored — all logs emit at info
+## BUG-095 ✅ FIXED (duplicate) — ctx.log level option silently ignored — all logs emit at info
 
 **Area:** Runtime / Sandbox
 **Severity:** High
@@ -1798,7 +1798,7 @@ Change logFn to accept opts: { level?: string } as second argument and extract l
 
 ---
 
-## BUG-096 — ctx.retry maxAttempts in runtime-api.md vs attempts in implementation — silent ignore
+## BUG-096 ✅ FIXED (duplicate) — ctx.retry maxAttempts in runtime-api.md vs attempts in implementation — silent ignore
 
 **Area:** Runtime / stdlib
 **Severity:** High
@@ -1815,7 +1815,7 @@ Align the docs: rename `maxAttempts` to `attempts` in runtime-api.md and its cod
 
 ---
 
-## BUG-097 — ctx.consensus result shape mismatch — docs promise scores field, impl returns responses
+## BUG-097 ✅ FIXED (duplicate) — ctx.consensus result shape mismatch — docs promise scores field, impl returns responses
 
 **Area:** Runtime / stdlib
 **Severity:** High
@@ -1832,7 +1832,7 @@ Update runtime-api.md to show the actual ConsensusResult shape (responses: strin
 
 ---
 
-## BUG-098 — extractJson throws on schema parse failure — creates persistent failure loop
+## BUG-098 ✅ FIXED (duplicate) — extractJson throws on schema parse failure — creates persistent failure loop
 
 **Area:** Runtime / runCtx
 **Severity:** Medium
@@ -1849,7 +1849,7 @@ Wrap extractJson calls in try-catch and return undefined on failure (honoring th
 
 ---
 
-## BUG-099 — extractJson fence regex matches first fence not last — wrong JSON when agent includes examples
+## BUG-099 ✅ FIXED (duplicate) — extractJson fence regex matches first fence not last — wrong JSON when agent includes examples
 
 **Area:** Runtime / runCtx
 **Severity:** Medium
@@ -1985,7 +1985,7 @@ Add `Object.freeze(Reflect);` to the prototype-freeze block in buildInitScript()
 
 ---
 
-## BUG-107 — fireCtxAbort abort listener never removed from hostSignal on successful completion
+## BUG-107 ✅ FIXED (duplicate) — fireCtxAbort abort listener never removed from hostSignal on successful completion
 
 **Area:** Sandbox / Memory
 **Severity:** Medium
@@ -2070,7 +2070,7 @@ Either use Object.defineProperty with writable:false and configurable:false to m
 
 ---
 
-## BUG-112 — Dead code: `approved`/`pending` state-reset branches in `resumeRun` are unreachable
+## BUG-112 ✅ FIXED (duplicate) — Dead code: `approved`/`pending` state-reset branches in `resumeRun` are unreachable
 
 **Area:** Runtime / resumeRun
 **Severity:** High
@@ -2104,7 +2104,7 @@ Move `acquireResumeLock` before `reader.read()`, or re-read the ledger immediate
 
 ---
 
-## BUG-114 — Inner SIGKILL escalation timer is never cancelled after child exits cleanly post-SIGTERM
+## BUG-114 ✅ FIXED (duplicate) — Inner SIGKILL escalation timer is never cancelled after child exits cleanly post-SIGTERM
 
 **Area:** Runtime / dispatcher
 **Severity:** Medium
@@ -2155,7 +2155,7 @@ Write a placeholder body (e.g., `{pid}` only) synchronously before `closeSync` s
 
 ---
 
-## BUG-117 — `applyEntry('run.ended')` does not guard against already-terminal summaries, unlike sibling handlers
+## BUG-117 ✅ FIXED (duplicate) — `applyEntry('run.ended')` does not guard against already-terminal summaries, unlike sibling handlers
 
 **Area:** Runtime / activeRuns
 **Severity:** Low
@@ -2172,7 +2172,7 @@ Add a guard at the top of the `'pi-workflows.run.ended'` case: if `prior && isTe
 
 ---
 
-## BUG-118 — phaseCursor not clamped when agents complete while phase-view is open
+## BUG-118 ✅ FIXED (duplicate) — phaseCursor not clamped when agents complete while phase-view is open
 
 **Area:** TUI / overlay
 **Severity:** Medium
@@ -2189,7 +2189,7 @@ After decrementing, clamp to `visibleAgents - 1`: compute `visibleAgents` from `
 
 ---
 
-## BUG-119 — 'g' hotkey opens GC dialog from phase-view and agent-detail — view guard missing in dispatchHotkey
+## BUG-119 ✅ FIXED (duplicate) — 'g' hotkey opens GC dialog from phase-view and agent-detail — view guard missing in dispatchHotkey
 
 **Area:** TUI / hotkeys
 **Severity:** Medium
@@ -2206,7 +2206,7 @@ Add a view guard: `if (k === 'g') { if (input.view !== 'runs-list') return { kin
 
 ---
 
-## BUG-120 — helpForState('runs-list') shows 'r' as disabled for paused runs — mismatch with dispatcher
+## BUG-120 ✅ FIXED (duplicate) — helpForState('runs-list') shows 'r' as disabled for paused runs — mismatch with dispatcher
 
 **Area:** TUI / hotkeys
 **Severity:** Low
@@ -2257,7 +2257,7 @@ Add `|| key === '\n'` to the Enter condition, or route through the normalizer: `
 
 ---
 
-## BUG-123 — cursor passed to renderPhaseView when totalAgents > 0, but phaseCursor indexes running agents only
+## BUG-123 ✅ FIXED (duplicate) — cursor passed to renderPhaseView when totalAgents > 0, but phaseCursor indexes running agents only
 
 **Area:** TUI / overlay
 **Severity:** Low
@@ -2291,7 +2291,7 @@ Add `if (agentDetailDebounceTimer !== null) { clearTimeout(agentDetailDebounceTi
 
 ---
 
-## BUG-125 — buildRender() mutates view and openedAgentId as side effects — repeated calls cause silent state transitions
+## BUG-125 ✅ FIXED (duplicate) — buildRender() mutates view and openedAgentId as side effects — repeated calls cause silent state transitions
 
 **Area:** TUI / overlay
 **Severity:** Medium
@@ -2325,7 +2325,7 @@ Build the snapshot inside the queued callback (`this.writeQueue.then(() => { con
 
 ---
 
-## BUG-127 — `writeResultFile` missing fsync before rename — weaker durability than documented
+## BUG-127 ✅ FIXED (duplicate) — `writeResultFile` missing fsync before rename — weaker durability than documented
 
 **Area:** Runtime / resultDelivery
 **Severity:** Medium
@@ -2342,7 +2342,7 @@ After `fs.writeFile(tmp, body)`, open the tmp file and call `fsync` before `fs.r
 
 ---
 
-## BUG-128 — `cancelReasonText` returns 'approval denied' when `decision.approved === true`
+## BUG-128 ✅ FIXED (duplicate) — `cancelReasonText` returns 'approval denied' when `decision.approved === true`
 
 **Area:** Runtime / resultDelivery
 **Severity:** Low
@@ -2410,7 +2410,7 @@ Remove the `existsSync` guard and handle ENOENT in the `readFile` catch block: `
 
 ---
 
-## BUG-132 — `writeResultFile` tmp filename has no random component — same-millisecond collision
+## BUG-132 ✅ FIXED (duplicate) — `writeResultFile` tmp filename has no random component — same-millisecond collision
 
 **Area:** Runtime / resultDelivery
 **Severity:** Low
@@ -2427,7 +2427,7 @@ Append `crypto.randomBytes(4).toString('hex')` to the tmp filename: `result.json
 
 ---
 
-## BUG-133 — `ConsensusOpts.similarity` field documented but doesn't exist in actual types
+## BUG-133 ✅ FIXED (duplicate) — `ConsensusOpts.similarity` field documented but doesn't exist in actual types
 
 **Area:** Docs / runtime-api
 **Severity:** High
@@ -2444,7 +2444,7 @@ Remove the `similarity` field from the ConsensusOpts docs. The single `threshold
 
 ---
 
-## BUG-134 — `ConsensusOpts.threshold` default wrong — docs say 0.5, actual is 0.6
+## BUG-134 ✅ FIXED (duplicate) — `ConsensusOpts.threshold` default wrong — docs say 0.5, actual is 0.6
 
 **Area:** Docs / runtime-api
 **Severity:** Medium
@@ -2461,7 +2461,7 @@ Change `// fraction of pairs that must agree (default 0.5)` to `// default 0.6`.
 
 ---
 
-## BUG-135 — `RetryOpts.maxAttempts` wrong — actual field name is `attempts`
+## BUG-135 ✅ FIXED (duplicate) — `RetryOpts.maxAttempts` wrong — actual field name is `attempts`
 
 **Area:** Docs / runtime-api
 **Severity:** High
@@ -2478,7 +2478,7 @@ Rename `maxAttempts` to `attempts` in both docs/runtime-api.md and docs/authorin
 
 ---
 
-## BUG-136 — `RetryOpts.backoffMs` default wrong — docs say 500ms, actual is 100ms
+## BUG-136 ✅ FIXED (duplicate) — `RetryOpts.backoffMs` default wrong — docs say 500ms, actual is 100ms
 
 **Area:** Docs / runtime-api
 **Severity:** Medium
@@ -2495,7 +2495,7 @@ Change `// initial backoff in ms (default 500)` to `// initial backoff in ms (de
 
 ---
 
-## BUG-137 — `ctx.phase` missing third `opts?: PhaseOpts` parameter in runtime-api.md
+## BUG-137 ✅ FIXED (duplicate) — `ctx.phase` missing third `opts?: PhaseOpts` parameter in runtime-api.md
 
 **Area:** Docs / runtime-api
 **Severity:** High
@@ -2512,7 +2512,7 @@ Add `opts?: PhaseOpts` to the signature, add a `PhaseOpts` interface block docum
 
 ---
 
-## BUG-138 — `ctx.phase` return type wrong — omits `null` for `failMode: 'null'`
+## BUG-138 ✅ FIXED (duplicate) — `ctx.phase` return type wrong — omits `null` for `failMode: 'null'`
 
 **Area:** Docs / runtime-api
 **Severity:** High
@@ -2529,7 +2529,7 @@ Change return type to `Promise<ReadonlyArray<AgentResult | null>>` and add a not
 
 ---
 
-## BUG-139 — `ctx.pipeline` not documented in runtime-api.md or authoring.md
+## BUG-139 ✅ FIXED (duplicate) — `ctx.pipeline` not documented in runtime-api.md or authoring.md
 
 **Area:** Docs
 **Severity:** High
@@ -2546,7 +2546,7 @@ Add a `ctx.pipeline` section to runtime-api.md documenting the variadic stage si
 
 ---
 
-## BUG-140 — `ctx.budget` not documented in runtime-api.md
+## BUG-140 ✅ FIXED (duplicate) — `ctx.budget` not documented in runtime-api.md
 
 **Area:** Docs
 **Severity:** Medium
@@ -2563,7 +2563,7 @@ Add a `ctx.budget` section documenting `total: number | null`, `spent(): number`
 
 ---
 
-## BUG-141 — `AgentOpts.schema` missing from runtime-api.md AgentOpts interface
+## BUG-141 ✅ FIXED (duplicate) — `AgentOpts.schema` missing from runtime-api.md AgentOpts interface
 
 **Area:** Docs
 **Severity:** Medium
@@ -2580,7 +2580,7 @@ Add `schema?: Record<string, unknown>` to the AgentOpts block with a note that a
 
 ---
 
-## BUG-142 — `hello.js` example missing required `export const meta`
+## BUG-142 ✅ FIXED (duplicate) — `hello.js` example missing required `export const meta`
 
 **Area:** Examples
 **Severity:** High
@@ -2597,7 +2597,7 @@ Add `export const meta = { name: 'hello', description: 'Minimal hello-world work
 
 ---
 
-## BUG-143 — `codebase-audit.js` canonical reference missing required `export const meta`
+## BUG-143 ✅ FIXED (duplicate) — `codebase-audit.js` canonical reference missing required `export const meta`
 
 **Area:** Examples
 **Severity:** High
@@ -2614,7 +2614,7 @@ Add `export const meta = { name: 'codebase-audit', description: '...', version: 
 
 ---
 
-## BUG-144 — `ctx.log` called with an object in codebase-audit.js but typed as `string`
+## BUG-144 ✅ FIXED (duplicate) — `ctx.log` called with an object in codebase-audit.js but typed as `string`
 
 **Area:** Examples
 **Severity:** Medium
@@ -2631,7 +2631,7 @@ Change the object arg to a string: `` ctx.log(`analyze agent ${a.agentId} return
 
 ---
 
-## BUG-145 — authoring.md section 5 references wrong example path
+## BUG-145 ✅ FIXED (duplicate) — authoring.md section 5 references wrong example path
 
 **Area:** Docs
 **Severity:** Low
@@ -2682,7 +2682,7 @@ Either show the import (`import { createHash } from 'node:crypto'; const sha256 
 
 ---
 
-## BUG-148 — promptSnippet uses TypeScript `as` cast syntax inside a JS workflow example
+## BUG-148 ✅ FIXED (duplicate) — promptSnippet uses TypeScript `as` cast syntax inside a JS workflow example
 
 **Area:** Runtime / writeWorkflowTool
 **Severity:** Medium
