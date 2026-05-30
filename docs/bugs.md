@@ -635,7 +635,7 @@ Inside debouncedRender, after rebuilding lastSnapshot, also clamp phaseCursor: i
 
 ---
 
-## BUG-032 — helpForState marks 'r' as disabled for paused runs on runs-list, but dispatchHotkey enables r→resume for paused
+## BUG-032 ✅ FIXED — helpForState marks 'r' as disabled for paused runs on runs-list, but dispatchHotkey enables r→resume for paused
 
 **Area:** overlay / TUI
 **Severity:** medium
@@ -652,7 +652,7 @@ Change the disabled predicate to `noSel || (!isTerminal && !isPaused)` so that r
 
 ---
 
-## BUG-033 — isHotkeyEnabled unconditionally returns false for 'r' on phase-view, contradicting dispatchHotkey and helpForState
+## BUG-033 ✅ FIXED — isHotkeyEnabled unconditionally returns false for 'r' on phase-view, contradicting dispatchHotkey and helpForState
 
 **Area:** overlay / TUI
 **Severity:** low
