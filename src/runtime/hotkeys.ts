@@ -69,6 +69,7 @@ export interface HotkeyAction {
    * overlay can render an appropriate hint. */
   readonly reason?:
     | "disabled-for-state"
+    | "disabled-for-remote"
     | "no-selection"
     | "unknown-key";
 }
@@ -276,7 +277,7 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
       // owned by `p`. Slice 14 unifies per the spec table.
       // Slice 15 F2: `r` (restart) is disabled on remote runs.
       if (input.isRemote) {
-        return { kind: "noop", runId, reason: "disabled-for-state" };
+        return { kind: "noop", runId, reason: "disabled-for-remote" };
       }
       if (input.runState === "paused")
         return { kind: "resume", runId };
@@ -292,7 +293,7 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
         return { kind: "noop", runId, reason: "disabled-for-state" };
       }
       if (input.isRemote) {
-        return { kind: "noop", runId, reason: "disabled-for-state" };
+        return { kind: "noop", runId, reason: "disabled-for-remote" };
       }
       if (input.runState !== undefined && TERMINAL.has(input.runState)) {
         return { kind: "save-script-requested", runId };

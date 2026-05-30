@@ -92,21 +92,19 @@ For reference, before slice 9 the parity-gaps doc claimed slice 8a's
 surface matched the API "fully". That was incorrect — `ctx.signal` was
 deferred to slice 9. The wording above corrects the false claim.
 
-## v1 UX gap — r/s hotkeys on remote runs are silent
+## ✅ FIXED — r/s hotkeys on remote runs are silent
 
 **Trigger:** slice 14 carry-forward U3, slice 15 F2.
 
-**v1 behavior:** when a remote run is selected in the runs-list overlay,
-pressing `r` (restart) or `s` (save-script) shows the message "operation
-requires local handle" and takes no action. There is no toast or explicit
-visual feedback beyond the status-line message.
+**Fixed:** `hotkeys.ts` now returns `reason: "disabled-for-remote"` (distinct from
+`"disabled-for-state"`) when `r`/`s` is pressed on a remote run. `overlay.ts`
+checks this reason in the `noop` handler and sets a banner:
+`"operation requires a local run (r/s unavailable on remote sessions)"`.
+The banner is visible immediately and clears on the next key press.
 
-**Why deferred:** implementing a full cross-process restart/save requires
-IPC. Slice 14 chose option (a) — enforce rejection at the hotkey layer —
-over option (b) (implement cross-process). The UX gap is the absence of a
-proper toast.
-
-**Revisit trigger:** user complaints about silent rejection on remote runs.
+**Why it was silent:** the `noop` action had no reason differentiation —
+all disabled keys returned `"disabled-for-state"` and the overlay discarded
+them silently.
 
 ## v1 doc gap — `--no-color` and `--no-loading` flags removed
 

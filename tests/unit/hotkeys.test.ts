@@ -330,3 +330,40 @@ test("F2 mutation-guard: g is still enabled for remote runs", () => {
   });
   assert.equal(action.kind, "open-gc-dialog", "g should open GC dialog");
 });
+
+// ─── disabled-for-remote reason (UX toast gap fix) ───────────────────────────
+
+test("r on remote terminal run returns reason=disabled-for-remote", () => {
+  const action = dispatchHotkey({
+    key: "r",
+    view: "phase-view",
+    runState: "done",
+    runId: "wf-abc0000001",
+    isRemote: true,
+  });
+  assert.equal(action.kind, "noop");
+  assert.equal(action.reason, "disabled-for-remote");
+});
+
+test("s on remote terminal run returns reason=disabled-for-remote", () => {
+  const action = dispatchHotkey({
+    key: "s",
+    view: "phase-view",
+    runState: "done",
+    runId: "wf-abc0000001",
+    isRemote: true,
+  });
+  assert.equal(action.kind, "noop");
+  assert.equal(action.reason, "disabled-for-remote");
+});
+
+test("r on local terminal run still fires restart-requested (not noop)", () => {
+  const action = dispatchHotkey({
+    key: "r",
+    view: "phase-view",
+    runState: "done",
+    runId: "wf-abc0000001",
+    isRemote: false,
+  });
+  assert.equal(action.kind, "restart-requested");
+});

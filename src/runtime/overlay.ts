@@ -933,6 +933,12 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       case "noop":
         // Intentional — disabled hotkey or no-selection. The help
         // line already conveys the disabled state visually.
+        // Exception: remote runs silently reject r/s — show a toast
+        // so the user knows why nothing happened.
+        if (action.reason === "disabled-for-remote") {
+          banner = "operation requires a local run (r/s unavailable on remote sessions)";
+          requestRender();
+        }
         return;
     }
   };
