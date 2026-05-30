@@ -536,6 +536,7 @@ export class Sandbox {
         filename: "pi-workflows-sandbox-init.js",
       });
     } catch (e) {
+      this.timerBridge.dispose();
       throw violation(
         "init-script-failed",
         "sandbox init script threw: " + (e as Error).message,
@@ -1071,6 +1072,7 @@ function buildInitScript(nonce: string): string {
     "    this.values     = function* values()     { for (const v of u.values()) yield String(v); };",
     "    this.forEach    = function forEach(cb, thisArg) { u.forEach((v, k) => cb.call(thisArg, String(v), String(k), this)); };",
     "    Object.defineProperty(this, 'size', { get: () => u.size, enumerable: true });",
+    "    Object.defineProperty(this, Symbol.iterator, { value: this.entries, enumerable: false, writable: false, configurable: false });",
     "    Object.freeze(this);",
     "  };",
     "  Object.freeze(globalThis.URLSearchParams.prototype);",
