@@ -475,6 +475,23 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         cached: boolean;
       };
       budgetSpent += result.usage.totalTokens;
+      // BUG-053 fix: parse schema output BEFORE logging agent_end so that an
+      // extractJson failure logs agent_error (not a silent phase rejection
+      // against a ledger that already shows agent_end success).
+      try {
+        if (schema !== null) {
+          (tagged as AgentResult & { output?: unknown }).output = extractJson(result.text);
+        }
+      } catch (e) {
+        await opts.ledger.append({
+          type: "agent_error",
+          at: nowIso(),
+          phaseName: phaseName,
+          agentId: handle.id,
+          error: agentErrorFromException(e),
+        });
+        throw e;
+      }
       await opts.ledger.append({
         type: "agent_end",
         at: nowIso(),
@@ -495,10 +512,6 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         });
       } catch {
         /* swallow */
-      }
-      // Schema: re-parse from cached text if schema is present.
-      if (schema !== null) {
-        (tagged as AgentResult & { output?: unknown }).output = extractJson(result.text);
       }
       return tagged;
     }
@@ -562,6 +575,12 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         toolCalls: result.toolCalls,
         transcriptPath: result.transcriptPath,
       });
+      budgetSpent += result.usage.totalTokens;
+      // BUG-054 fix: extract schema output BEFORE logging agent_end so that
+      // an extractJson failure only writes agent_error (the existing catch
+      // block below), never both agent_end AND agent_error.
+      const schemaOutput: unknown =
+        schema !== null ? extractJson(result.text) : undefined;
       await opts.ledger.append({
         type: "agent_end",
         at: nowIso(),
@@ -583,10 +602,6 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       } catch {
         /* swallow */
       }
-      budgetSpent += result.usage.totalTokens;
-      // Schema: extract parsed JSON output if schema was provided.
-      const schemaOutput: unknown =
-        schema !== null ? extractJson(result.text) : undefined;
       const tagged = { ...result, cached: false } as AgentResult & { cached: boolean; output?: unknown };
       if (schemaOutput !== undefined) tagged.output = schemaOutput;
       return tagged;
@@ -734,22 +749,56 @@ function requireString(v: unknown, label: string): void {
 
 /**
  * Extract the last JSON value (object or array) from agent text output.
- * Tries a ```json fence first, then falls back to the last `{` or `[`.
+ * Tries a ```json fence first (takes the LAST fence block), then falls back
+ * to scanning from the first `{` or `[` and finding the matching close
+ * delimiter via bracket-depth tracking.
+ *
+ * BUG-051: old fallback used lastIndexOf which found the innermost brace and
+ * sliced to end-of-string (breaking on trailing prose and nested objects).
+ * BUG-052: old fence regex matched the FIRST code block; agents often emit
+ * example blocks before the actual output block.
  */
 export function extractJson(text: string): unknown {
-  // Try ```json ... ``` fence.
-  const fenceMatch = /```json\s*([\s\S]*?)```/.exec(text);
+  // BUG-052 fix: use matchAll + take the LAST fence block (not the first).
+  const fenceMatches = [...text.matchAll(/```json\s*([\s\S]*?)```/gs)];
+  const fenceMatch = fenceMatches.at(-1);
   if (fenceMatch?.[1] !== undefined) {
     return JSON.parse(fenceMatch[1].trim());
   }
-  // Fall back to last { or [ in the text.
-  const lastBrace = text.lastIndexOf("{");
-  const lastBracket = text.lastIndexOf("[");
-  const start = Math.max(lastBrace, lastBracket);
-  if (start === -1) {
+  // BUG-051 fix: scan from the FIRST { or [ and depth-track to the matching
+  // close delimiter so nested JSON is correctly extracted and trailing prose
+  // is excluded.
+  const firstBrace = text.indexOf("{");
+  const firstBracket = text.indexOf("[");
+  let start: number;
+  if (firstBrace === -1 && firstBracket === -1) {
     throw new Error("ctx.agent schema: no JSON found in agent output");
   }
-  return JSON.parse(text.slice(start));
+  if (firstBrace === -1) start = firstBracket;
+  else if (firstBracket === -1) start = firstBrace;
+  else start = Math.min(firstBrace, firstBracket);
+  const openChar = text[start];
+  const closeChar = openChar === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escape = false;
+  let end = -1;
+  for (let i = start; i < text.length; i++) {
+    const ch = text[i];
+    if (escape) { escape = false; continue; }
+    if (ch === "\\") { escape = true; continue; }
+    if (ch === '"') { inString = !inString; continue; }
+    if (inString) continue;
+    if (ch === openChar) depth++;
+    else if (ch === closeChar) {
+      depth--;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  if (end === -1) {
+    throw new Error("ctx.agent schema: no JSON found in agent output");
+  }
+  return JSON.parse(text.slice(start, end + 1));
 }
 
 /**
