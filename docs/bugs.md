@@ -1366,7 +1366,7 @@ Replace inline view mutations with explicit calls to handleAction({ kind: 'navig
 
 ---
 
-## BUG-075 — F4 GC protection is inverted: protects restart-child candidates instead of source runs
+## BUG-075 ✅ FIXED — F4 GC protection is inverted: protects restart-child candidates instead of source runs
 
 **Area:** overlay / gcDialog
 **Severity:** medium
