@@ -352,6 +352,8 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   let helpVisible = true;
   let banner: string | undefined;
   let lastSnapshot: ReadonlyArray<RunSummary> = opts.registry.listSummaries();
+  // gap/ctx-gate: pending gate prompt state.
+  let gatePromptState: { runId: string; message: string; defaultAnswer: boolean } | null = null;
 
   const requestRender = () => {
     if (typeof opts.tui.requestRender === "function") opts.tui.requestRender();
@@ -422,6 +424,23 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
             }, 100);
           }
         }
+        // gap/ctx-gate: track pending gate prompts.
+        if (customType === "pi-workflows.gate.requested" &&
+          data !== null && typeof data === "object") {
+          const d = data as Record<string, unknown>;
+          if (typeof d.runId === "string" && typeof d.message === "string") {
+            gatePromptState = {
+              runId: d.runId,
+              message: d.message,
+              defaultAnswer: d.defaultAnswer !== false,
+            };
+            requestRender();
+          }
+        }
+        if (customType === "pi-workflows.gate.resolved") {
+          gatePromptState = null;
+          requestRender();
+        }
       }
     };
   }
@@ -460,6 +479,22 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     // Slice 15: GC dialog takes priority when open.
     if (gcDialogState !== null) {
       return { lines: renderGcDialog(gcDialogState).lines };
+    }
+
+    // gap/ctx-gate: gate prompt takes priority over other views.
+    if (gatePromptState !== null) {
+      const dflt = gatePromptState.defaultAnswer ? "Y/n" : "y/N";
+      return {
+        lines: [
+          "",
+          "  ⏸  Workflow paused — human approval required",
+          "",
+          `  ${gatePromptState.message}`,
+          "",
+          `  [y] Approve    [n] Deny    (default: ${dflt})`,
+          "",
+        ],
+      };
     }
 
     // Slice 15: agent detail view.
@@ -859,6 +894,24 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       } else if (k === "n" || key === "Escape" || key === "ESC" || key === "\u001b") {
         handleAction({ kind: "gc-cancel" });
       }
+      return;
+    }
+    // gap/ctx-gate: gate prompt intercepts keys when a gate is pending.
+    if (gatePromptState !== null) {
+      const k = key.toLowerCase();
+      const g = gatePromptState;
+      const run = opts.registry.getRun(g.runId);
+      if (k === "y" || key === "Enter" || key === "RETURN" || key === "\r" || key === "\n") {
+        // Y or Enter → approve (Enter uses defaultAnswer).
+        const approved = k === "n" ? false : (k === "y" ? true : g.defaultAnswer);
+        gatePromptState = null;
+        run?.respondGate(approved);
+      } else if (k === "n" || key === "Escape" || key === "ESC" || key === "\u001b") {
+        // N or Esc → deny.
+        gatePromptState = null;
+        run?.respondGate(false);
+      }
+      requestRender();
       return;
     }
     // Agent detail view.

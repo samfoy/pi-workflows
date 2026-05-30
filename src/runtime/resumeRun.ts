@@ -447,6 +447,32 @@ export async function resumeRun(
     // TUI overlay can pause a previously-resumed run identically to
     // a fresh one.
     const pauseGate = new PauseGate();
+
+    // gap/ctx-gate: pending gate slot for ctx.gate() in resumed runs.
+    let pendingGate: {
+      readonly message: string;
+      readonly resolve: (approved: boolean) => void;
+      readonly reject: (reason: unknown) => void;
+    } | null = null;
+    const waitForGate = (message: string, signal: AbortSignal): Promise<boolean> =>
+      new Promise<boolean>((resolve, reject) => {
+        if (signal.aborted) { reject(signal.reason ?? new Error("aborted")); return; }
+        let settled = false;
+        const onAbort = (): void => {
+          if (!settled) { settled = true; pendingGate = null; reject(signal.reason ?? new Error("aborted")); }
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        pendingGate = {
+          message,
+          resolve: (approved: boolean) => {
+            if (!settled) { settled = true; signal.removeEventListener("abort", onAbort); pendingGate = null; resolve(approved); }
+          },
+          reject: (reason: unknown) => {
+            if (!settled) { settled = true; signal.removeEventListener("abort", onAbort); pendingGate = null; reject(reason); }
+          },
+        };
+      });
+
     let controlChain: Promise<unknown> = Promise.resolve();
     function withControlLock<T>(fn: () => Promise<T>): Promise<T> {
       const next = controlChain.then(fn, fn);
@@ -478,6 +504,7 @@ export async function resumeRun(
       ...(opts.dispatch ? { dispatch: opts.dispatch } : {}),
       ...(opts.nowIso ? { nowIso: opts.nowIso } : {}),
       ...(opts.nowMs ? { nowMs: opts.nowMs } : {}),
+      waitForGate,
     });
 
     const sandbox = new Sandbox({
@@ -672,6 +699,9 @@ export async function resumeRun(
             ? new Error(`stopped: ${reason}`)
             : undefined,
         );
+      },
+      respondGate: (approved: boolean) => {
+        if (pendingGate !== null) pendingGate.resolve(approved);
       },
     };
 

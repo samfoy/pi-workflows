@@ -418,6 +418,7 @@ function hostReturning(value: unknown): RunCtxHost {
     finishCallback: () => ok(null),
     getBudgetSpent: () => 0,
     tokenBudget: null,
+    gate: async () => ok(true),
   };
 }
 
