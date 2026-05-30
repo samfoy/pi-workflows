@@ -1383,7 +1383,7 @@ For each active runId, read its manifest.json and collect the set of source runI
 
 ---
 
-## BUG-076 — GC done screen: y/Enter re-enters apply flow instead of closing
+## BUG-076 ✅ FIXED — GC done screen: y/Enter re-enters apply flow instead of closing
 
 **Area:** overlay / gcDialog
 **Severity:** low
@@ -1400,7 +1400,7 @@ Reorder the conditions: check gcDialogState.done !== undefined first (before y/E
 
 ---
 
-## BUG-077 — isHotkeyEnabled returns false for r on phase-view, contradicting dispatchHotkey
+## BUG-077 ✅ FIXED — isHotkeyEnabled returns false for r on phase-view, contradicting dispatchHotkey
 
 **Area:** overlay / hotkeys
 **Severity:** low
@@ -1417,7 +1417,7 @@ Replace the blanket `if (input.view !== 'runs-list') return false` with view-spe
 
 ---
 
-## BUG-078 — g key opens GC dialog from phase-view and agent-detail views
+## BUG-078 ✅ FIXED — g key opens GC dialog from phase-view and agent-detail views
 
 **Area:** overlay / hotkeys
 **Severity:** low
