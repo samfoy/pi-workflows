@@ -265,16 +265,21 @@ globalThis.__pi_install_stdlib = function (ctxRef) {
         if (i >= items.length) {
           return ctxRef.current.phase(phaseName, handles);
         }
-        return Promise.resolve(fn(items[i], ctxRef.current)).then(
-          function (h) {
-            if (Array.isArray(h)) {
-              for (let k = 0; k < h.length; k++) handles.push(h[k]);
-            } else {
-              handles.push(h);
-            }
-            return step(i + 1);
-          },
-        );
+        // Invoke fn synchronously, then handle the result.
+        // Check kind BEFORE Promise.resolve to avoid the then-getter (BUG-001 fix).
+        var h = fn(items[i], ctxRef.current);
+        if (h !== null && typeof h === 'object' && !Array.isArray(h) && h.kind === 'agent') {
+          handles.push(h);
+          return step(i + 1);
+        }
+        return Promise.resolve(h).then(function (resolved) {
+          if (Array.isArray(resolved)) {
+            for (var k = 0; k < resolved.length; k++) handles.push(resolved[k]);
+          } else {
+            handles.push(resolved);
+          }
+          return step(i + 1);
+        });
       }
       return step(0);
     });
@@ -306,16 +311,18 @@ globalThis.__pi_install_stdlib = function (ctxRef) {
             } catch (e) {
               return Promise.reject(e);
             }
+            // Auto-run AgentHandle results through a single-agent phase.
+            // Check kind BEFORE Promise.resolve() to avoid triggering
+            // the then-getter that guards against accidental await (BUG-001 fix).
+            if (stageResult !== null && typeof stageResult === 'object' &&
+                stageResult.kind === 'agent') {
+              return ctxRef.current.phase(
+                'pipeline-stage-' + i, [stageResult]
+              ).then(function (results) {
+                return runStages(i + 1, results[0]);
+              });
+            }
             return Promise.resolve(stageResult).then(function (result) {
-              // Auto-run AgentHandle results through a single-agent phase.
-              if (result !== null && typeof result === 'object' &&
-                  result.kind === 'agent') {
-                return ctxRef.current.phase(
-                  'pipeline-stage-' + i, [result]
-                ).then(function (results) {
-                  return runStages(i + 1, results[0]);
-                });
-              }
               return runStages(i + 1, result);
             });
           }

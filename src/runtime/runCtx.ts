@@ -225,6 +225,16 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         });
       }
 
+      // BUG-002 fix: warn when a large phase runs without failMode:'null'
+      if (handles.length >= 3 && failMode === 'throw') {
+        await opts.ledger.append({
+          type: "log",
+          at: nowIso(),
+          level: "warn",
+          message: `phase "${nameArg}" has ${handles.length} agents but failMode:'throw' (default) — a single failure or timeout will discard all results. Pass { failMode: 'null' } as the third arg to ctx.phase() to handle partial failures gracefully.`,
+        });
+      }
+
       // Phase ledger entry.
       const phaseStartedAt = nowIso();
       const phaseT0 = nowMs();

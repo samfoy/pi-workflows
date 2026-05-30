@@ -413,7 +413,10 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     };
   }
 
-  const close = () => {
+  let cleaned = false;
+  const cleanup = () => {
+    if (cleaned) return;
+    cleaned = true;
     if (renderTimer !== null) {
       clearTimeout(renderTimer);
       renderTimer = null;
@@ -429,6 +432,10 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     }
     unsub();
     unsubPhase();
+  };
+
+  const close = () => {
+    cleanup();
     try {
       opts.done();
     } catch {
@@ -539,8 +546,13 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         if (view === "phase-view") {
           if (openedRunId !== undefined) {
             const snap = opts.phaseRegistry.getRunSnapshot(openedRunId);
-            const total = snap?.totalAgents ?? 0;
-            if (phaseCursor < Math.max(0, total - 1)) {
+            // Only agents in the running phase are rendered as agentRows;
+            // use that count as the bound, not totalAgents (all phases).
+            const visibleAgents =
+              snap?.phases
+                .filter((p) => p.status === "running")
+                .flatMap((p) => p.agents).length ?? 0;
+            if (phaseCursor < Math.max(0, visibleAgents - 1)) {
               phaseCursor++;
               requestRender();
             }
@@ -604,7 +616,10 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         // Slice 15: Enter on phase view opens agent detail for cursor-pointed agent.
         if (action.runId && openedRunId !== undefined) {
           const phaseSnap = opts.phaseRegistry.getRunSnapshot(openedRunId);
+          // Index into only the running-phase agents — the same set that
+          // renderPhaseView emits as agentRows — so cursor and target stay in sync.
           const agentEntry = phaseSnap?.phases
+            .filter((p) => p.status === "running")
             .flatMap((p) => p.agents)
             .find((_, idx) => idx === phaseCursor);
           if (agentEntry !== undefined) {
@@ -855,13 +870,9 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       requestRender();
     },
     dispose(): void {
-      // pi-tui calls dispose() if the host tears down; we mirror our
-      // own cleanup so listeners don't leak.
-      if (renderTimer !== null) {
-        clearTimeout(renderTimer);
-        renderTimer = null;
-      }
-      unsub();
+      // pi-tui calls dispose() if the host tears down; delegate to the
+      // shared cleanup helper so all subscriptions and timers are released.
+      cleanup();
     },
   };
   return component;

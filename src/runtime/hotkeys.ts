@@ -167,11 +167,9 @@ export function isHotkeyEnabled(input: DispatchInput): boolean {
       if (input.view === "phase-view") return input.runState !== undefined;
       return false;
     case "p":
-      // pause/resume only on the runs list, only for running/paused.
-      if (input.view !== "runs-list") return false;
+      // pause/resume on runs-list and phase-view, only for running/paused.
       return input.runState === "running" || input.runState === "paused";
     case "x":
-      if (input.view !== "runs-list") return false;
       return input.runState === "running" || input.runState === "paused";
     case "r":
       if (input.view !== "runs-list") return false;

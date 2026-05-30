@@ -374,6 +374,7 @@ export class ActiveRunsRegistry {
     this.#handles.clear();
     this.#summaries.clear();
     this.#listeners.clear();
+    this.#everLocal.clear();
   }
 
   /** Visible counts for the overlay header. */

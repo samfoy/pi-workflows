@@ -53,7 +53,7 @@ import {
   LedgerWriter,
   LedgerReader,
   RunStateMachine,
-  TERMINAL_STATES,
+  RESUMABLE_STATES,
   buildResultEntry,
 } from "./ledger.js";
 import { Sandbox } from "./sandbox.js";
@@ -245,7 +245,7 @@ export async function resumeRun(
   //   is "parent-crash" (advisory crash-sweep rollback).
   // - paused, running, approved, pending: resumable.
   let resumable = false;
-  if (!TERMINAL_STATES.has(finalState)) {
+  if (RESUMABLE_STATES.has(finalState)) {
     resumable = true;
   } else if (finalState === "failed") {
     // Look for the latest transition with `to=failed` and check its

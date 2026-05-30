@@ -366,6 +366,17 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
     } catch {
       // ignore
     }
+    // Escalate to SIGKILL after a 5 s grace period if SIGTERM is ignored.
+    const killHandle = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+    }, 5_000);
+    if (typeof (killHandle as { unref?: () => void }).unref === "function") {
+      (killHandle as unknown as { unref: () => void }).unref();
+    }
   }, timeoutMs);
   if (typeof (timeoutHandle as { unref?: () => void }).unref === "function") {
     (timeoutHandle as unknown as { unref: () => void }).unref();
@@ -490,7 +501,7 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
     } catch {
       // ignore
     }
-    if (exitCode !== 0 && exitCode !== null) {
+    if (exitSignal !== null || (exitCode !== 0 && exitCode !== null)) {
       throw new AgentSubprocessError({
         agentId: opts.agentId,
         exitCode,

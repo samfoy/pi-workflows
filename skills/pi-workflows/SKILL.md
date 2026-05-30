@@ -132,7 +132,7 @@ const result = await runWorkflow({
     result: { text: "42", usage: { input: 5, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 7 } },
   }),
 });
-assert.equal(result.output, "42");
+assert.equal(result.text, "42");
 ```
 
 See `docs/integration-testing.md` for the full guide including cache assertions
