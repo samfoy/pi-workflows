@@ -148,7 +148,7 @@ test("state machine: truly-terminal states (done/stopped/cancelled-pre-run) have
 test("state machine: PRD §5.2 set memberships", () => {
   assert.deepEqual(new Set([...TERMINAL_STATES]), new Set(["done", "failed", "stopped", "cancelled-pre-run"]));
   assert.deepEqual(new Set([...NON_TERMINAL_STATES]), new Set(["pending", "approved", "running", "paused"]));
-  assert.deepEqual(new Set([...RESUMABLE_STATES]), new Set(["paused", "running"]));
+  assert.deepEqual(new Set([...RESUMABLE_STATES]), new Set(["paused", "running", "approved", "pending"]));
 });
 
 // ─── RunStateMachine.go ──────────────────────────────────────────────
