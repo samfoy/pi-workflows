@@ -1026,7 +1026,7 @@ Move `agent_end` logging to AFTER extractJson succeeds, or move extractJson befo
 
 ---
 
-## BUG-055 — Token budget enforcement races in parallel phases — budget can be overshot
+## BUG-055 ✅ FIXED — Token budget enforcement races in parallel phases — budget can be overshot
 
 **Area:** runtime / runCtx
 **Severity:** medium
