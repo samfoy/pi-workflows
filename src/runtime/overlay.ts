@@ -363,6 +363,17 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       lastSnapshot = opts.registry.listSummaries();
       const sorted = sortAndClamp(lastSnapshot);
       if (cursor >= sorted.length) cursor = Math.max(0, sorted.length - 1);
+      // BUG-073: clamp phaseCursor when the running-phase agent list shrinks.
+      if (openedRunId !== undefined) {
+        const snap = opts.phaseRegistry.getRunSnapshot(openedRunId);
+        const visibleAgents =
+          snap?.phases
+            .filter((p) => p.status === "running")
+            .flatMap((p) => p.agents).length ?? 0;
+        if (phaseCursor >= visibleAgents) {
+          phaseCursor = Math.max(0, visibleAgents - 1);
+        }
+      }
       requestRender();
     }, opts.debounceMs);
   };
@@ -483,8 +494,8 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         return { lines: rendered.lines };
       }
       // Agent vanished — fall back to phase view.
-      view = "phase-view";
-      openedAgentId = undefined;
+      // BUG-074: use handleAction to clear all stale state atomically.
+      handleAction({ kind: "navigate-back" });
     }
 
     if (view === "phase-view" && openedRunId !== undefined) {
@@ -510,7 +521,8 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         return { lines: rendered.lines };
       }
       // Run vanished from registry — fall back to runs list.
-      view = "runs-list";
+      // BUG-074: use handleAction to clear openedRunId, phaseCursor, banner atomically.
+      handleAction({ kind: "navigate-back" });
     }
     const sorted = sortAndClamp(lastSnapshot);
     const selected = sorted[cursor];
