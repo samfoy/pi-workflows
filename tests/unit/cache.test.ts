@@ -486,3 +486,193 @@ test("cache: replay warns on unknown record type and skips", async () => {
     cleanup();
   }
 });
+
+// ─── batch write mode ────────────────────────────────────────────────
+
+test("cache(batch): writes stay in buffer until flush()", async () => {
+  const { runDir, cleanup, opts } = makeRunDir();
+  try {
+    const store = await CacheStore.open({ ...opts(), batchMode: true });
+    const path = join(runDir, "cache.jsonl");
+    // Write three records — in batch mode they should NOT hit disk yet.
+    await store.setAgentResult("k1", { agentId: "a", text: "v1" });
+    await store.setAgentResult("k2", { agentId: "b", text: "v2" });
+    await store.setAuthorCache("u1", 42);
+    // File must not yet exist (or be empty) — the 250 ms interval
+    // hasn't fired and we haven't called flush().
+    assert.equal(existsSync(path), false, "file not written before flush");
+
+    // Explicit flush: should drain and fsync all three lines.
+    await store.flush();
+    assert.equal(existsSync(path), true, "file exists after flush");
+    const lines = readLines(path);
+    assert.equal(lines.length, 3);
+  } finally {
+    cleanup();
+  }
+});
+
+test("cache(batch): in-memory reads work immediately, before flush", async () => {
+  const { cleanup, opts } = makeRunDir();
+  try {
+    const store = await CacheStore.open({ ...opts(), batchMode: true });
+    await store.setAgentResult("k", { agentId: "x", text: "hello" });
+    // Readable in memory right away — no flush needed.
+    assert.deepEqual(store.getAgentResult("k"), { agentId: "x", text: "hello" });
+    assert.equal(store.hasAgentResult("k"), true);
+  } finally {
+    cleanup();
+  }
+});
+
+test("cache(batch): flush writes all buffered records in one pass", async () => {
+  const { runDir, cleanup, opts } = makeRunDir();
+  try {
+    const store = await CacheStore.open({ ...opts(), batchMode: true, compactionThreshold: 1000 });
+    // 5 distinct keys → no compaction, all 5 lines should land on disk.
+    for (let i = 0; i < 5; i++) {
+      await store.setAgentResult(`k${i}`, { agentId: "a", text: `v${i}` });
+    }
+    await store.flush();
+    const lines = readLines(join(runDir, "cache.jsonl"));
+    assert.equal(lines.length, 5);
+    const keys = lines.map((l) => JSON.parse(l).key).sort();
+    assert.deepEqual(keys, ["k0", "k1", "k2", "k3", "k4"]);
+  } finally {
+    cleanup();
+  }
+});
+
+test("cache(batch): replay round-trips after explicit flush", async () => {
+  const { cleanup, opts } = makeRunDir();
+  try {
+    const store = await CacheStore.open({ ...opts(), batchMode: true, compactionThreshold: 1000 });
+    await store.setAgentResult("r1", { agentId: "a", text: "alpha" });
+    await store.setAuthorCache("u1", { nested: true });
+    await store.flush();
+
+    // Open a fresh (non-batch) store and replay.
+    const store2 = await CacheStore.open(opts());
+    assert.deepEqual(store2.getAgentResult("r1"), { agentId: "a", text: "alpha" });
+    assert.deepEqual(store2.getAuthorCache("u1"), { nested: true });
+  } finally {
+    cleanup();
+  }
+});
+
+test("cache(batch): second flush on empty buffer is a no-op (idempotent)", async () => {
+  const { runDir, cleanup, opts } = makeRunDir();
+  try {
+    const store = await CacheStore.open({ ...opts(), batchMode: true, compactionThreshold: 1000 });
+    await store.setAgentResult("k", { agentId: "a", text: "x" });
+    await store.flush();
+    const after1 = readLines(join(runDir, "cache.jsonl")).length;
+    // Flushing again with nothing new should not append anything.
+    await store.flush();
+    const after2 = readLines(join(runDir, "cache.jsonl")).length;
+    assert.equal(after2, after1);
+  } finally {
+    cleanup();
+  }
+});
+
+// ─── checkpoint methods ──────────────────────────────────────────────
+
+test("cache: setCheckpoint / hasCheckpoint / getCheckpoint round-trip", async () => {
+  const { cleanup, opts } = makeRunDir();
+  try {
+    const store = await CacheStore.open(opts());
+
+    assert.equal(await store.hasCheckpoint("phase1"), false);
+    assert.equal(await store.getCheckpoint("phase1"), undefined);
+
+    await store.setCheckpoint("phase1", { step: 3 });
+
+    assert.equal(await store.hasCheckpoint("phase1"), true);
+    assert.deepEqual(await store.getCheckpoint("phase1"), { step: 3 });
+  } finally {
+    cleanup();
+  }
+});
+
+test("cache: setCheckpoint without data stores null sentinel", async () => {
+  const { cleanup, opts } = makeRunDir();
+  try {
+    const store = await CacheStore.open(opts());
+    await store.setCheckpoint("init");
+    assert.equal(await store.hasCheckpoint("init"), true);
+    // data defaults to null when not provided
+    assert.equal(await store.getCheckpoint("init"), null);
+  } finally {
+    cleanup();
+  }
+});
+
+test("cache: checkpoint is stored under __chk__ key prefix", async () => {
+  const { cleanup, opts } = makeRunDir();
+  try {
+    const store = await CacheStore.open(opts());
+    await store.setCheckpoint("foo", 99);
+    // The raw author cache key should be __chk__foo.
+    assert.equal(store.hasAuthorCache("__chk__foo"), true);
+    assert.equal(store.getAuthorCache("__chk__foo"), 99);
+    // A plain key "foo" must not be affected.
+    assert.equal(store.hasAuthorCache("foo"), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("cache: checkpoint replays correctly in a fresh store", async () => {
+  const { cleanup, opts } = makeRunDir();
+  try {
+    const store = await CacheStore.open(opts());
+    await store.setCheckpoint("done", { ts: "2025-01-01" });
+    await store.flush();
+
+    const store2 = await CacheStore.open(opts());
+    assert.equal(await store2.hasCheckpoint("done"), true);
+    assert.deepEqual(await store2.getCheckpoint("done"), { ts: "2025-01-01" });
+  } finally {
+    cleanup();
+  }
+});
+
+test("cache: multiple checkpoints are independent", async () => {
+  const { cleanup, opts } = makeRunDir();
+  try {
+    const store = await CacheStore.open(opts());
+    await store.setCheckpoint("a", 1);
+    await store.setCheckpoint("b", 2);
+    await store.setCheckpoint("c");
+
+    assert.equal(await store.getCheckpoint("a"), 1);
+    assert.equal(await store.getCheckpoint("b"), 2);
+    assert.equal(await store.getCheckpoint("c"), null);
+    assert.equal(await store.hasCheckpoint("d"), false);
+  } finally {
+    cleanup();
+  }
+});
+
+test("cache: checkpoint survives compaction", async () => {
+  const { runDir, cleanup, opts } = makeRunDir();
+  try {
+    const store = await CacheStore.open({ ...opts(), compactionThreshold: 3 });
+    await store.setCheckpoint("phase1", "done");
+    await store.setAgentResult("k1", { agentId: "a", text: "x" });
+    await store.setAgentResult("k2", { agentId: "b", text: "y" });
+    // Third write triggers compaction.
+    await store.flush();
+
+    const store2 = await CacheStore.open(opts());
+    assert.equal(await store2.hasCheckpoint("phase1"), true);
+    assert.equal(await store2.getCheckpoint("phase1"), "done");
+    // Verify the compacted file doesn't contain duplicate __chk__ lines.
+    const lines = readLines(join(runDir, "cache.jsonl"));
+    const chkLines = lines.filter((l) => l.includes("__chk__"));
+    assert.equal(chkLines.length, 1);
+  } finally {
+    cleanup();
+  }
+});

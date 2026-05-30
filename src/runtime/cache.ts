@@ -68,6 +68,14 @@ export interface CacheStoreOptions {
   /** Override compaction threshold. Tests use 5; production uses 1000. */
   readonly compactionThreshold?: number;
   /**
+   * Enable buffered write mode. When true, `appendRecord` accumulates
+   * JSON lines in memory instead of fsyncing per-call. The buffer is
+   * flushed to disk every 250 ms (via an unref'd setInterval) or
+   * immediately when `flush()` is called. Default: false (every write
+   * gets its own fsync, preserving the v1 durability contract).
+   */
+  readonly batchMode?: boolean;
+  /**
    * Test-only seam: invoked synchronously inside `compact()` after
    * the tmp file is fully written + fsynced, **before** the rename.
    * Throwing simulates a crash mid-compaction; the original file
@@ -118,6 +126,13 @@ export class CacheStore {
   /** Promise chain serializing every write. */
   private writeQueue: Promise<void> = Promise.resolve();
 
+  // ─── batch-write state ────────────────────────────────────────────
+  private readonly isBatchMode: boolean;
+  /** Accumulates JSON lines when batchMode is enabled. */
+  private batchBuffer: string[] = [];
+  /** Periodic flush interval (unref'd so it won't block process exit). */
+  private batchInterval: ReturnType<typeof setInterval> | undefined;
+
   private constructor(opts: CacheStoreOptions) {
     const resolve = opts.resolveCachePath ?? defaultCachePath;
     const resolveTmp = opts.resolveCacheTmpPath ?? defaultCachePathTmp;
@@ -129,6 +144,12 @@ export class CacheStore {
       this.compactionPanicBeforeRename = opts.__compactionPanicBeforeRename;
     }
     this.now = opts.now ?? (() => new Date().toISOString());
+    this.isBatchMode = opts.batchMode ?? false;
+    if (this.isBatchMode) {
+      const interval = setInterval(() => this.drainBatchSync(), 250);
+      interval.unref();
+      this.batchInterval = interval;
+    }
   }
 
   /**
@@ -238,9 +259,42 @@ export class CacheStore {
     return this.runCompaction();
   }
 
-  /** Awaitable barrier for the write queue. Tests use this. */
+  /**
+   * Awaitable barrier: in batch mode, drains the in-memory buffer to
+   * disk (one combined writeFileSync + fsyncSync), then waits for any
+   * queued compaction or non-batched writes to complete. In non-batch
+   * mode, simply awaits the write queue (original behaviour).
+   */
   async flush(): Promise<void> {
+    if (this.isBatchMode) {
+      this.drainBatchSync();
+    }
     await this.writeQueue;
+  }
+
+  // ─── checkpoint helpers (ctx.checkpoint DSL primitive) ────────────
+
+  /**
+   * Persist a named checkpoint to the author cache. Idempotent —
+   * calling twice with the same label replaces the earlier entry.
+   * Stored under key `__chk__<label>` to avoid collisions with
+   * user-defined `ctx.cache` keys.
+   */
+  async setCheckpoint(label: string, data?: unknown): Promise<void> {
+    await this.setAuthorCache(`__chk__${label}`, data ?? null);
+  }
+
+  /** Returns true if the checkpoint was previously set (and not deleted). */
+  async hasCheckpoint(label: string): Promise<boolean> {
+    return this.hasAuthorCache(`__chk__${label}`);
+  }
+
+  /**
+   * Returns the data stored with the checkpoint, or `undefined` if
+   * the checkpoint has not been set.
+   */
+  async getCheckpoint(label: string): Promise<unknown | undefined> {
+    return this.getAuthorCache(`__chk__${label}`);
   }
 
   // ─── internals ────────────────────────────────────────────────────
@@ -250,11 +304,48 @@ export class CacheStore {
     // critical section short. JSON.stringify on a fresh object is
     // safe (no cycles by construction).
     const line = JSON.stringify(record) + "\n";
+
+    if (this.isBatchMode) {
+      // Accumulate in the buffer; the periodic interval (or an explicit
+      // flush() call) will write everything as a single append + fsync.
+      // We count optimistically so that maybeCompact() fires at the
+      // same threshold cadence as non-batch mode. In-memory map updates
+      // happen after this returns (in the set*() callers), which is
+      // correct: if compaction fires between appendRecord and the
+      // set() call, the snapshot is still accurate because both the
+      // queued compaction and the set() share the same microtask queue.
+      this.batchBuffer.push(line);
+      this.entriesSinceCompaction += 1;
+      return Promise.resolve();
+    }
+
     const next = this.writeQueue.then(() => this.appendLineSync(line));
     // Silence unhandled rejection if a later step doesn't await; the
     // queue itself swallows by overwriting.
     this.writeQueue = next.catch(() => undefined);
     return next;
+  }
+
+  /**
+   * Synchronously write all buffered lines as one combined append +
+   * single fsyncSync. Called by the 250 ms interval and by flush().
+   * No-ops when the buffer is empty.
+   */
+  private drainBatchSync(): void {
+    if (this.batchBuffer.length === 0) return;
+    // Splice the entire buffer atomically (JS single-threaded: safe).
+    const lines = this.batchBuffer.splice(0);
+    const combined = lines.join(""); // each line already ends with \n
+    let fd: number | undefined;
+    try {
+      fd = openSync(this.cachePath, "a", 0o644);
+      writeSync(fd, combined);
+      fsyncSync(fd);
+    } finally {
+      if (fd !== undefined) closeSync(fd);
+    }
+    // entriesSinceCompaction was already incremented in appendRecord;
+    // do NOT increment again here to avoid double-counting.
   }
 
   /**
