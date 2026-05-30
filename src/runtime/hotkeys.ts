@@ -172,11 +172,19 @@ export function isHotkeyEnabled(input: DispatchInput): boolean {
     case "x":
       return input.runState === "running" || input.runState === "paused";
     case "r":
-      if (input.view !== "runs-list") return false;
       if (input.isRemote) return false; // F2: remote runs can't be restarted
-      // Slice 14: `r` is enabled on paused (resume) AND terminal (restart).
-      if (input.runState === "paused") return true;
-      return input.runState !== undefined && TERMINAL.has(input.runState);
+      if (input.view === "runs-list") {
+        // Slice 14: `r` is enabled on paused (resume) AND terminal (restart).
+        if (input.runState === "paused") return true;
+        return input.runState !== undefined && TERMINAL.has(input.runState);
+      }
+      if (input.view === "phase-view") {
+        // `r` is enabled on paused (resume) AND terminal (restart) on phase-view,
+        // matching dispatchHotkey and helpForState logic.
+        if (input.runState === "paused") return true;
+        return input.runState !== undefined && TERMINAL.has(input.runState);
+      }
+      return false;
     case "g":
       return input.view === "runs-list";
     case "s":
@@ -379,7 +387,7 @@ export function helpForState(
       noSel || (!isRunning && !isPaused),
     ),
     dis("x", "stop", noSel || (!isRunning && !isPaused)),
-    dis("r", "restart", noSel || !isTerminal),
+    dis("r", isPaused ? "resume" : "restart", noSel || (!isTerminal && !isPaused)),
     enabled("g", "gc"),
     enabled("Esc", "close"),
     enabled("?", "help"),
