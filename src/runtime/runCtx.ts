@@ -955,7 +955,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
           "ctx.checkpoint: label must be a non-empty string",
         );
       }
-      if (opts.cache.hasCheckpoint(label)) {
+      if (await opts.cache.hasCheckpoint(label)) {
         // Already set — checkpoint_hit (resumed run).
         void opts.ledger.append({
           type: "checkpoint_hit",

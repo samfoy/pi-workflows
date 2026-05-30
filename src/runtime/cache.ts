@@ -244,28 +244,11 @@ export class CacheStore {
     await this.maybeCompact();
   }
 
-  // ─── checkpoint helpers (Improvement 6) ──────────────────────────
+  // ─── checkpoint helpers (ctx.checkpoint DSL primitive) ─────────────
   // Checkpoints are stored as regular author-cache entries under a
   // reserved key prefix `__chk__`. This piggybacks on the existing
   // serialisation / replay / compaction path at zero extra complexity.
-
-  /** True if a checkpoint for `label` exists in the author cache. */
-  hasCheckpoint(label: string): boolean {
-    return this.hasAuthorCache(`__chk__${label}`);
-  }
-
-  /** Return the data stored at checkpoint `label`, or `undefined`. */
-  getCheckpoint(label: string): unknown {
-    return this.getAuthorCache(`__chk__${label}`);
-  }
-
-  /**
-   * Write a checkpoint. Idempotent at the cache level — the caller
-   * (`ctx.checkpoint`) is responsible for the has-before-set guard.
-   */
-  async setCheckpoint(label: string, data?: unknown): Promise<void> {
-    return this.setAuthorCache(`__chk__${label}`, data ?? null);
-  }
+  // All three methods are async so callers can uniformly await them.
 
   /**
    * Force a compaction regardless of the threshold. Test-only and
