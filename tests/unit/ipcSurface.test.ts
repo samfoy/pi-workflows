@@ -17,6 +17,7 @@ import {
 } from "../../src/runtime/activeRuns.js";
 import { WorkflowClient } from "../../src/client.js";
 import { LedgerWriter } from "../../src/runtime/ledger.js";
+import type { LedgerEntry } from "../../src/types/internal.js";
 
 // ─── Test scaffold ─────────────────────────────────────────────────────────
 
