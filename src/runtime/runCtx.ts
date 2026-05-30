@@ -184,14 +184,22 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     nameArg: unknown,
     agentsArg: unknown,
     optsArg?: unknown,
-  ): Promise<RunCtxBridgeResult<readonly AgentResultLike[]>> {
+  ): Promise<RunCtxBridgeResult<readonly (AgentResultLike | null)[]>> {
     // Parse failMode from optional third arg.
-    const failMode: 'throw' | 'null' =
-      optsArg !== null && typeof optsArg === 'object' &&
-      (optsArg as Record<string, unknown>).failMode === 'null'
-        ? 'null'
-        : 'throw';
+    const rawFailMode =
+      optsArg !== null && typeof optsArg === 'object'
+        ? (optsArg as Record<string, unknown>).failMode
+        : undefined;
+    const failMode: 'throw' | 'null' = rawFailMode === 'null' ? 'null' : 'throw';
     try {
+      // BUG-056 fix: reject invalid failMode values so typos like 'NULL' or
+      // 'null-on-error' are caught here and returned as an error envelope
+      // rather than silently coercing to 'throw'.
+      if (rawFailMode !== undefined && rawFailMode !== 'throw' && rawFailMode !== 'null') {
+        throw new TypeError(
+          `phase() opts.failMode must be 'throw' or 'null', got: ${JSON.stringify(rawFailMode)}`,
+        );
+      }
       if (typeof nameArg !== "string" || nameArg.length === 0) {
         throw new TypeError("ctx.phase: name must be a non-empty string");
       }
@@ -322,7 +330,10 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
                 } as AgentResultLike)
               : null,
           );
-          return { ok: true, value: out as readonly AgentResultLike[] };
+          // BUG-057 fix: preserve | null in the bridge result type so the
+          // sandbox receives the correct shape and callers can distinguish
+          // failed agents from successful ones.
+          return { ok: true, value: out as readonly (AgentResultLike | null)[] };
         }
 
         // Default: throw AggregateError. Preserves MalformedAgentOutputError /

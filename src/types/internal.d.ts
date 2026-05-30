@@ -498,7 +498,7 @@ export interface RunCtxHost {
     name: unknown,
     agents: unknown,
     opts?: unknown,
-  ): Promise<RunCtxBridgeResult<readonly AgentResultLike[]>>;
+  ): Promise<RunCtxBridgeResult<readonly (AgentResultLike | null)[]>>;
   cacheGet(key: unknown): Promise<RunCtxBridgeResult<unknown>>;
   cacheSet(key: unknown, value: unknown): Promise<RunCtxBridgeResult<null>>;
   cacheHas(key: unknown): Promise<RunCtxBridgeResult<boolean>>;
