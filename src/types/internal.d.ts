@@ -284,6 +284,8 @@ export interface RunOptions {
   readonly maxConcurrent: number;
   /** PRD §1.2 pin #6: default 1000, hard-fail if exceeded. */
   readonly perRunAgentCap: number;
+  /** Token budget cap for this run, or `null` for uncapped. */
+  readonly tokenBudget: number | null;
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -472,6 +474,13 @@ export interface RunCtxHost {
   readonly runMeta: RunMetaData;
   /** Slash-command argument string (PRD §4.2.7 `ctx.input`). */
   readonly input: string;
+  /**
+   * Token budget cap for this run, or `null` for uncapped.
+   * Passed as a plain value (not a bridge function) so the sandbox
+   * init script can embed it in the frozen `budget` object without
+   * a round-trip.
+   */
+  readonly tokenBudget: number | null;
   /**
    * Build an AgentHandle. Pure — same args twice yields two distinct
    * handles (ids may differ if author omitted `id`). Per PRD §4.2.1

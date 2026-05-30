@@ -63,6 +63,7 @@ function noopHost(): RunCtxHost {
     log: () => ok(null),
     finishCallback: () => ok(null),
     getBudgetSpent: () => 0,
+    tokenBudget: null,
   };
 }
 

@@ -350,6 +350,7 @@ export async function resumeRun(
       mockAgents: opts.mockAgents === true,
       maxConcurrent: 16,
       perRunAgentCap: 1000,
+      tokenBudget: null,
     };
 
     const ledger = new LedgerWriter({
@@ -457,6 +458,7 @@ export async function resumeRun(
       signal: ctrl.signal,
       pauseGate,
       perRunAgentCap: runOptions.perRunAgentCap,
+      tokenBudget: runOptions.tokenBudget ?? null,
       mockAgents: runOptions.mockAgents,
       cwd,
       ...(opts.dispatch ? { dispatch: opts.dispatch } : {}),

@@ -114,6 +114,7 @@ function stubHost(opts: {
     log: () => ok(null),
     finishCallback: () => ok(null),
     getBudgetSpent: () => 0,
+    tokenBudget: null,
   };
 }
 

@@ -59,6 +59,8 @@ import { sha256 } from "../util/hash.js";
 export interface RunCtxHostOptions {
   readonly runMeta: RunMetaData;
   readonly input: string;
+  /** Token budget cap, or `null` for uncapped. Enforced per-agent in `runOneAgent`. */
+  readonly tokenBudget?: number | null;
   readonly runDirAbs: string;
   /** SHA-256 of the workflow source (cache-key input + manifest field). */
   readonly workflowSourceSha256: string;
@@ -103,7 +105,8 @@ export interface RunCtxHostOptions {
       | "pi-workflows.phase.started"
       | "pi-workflows.phase.ended"
       | "pi-workflows.agent.started"
-      | "pi-workflows.agent.ended",
+      | "pi-workflows.agent.ended"
+      | "pi-workflows.meta.phases",
     data: Readonly<Record<string, unknown>>,
   ) => void;
 }
@@ -131,6 +134,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   let agentCount = 0;
   let budgetSpent = 0;
   let finishPrompt: string | null = null;
+  const tokenBudget: number | null = opts.tokenBudget ?? null;
 
   // ─── ctx.agent ──────────────────────────────────────────────────
   // Pure: builds a handle object. No I/O. Auto-generates id if absent.
@@ -376,6 +380,13 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     if (agentCount >= opts.perRunAgentCap) {
       throw new Error(
         `ctx.phase: per-run agent cap ${opts.perRunAgentCap} exceeded`,
+      );
+    }
+    // Token budget enforcement — checked before dispatch so we don't
+    // start an agent we've already budgeted out of.
+    if (tokenBudget !== null && budgetSpent >= tokenBudget) {
+      throw new Error(
+        `ctx.phase: token budget exhausted (spent ${budgetSpent}, budget ${tokenBudget})`,
       );
     }
     agentCount++;
@@ -672,6 +683,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   const host: RunCtxHost = {
     runMeta: opts.runMeta,
     input: opts.input,
+    tokenBudget,
     agent,
     phase,
     cacheGet,

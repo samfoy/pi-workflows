@@ -64,6 +64,27 @@ import { sha256 } from "./util/hash.js";
 import { newRunId } from "./util/runId.js";
 import { runDir as runDirFor } from "./util/paths.js";
 
+/**
+ * Lightweight static extractor for `meta.phases` titles from a workflow script.
+ * Uses a regex rather than a full AST parse — only handles the common literal
+ * array shape. Returns empty array if not found or unparseable.
+ */
+export function extractMetaPhases(source: string): Array<{ title: string }> {
+  // Match: phases: [ { title: '...' }, ... ] or phases: [{ title: "..." }, ...]
+  const phasesBlock = /phases\s*:\s*(\[[\s\S]*?\])/m.exec(source);
+  if (!phasesBlock?.[1]) return [];
+  const block = phasesBlock[1];
+  const titles: Array<{ title: string }> = [];
+  const titleRe = /title\s*:\s*['"]([^'"]+)['"]/g;
+  let m: RegExpExecArray | null;
+  // biome-ignore lint/suspicious/noAssignInExpressions: idiomatic exec loop
+  while ((m = titleRe.exec(block)) !== null) {
+    const t = m[1];
+    if (t !== undefined) titles.push({ title: t });
+  }
+  return titles;
+}
+
 /** Public-ish handle returned by `RunManager.start`. */
 export interface Run {
   readonly runId: string;
@@ -211,6 +232,8 @@ export interface RunManagerStartOptions {
   readonly perRunAgentCap?: number;
   /** PRD §5.4 default — overridden in tests. Default 16. */
   readonly maxConcurrent?: number;
+  /** Token budget cap for this run, or `null` for uncapped. Default null. */
+  readonly tokenBudget?: number | null;
   readonly cwd?: string;
   /** Test seam — plug a dispatcher mock when integration tests need it. */
   readonly dispatch?: Parameters<typeof createRunCtxHost>[0]["dispatch"];
@@ -260,7 +283,8 @@ export interface RunManagerStartOptions {
       | "pi-workflows.phase.started"
       | "pi-workflows.phase.ended"
       | "pi-workflows.agent.started"
-      | "pi-workflows.agent.ended",
+      | "pi-workflows.agent.ended"
+      | "pi-workflows.meta.phases",
     data: Readonly<Record<string, unknown>>,
   ) => void;
 }
@@ -366,6 +390,7 @@ export async function startWorkflowRun(
     mockAgents: opts.mockAgents === true,
     maxConcurrent: opts.maxConcurrent ?? 16,
     perRunAgentCap: opts.perRunAgentCap ?? 1000,
+    tokenBudget: opts.tokenBudget ?? null,
   };
   // Slice-8a fields are a SUBSET of RunManifest; the remaining 3 fields
   // (parent-*) are written by the dispatcher on first agent. We use a
@@ -523,6 +548,7 @@ export async function startWorkflowRun(
     signal: ctrl.signal,
     pauseGate,
     perRunAgentCap: runOptions.perRunAgentCap,
+    tokenBudget: runOptions.tokenBudget,
     mockAgents: runOptions.mockAgents,
     cwd,
     ...(opts.dispatch ? { dispatch: opts.dispatch } : {}),
@@ -564,6 +590,16 @@ export async function startWorkflowRun(
     let runError: unknown = null;
     let outcome: RunOutcome = "done";
     try {
+      // Pre-seed pending phases from meta.phases declaration.
+      const declaredPhases = extractMetaPhases(sourceText);
+      if (declaredPhases.length > 0 && opts.emitOverlayEvent) {
+        try {
+          opts.emitOverlayEvent("pi-workflows.meta.phases" as any, {
+            runId: runId,
+            phases: declaredPhases,
+          });
+        } catch { /* emission failures must not abort the run */ }
+      }
       try {
         const out = await sandbox.runScript(sourceText);
         // Clone returnValue back to host realm so callers (and slice-7

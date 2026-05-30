@@ -37,6 +37,14 @@ async function makeCtx(
   runDir: string,
   dispatch: typeof failingDispatch,
 ) {
+  return makeCtxWithBudget(runDir, dispatch, null);
+}
+
+async function makeCtxWithBudget(
+  runDir: string,
+  dispatch: typeof failingDispatch,
+  tokenBudget: number | null,
+) {
   const runId = "wf-fmtest";
   const ledger = new LedgerWriter({
     runId,
@@ -65,6 +73,7 @@ async function makeCtx(
     semaphore,
     signal: ctrl.signal,
     perRunAgentCap: 100,
+    tokenBudget,
     mockAgents: false,
     cwd: runDir,
     dispatch,
@@ -200,4 +209,73 @@ test("opts.schema: no output field when schema absent", async () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+// ─── budget.total enforcement ─────────────────────────────────────────────────
+
+test("tokenBudget: throws when budget exhausted before dispatch", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wf-budget-"));
+  try {
+    // Budget of 1 token — first agent succeeds (spending 2), second should throw
+    let callCount = 0;
+    const countingDispatch = (opts: DispatcherOptions): Promise<AgentResult> => {
+      callCount++;
+      return successDispatch(opts); // spends totalTokens=2 per call
+    };
+    const { host } = await makeCtxWithBudget(dir, countingDispatch, 1);
+
+    const h1 = host.agent("first", { id: "a" });
+    const h2 = host.agent("second", { id: "b" });
+    assert.ok(h1.ok && h2.ok);
+
+    // First phase succeeds but spends 2 tokens (over budget of 1)
+    const r1 = await host.phase("first", [h1.value]);
+    assert.ok(r1.ok);
+
+    // Second phase should throw because budget is exhausted (2 >= 1)
+    const r2 = await host.phase("second", [h2.value]);
+    assert.ok(!r2.ok, "Expected budget exhausted error");
+    // The budget error is wrapped inside a phase AggregateError
+    assert.match(r2.error.message + (r2.error.errors?.[0]?.message ?? ""), /budget exhausted|perRunAgentCap/);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("budget: total and remaining reflect configured tokenBudget", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wf-budgetval-"));
+  try {
+    const { host } = await makeCtxWithBudget(dir, successDispatch, 500);
+    assert.equal(host.tokenBudget, 500);
+    assert.equal(host.getBudgetSpent(), 0);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+// ─── extractMetaPhases static parser ────────────────────────────────────────
+
+import { extractMetaPhases } from "../../src/runManager.js";
+
+test("extractMetaPhases: extracts single-quoted phase titles", () => {
+  const src = `export const meta = {
+  name: "audit",
+  phases: [
+    { title: 'Recon' },
+    { title: 'Analyze' },
+    { title: 'Report' },
+  ],
+};`;
+  const phases = extractMetaPhases(src);
+  assert.deepEqual(phases, [{ title: "Recon" }, { title: "Analyze" }, { title: "Report" }]);
+});
+
+test("extractMetaPhases: extracts double-quoted phase titles", () => {
+  const src = `export const meta = { name: "x", phases: [{ title: "Alpha" }, { title: "Beta" }] };`;
+  assert.deepEqual(extractMetaPhases(src), [{ title: "Alpha" }, { title: "Beta" }]);
+});
+
+test("extractMetaPhases: returns empty array when no phases declared", () => {
+  const src = `export const meta = { name: "x", description: "y" };`;
+  assert.deepEqual(extractMetaPhases(src), []);
 });

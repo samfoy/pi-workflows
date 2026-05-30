@@ -182,6 +182,9 @@ function narrowPhaseEntry(
   const d = data as Record<string, unknown>;
   if (typeof d.runId !== "string") return null;
   switch (customType) {
+    case "pi-workflows.meta.phases":
+      if (!Array.isArray(d.phases)) return null;
+      return { customType, data: d as never } as PhaseFeedEntry;
     case "pi-workflows.phase.started":
       if (typeof d.phaseName !== "string" || typeof d.agentCount !== "number")
         return null;

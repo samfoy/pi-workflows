@@ -54,6 +54,14 @@ export interface RunPhaseSnapshot {
 
 export type PhaseFeedEntry =
   | {
+      readonly customType: "pi-workflows.meta.phases";
+      readonly data: {
+        readonly runId: string;
+        /** Phase titles declared in `meta.phases` — seeded as pending before any run. */
+        readonly phases: ReadonlyArray<{ readonly title: string }>;
+      };
+    }
+  | {
       readonly customType: "pi-workflows.phase.started";
       readonly data: {
         readonly runId: string;
@@ -133,6 +141,21 @@ export class PhaseRegistry {
     const run = this.#getOrInit(runId);
 
     switch (entry.customType) {
+      case "pi-workflows.meta.phases": {
+        // Pre-seed pending phases from meta declaration.
+        // Only inserts phases that don't already exist (run may have started).
+        for (const p of entry.data.phases) {
+          if (!run.phases.has(p.title)) {
+            run.phases.set(p.title, {
+              phaseName: p.title,
+              status: "pending",
+              agentCount: 0,
+              agents: new Map(),
+            });
+          }
+        }
+        break;
+      }
       case "pi-workflows.phase.started": {
         const d = entry.data;
         const prior = run.phases.get(d.phaseName);

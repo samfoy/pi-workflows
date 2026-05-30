@@ -195,35 +195,57 @@ export function registerWriteWorkflowTool(opts: WriteWorkflowToolOpts): void {
 
     promptSnippet: `
 // ctx.agent() builds a handle (sync, no spawn). ctx.phase() runs handles in parallel.
-// AgentResult: { text, usage, durationMs, cached } — use .text NOT .output
+// AgentResult: { text, output?, usage, durationMs, cached } — use .text for prose, .output for schema results
 export const meta = {
   name: "my-workflow",
   description: "What this workflow does",
   version: "1.0.0",
   // whenToUse: "Use when you need to fan-out work across many files or topics",
-  // phases: [{ title: "Recon" }, { title: "Analyze" }, { title: "Summarize" }],
+  // phases: [{ title: "Recon" }, { title: "Analyze" }, { title: "Report" }],
 };
 
 export default async function (ctx) {
-  // Single agent — wrap in phase:
-  const [result] = await ctx.phase("step", [
-    ctx.agent("Do the thing.", { id: "doer" }),
-  ]);
-  const text = result.text;
+  // ALL variables must be declared inside this function.
+  // Agents must read files themselves — never inline file content in prompts.
 
-  // Parallel agents:
-  const results = await ctx.phase("analyze", [
+  // Parallel agents → results[i].text
+  const [a, b] = await ctx.phase("analyze", [
     ctx.agent("Analyze area A", { id: "a" }),
     ctx.agent("Analyze area B", { id: "b" }),
   ]);
 
-  // ctx.parallel(items, fn) is shorthand for ctx.phase + map:
+  // opts.schema: agent returns parsed JS object in result.output
+  const [typed] = await ctx.phase("extract", [
+    ctx.agent("List issues in src/", {
+      id: "extractor",
+      schema: { type: "object", properties: { issues: { type: "array", items: { type: "string" } } }, required: ["issues"] },
+    }),
+  ]);
+  const issues = (typed.output as { issues: string[] }).issues;
+
+  // ctx.parallel(items, fn) — map items to handles in one phase
   const perFile = await ctx.parallel(
-    ["file1.ts", "file2.ts"],
-    (file) => ctx.agent(\`Audit \${file} — read the file with your tools\`),
+    ["src/auth.ts", "src/db.ts"],
+    (file) => ctx.agent(\`Audit \${file} — read it with your tools\`, { id: file }),
   );
 
-  return { text, results: results.map(r => r.text) };
+  // ctx.pipeline(items, ...stages) — sequential stages, concurrent across items
+  const results = await ctx.pipeline(
+    ["src/a.ts", "src/b.ts"],
+    (file) => ctx.agent(\`Read \${file}\`, { id: \`read-\${file}\` }),
+    (readResult, file) => ctx.agent(\`Fix \${file} given: \${readResult.text}\`, { id: \`fix-\${file}\` }),
+  );
+
+  // failMode: 'null' — continue when some agents fail
+  const resilient = await ctx.phase("risky", [
+    ctx.agent("Might fail", { id: "risky" }),
+  ], { failMode: "null" });
+  const succeeded = resilient.filter(r => r !== null);
+
+  // budget — check spend before expensive phases
+  ctx.log(\`tokens spent: \${ctx.budget.spent()}\`);
+
+  return { issues, perFile: perFile.map(r => r.text), succeeded: succeeded.length };
 }
 `.trim(),
 
