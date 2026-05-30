@@ -129,6 +129,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   const newAgentId = opts.newAgentId ?? defaultAgentIdFactory();
 
   let agentCount = 0;
+  let budgetSpent = 0;
   let finishPrompt: string | null = null;
 
   // ─── ctx.agent ──────────────────────────────────────────────────
@@ -178,7 +179,14 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   async function phase(
     nameArg: unknown,
     agentsArg: unknown,
+    optsArg?: unknown,
   ): Promise<RunCtxBridgeResult<readonly AgentResultLike[]>> {
+    // Parse failMode from optional third arg.
+    const failMode: 'throw' | 'null' =
+      optsArg !== null && typeof optsArg === 'object' &&
+      (optsArg as Record<string, unknown>).failMode === 'null'
+        ? 'null'
+        : 'throw';
     try {
       if (typeof nameArg !== "string" || nameArg.length === 0) {
         throw new TypeError("ctx.phase: name must be a non-empty string");
@@ -284,11 +292,27 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         } catch {
           /* swallow */
         }
-        // Build an AggregateError whose .errors are the original
-        // dispatcher errors (preserves MalformedAgentOutputError /
-        // AgentSubprocessError class identity for slice-7 ledger
-        // distinction). Cross-realm reconstruction happens in
-        // sandbox.ts's `__pi_reconstruct_error`.
+
+        if (failMode === 'null') {
+          // failMode: 'null' — return nulls for failed agents, continue.
+          const out: Array<AgentResultLike | null> = settled.map((s) =>
+            s.status === 'fulfilled'
+              ? ({
+                  agentId: s.value.agentId,
+                  text: s.value.text,
+                  usage: s.value.usage as unknown as Readonly<Record<string, number>>,
+                  durationMs: s.value.durationMs,
+                  toolCalls: s.value.toolCalls,
+                  transcriptPath: s.value.transcriptPath,
+                  cached: (s.value as unknown as { cached?: boolean }).cached === true,
+                } as AgentResultLike)
+              : null,
+          );
+          return { ok: true, value: out as readonly AgentResultLike[] };
+        }
+
+        // Default: throw AggregateError. Preserves MalformedAgentOutputError /
+        // AgentSubprocessError class identity for slice-7 ledger distinction.
         const agg = new AggregateError(
           errors,
           `phase "${nameArg}" failed (${errors.length}/${handles.length} agents rejected)`,
@@ -378,6 +402,14 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       opts: handle.opts,
     });
 
+    // Extract schema from opts (used for prompt injection + output parsing).
+    const schema =
+      handle.opts.schema !== null &&
+      typeof handle.opts.schema === 'object' &&
+      !Array.isArray(handle.opts.schema)
+        ? (handle.opts.schema as Record<string, unknown>)
+        : null;
+
     // Cache hit short-circuits the dispatcher.
     const cached = opts.cache.getAgentResult(key);
     if (cached !== undefined) {
@@ -415,6 +447,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       const tagged = { ...result, cached: true } as AgentResult & {
         cached: boolean;
       };
+      budgetSpent += result.usage.totalTokens;
       await opts.ledger.append({
         type: "agent_end",
         at: nowIso(),
@@ -435,6 +468,10 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         });
       } catch {
         /* swallow */
+      }
+      // Schema: re-parse from cached text if schema is present.
+      if (schema !== null) {
+        (tagged as AgentResult & { output?: unknown }).output = extractJson(result.text);
       }
       return tagged;
     }
@@ -463,11 +500,16 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       token.release();
     }
     try {
+      // Schema injection: build the actual prompt with schema instruction.
+      const effectivePrompt = schema
+        ? handle.prompt + buildSchemaInstruction(schema)
+        : handle.prompt;
+
       const result = await dispatch({
         runDir: opts.runDirAbs,
         agentId: handle.id,
-        prompt: handle.prompt,
-        promptHash: sha256(handle.prompt),
+        prompt: effectivePrompt,
+        promptHash: sha256(effectivePrompt),
         cwd: opts.cwd,
         signal: phaseCtrl.signal,
         mockAgents: opts.mockAgents,
@@ -514,7 +556,13 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       } catch {
         /* swallow */
       }
-      return { ...result, cached: false } as AgentResult & { cached: boolean };
+      budgetSpent += result.usage.totalTokens;
+      // Schema: extract parsed JSON output if schema was provided.
+      const schemaOutput: unknown =
+        schema !== null ? extractJson(result.text) : undefined;
+      const tagged = { ...result, cached: false } as AgentResult & { cached: boolean; output?: unknown };
+      if (schemaOutput !== undefined) tagged.output = schemaOutput;
+      return tagged;
     } catch (e) {
       // Persist the error before propagating.
       await opts.ledger.append({
@@ -626,6 +674,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     cacheDelete,
     log: logFn,
     finishCallback,
+    getBudgetSpent: () => budgetSpent,
   };
   return {
     host,
@@ -653,6 +702,40 @@ function requireString(v: unknown, label: string): void {
   if (typeof v !== "string") {
     throw new TypeError(`${label}: expected string, got ${typeof v}`);
   }
+}
+
+/**
+ * Extract the last JSON value (object or array) from agent text output.
+ * Tries a ```json fence first, then falls back to the last `{` or `[`.
+ */
+export function extractJson(text: string): unknown {
+  // Try ```json ... ``` fence.
+  const fenceMatch = /```json\s*([\s\S]*?)```/.exec(text);
+  if (fenceMatch?.[1] !== undefined) {
+    return JSON.parse(fenceMatch[1].trim());
+  }
+  // Fall back to last { or [ in the text.
+  const lastBrace = text.lastIndexOf("{");
+  const lastBracket = text.lastIndexOf("[");
+  const start = Math.max(lastBrace, lastBracket);
+  if (start === -1) {
+    throw new Error("ctx.agent schema: no JSON found in agent output");
+  }
+  return JSON.parse(text.slice(start));
+}
+
+/**
+ * Build the schema instruction appended to a prompt when `opts.schema`
+ * is present.
+ */
+function buildSchemaInstruction(schema: Record<string, unknown>): string {
+  return (
+    "\n\nOutput contract: Respond with a JSON code block matching this schema:\n" +
+    "```json\n" +
+    JSON.stringify(schema, null, 2) +
+    "\n```\n" +
+    "Place the JSON block at the END of your response. No other content after it."
+  );
 }
 
 // Type-only re-exports kept off the runtime surface; these silence

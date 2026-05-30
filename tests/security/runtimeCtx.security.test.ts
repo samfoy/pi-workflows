@@ -62,6 +62,7 @@ function noopHost(): RunCtxHost {
     cacheDelete: async () => ok(null),
     log: () => ok(null),
     finishCallback: () => ok(null),
+    getBudgetSpent: () => 0,
   };
 }
 

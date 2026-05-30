@@ -21,3 +21,4 @@ coverage/
 
 # pi-workflows — project workflow scripts (commit if you want to share them)
 # .pi/workflows/vm-sandbox-audit.js
+.worktrees/

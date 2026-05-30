@@ -88,6 +88,7 @@ interface RunCtxHostInternal {
   phase(
     name: unknown,
     agents: unknown,
+    opts?: unknown,
   ): Promise<RunCtxBridgeResult<readonly AgentResultLike[]>>;
   cacheGet(key: unknown): Promise<RunCtxBridgeResult<unknown>>;
   cacheSet(key: unknown, value: unknown): Promise<RunCtxBridgeResult<null>>;
@@ -95,6 +96,7 @@ interface RunCtxHostInternal {
   cacheDelete(key: unknown): Promise<RunCtxBridgeResult<null>>;
   log(message: unknown, level: unknown): RunCtxBridgeResult<null>;
   finishCallback(prompt: unknown): RunCtxBridgeResult<null>;
+  getBudgetSpent(): number;
 }
 
 /**
@@ -1235,6 +1237,7 @@ function buildInitScript(nonce: string): string {
     "        delete: function () { throw new Error('ctx.cache: no runtime (slice-2 stub)'); },",
     "      }),",
     "      finishCallback: function () { throw new Error('ctx.finishCallback: no runtime (slice-2 stub)'); },",
+    "      budget: Object.freeze({ total: null, spent: function() { return 0; }, remaining: function() { return Infinity; } }),",
     "      run: Object.freeze({ id: 'wf-stub', workflowName: 'stub', startedAt: '1970-01-01T00:00:00Z', cwd: '.', resumed: false }),",
     "      input: '',",
     "      signal: signal,",
@@ -1255,15 +1258,23 @@ function buildInitScript(nonce: string): string {
     "      run:            Object.freeze(runMeta),",
     "      input:          input,",
     "      signal:         signal,",
+    "      budget:         Object.freeze({",
+    "        total:     null,",
+    "        spent:     function() { return __runCtxHost.getBudgetSpent(); },",
+    "        remaining: function() { return Infinity; },",
+    "      }),",
     "    };",
     "  }",
     "  __base.vote      = __helpers.vote;",
     "  __base.consensus = __helpers.consensus;",
     "  __base.parallel  = __helpers.parallel;",
+    "  __base.pipeline  = __helpers.pipeline;",
     "  __base.retry     = __helpers.retry;",
     "  __base.sleep     = __helpers.sleep;",
     "  const ctx = Object.freeze(__base);",
     "  __ctxRef.current = ctx;",
+    "  // Expose budget as a top-level global (Michaelliv compat).",
+    "  globalThis.budget = ctx.budget;",
     "  return ctx;",
     "};",
     "",

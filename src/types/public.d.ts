@@ -41,6 +41,13 @@ export interface AgentOpts {
    * coarse bucket here if you must include time in prompts.
    */
   readonly cacheKeyExtra?: unknown;
+  /**
+   * JSON Schema for structured output. When provided, an instruction
+   * is appended to the prompt asking the agent to respond with a
+   * JSON code block matching this schema. The parsed object is
+   * available as `result.output`.
+   */
+  readonly schema?: Record<string, unknown>;
   /** Permits any author-defined fields. */
   readonly [extra: string]: unknown;
 }
@@ -71,6 +78,12 @@ export interface AgentResult {
   readonly toolCalls: number;
   readonly transcriptPath: string;
   readonly cached: boolean;
+  /**
+   * Parsed structured output. Set when `opts.schema` was provided to
+   * `ctx.agent()` and the agent's response contained a valid JSON
+   * block. Undefined otherwise.
+   */
+  readonly output?: unknown;
 }
 
 /** Run metadata exposed via `ctx.run`. */
@@ -116,6 +129,15 @@ export interface ParallelOpts {
   readonly phaseName?: string;
 }
 
+export interface PhaseOpts {
+  /**
+   * How to handle agent failures.
+   * `'throw'` (default): any failure rejects with AggregateError.
+   * `'null'`: failed agents return null in results; workflow continues.
+   */
+  readonly failMode?: 'throw' | 'null';
+}
+
 export interface RetryOpts {
   /** Maximum attempts. Default 3. Must be ≥ 1. */
   readonly attempts?: number;
@@ -149,7 +171,7 @@ export interface WorkflowContext {
   /** Build an agent handle (does NOT spawn — `ctx.phase` does). */
   agent(prompt: string, opts?: AgentOpts): AgentHandle;
   /** Run a phase of agents in parallel under the run semaphore. */
-  phase(name: string, agents: ReadonlyArray<AgentHandle>): Promise<ReadonlyArray<AgentResult>>;
+  phase(name: string, agents: ReadonlyArray<AgentHandle>, opts?: PhaseOpts): Promise<ReadonlyArray<AgentResult | null>>;
 
   cache: {
     get(key: string): Promise<unknown>;
@@ -160,6 +182,16 @@ export interface WorkflowContext {
 
   log(message: string, opts?: { level?: "info" | "warn" | "error" }): void;
   finishCallback(prompt: string): void;
+
+  /** Token budget tracker. Updated after each agent completes. */
+  readonly budget: {
+    /** Configured token budget, or null if uncapped. */
+    readonly total: number | null;
+    /** Tokens spent so far (sum of agent totalTokens). */
+    spent(): number;
+    /** Remaining tokens (Infinity if total is null). */
+    remaining(): number;
+  };
 
   // ─── stdlib helpers ──────────────────────────────────────────────
   /**
@@ -193,6 +225,17 @@ export interface WorkflowContext {
     fn: (item: T, ctx: WorkflowContext) => AgentHandle | AgentHandle[],
     opts?: ParallelOpts,
   ): Promise<ReadonlyArray<AgentResult>>;
+
+  /**
+   * Run items through sequential stages, concurrently across items.
+   * If a stage returns an AgentHandle, it is automatically executed
+   * via a single-agent phase. Each stage receives
+   * `(previousValue, originalItem, index)`.
+   */
+  pipeline(
+    items: ReadonlyArray<unknown>,
+    ...stages: Array<(prev: unknown, original: unknown, index: number) => unknown>
+  ): Promise<ReadonlyArray<unknown>>;
 
   /**
    * Retry `fn` on rejection with exponential backoff. AbortError

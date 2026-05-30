@@ -63,25 +63,48 @@ function stubHost(opts: {
         opts: Object.freeze({ id }),
       });
     },
-    phase: async (nameArg, agentsArg) => {
+    phase: async (nameArg, agentsArg, optsArg) => {
       const name = String(nameArg);
       const handles = (agentsArg as ReadonlyArray<unknown>).map((h) => {
         const o = h as { id?: string; prompt?: string };
         return { id: o.id ?? "?", prompt: o.prompt ?? "" };
       });
-      const results: AgentResultLike[] = (
-        opts.phaseResults?.(name, handles) ??
-        handles.map((h) => ({
-          agentId: h.id,
-          text: "stub:" + h.id,
-          usage: { input: 0, output: 0, totalTokens: 0 },
-          durationMs: 0,
-          toolCalls: 0,
-          transcriptPath: "",
-          cached: false,
-        }))
-      );
-      return ok(results);
+      const failMode =
+        optsArg !== null && typeof optsArg === 'object'
+          ? (optsArg as Record<string, unknown>).failMode
+          : undefined;
+      let results: Array<AgentResultLike | null>;
+      try {
+        results = (
+          opts.phaseResults?.(name, handles) ??
+          handles.map((h) => ({
+            agentId: h.id,
+            text: "stub:" + h.id,
+            usage: { input: 0, output: 0, totalTokens: 0 },
+            durationMs: 0,
+            toolCalls: 0,
+            transcriptPath: "",
+            cached: false,
+          }))
+        );
+      } catch (e) {
+        if (failMode === 'null') {
+          // Return nulls for all failed agents.
+          return ok(handles.map(() => null) as unknown as AgentResultLike[]);
+        }
+        // Default: return error envelope.
+        const err = e instanceof Error ? e : new Error(String(e));
+        return {
+          ok: false as const,
+          error: {
+            name: err.name,
+            message: err.message,
+            stack: err.stack ?? null,
+            wrappedNonError: false,
+          },
+        };
+      }
+      return ok(results as AgentResultLike[]);
     },
     cacheGet: async () => ok(undefined),
     cacheSet: async () => ok(null),
@@ -89,6 +112,7 @@ function stubHost(opts: {
     cacheDelete: async () => ok(null),
     log: () => ok(null),
     finishCallback: () => ok(null),
+    getBudgetSpent: () => 0,
   };
 }
 
@@ -439,6 +463,166 @@ test("ctx.sleep: listener removed on natural resolution (no leak)", async () => 
   assert.equal(out.removeCount, 3);
 });
 
+// ─── pipeline tests ───────────────────────────────────────────────
+
+test("ctx.pipeline: processes two items through two stages", async () => {
+  const host = stubHost({
+    phaseResults: (_name, handles) =>
+      handles.map((h) => mkResult(h.id, `processed:${h.prompt}`)),
+  });
+  const result = await runWith(
+    `
+export const meta = { name: 'p', description: 'p', version: '1' };
+export default async function (ctx) {
+  return await ctx.pipeline(
+    ['a', 'b'],
+    (item) => ctx.agent('task:' + item, { id: 'agent-' + item }),
+    (agentResult, _item, _idx) => agentResult.text + '-done',
+  );
+}
+    `.trim(),
+    host,
+  );
+  const arr = result as string[];
+  assert.equal(arr.length, 2);
+  assert.ok((arr[0] ?? "").includes('-done'));
+  assert.ok((arr[1] ?? "").includes('-done'));
+});
+
+test("ctx.pipeline: rejects non-array first arg", async () => {
+  await assert.rejects(
+    () =>
+      runWith(
+        `
+export const meta = { name: 'p', description: 'p', version: '1' };
+export default async function (ctx) {
+  return await ctx.pipeline('not-array', (x) => x);
+}
+        `.trim(),
+        stubHost({}),
+      ),
+    /first argument must be an array/,
+  );
+});
+
+test("ctx.pipeline: rejects non-function stage", async () => {
+  await assert.rejects(
+    () =>
+      runWith(
+        `
+export const meta = { name: 'p', description: 'p', version: '1' };
+export default async function (ctx) {
+  return await ctx.pipeline(['x'], 'not-a-function');
+}
+        `.trim(),
+        stubHost({}),
+      ),
+    /stage arguments must be functions/,
+  );
+});
+
+// ─── budget tests ──────────────────────────────────────────────────
+
+test("ctx.budget: total is null and remaining is Infinity", async () => {
+  const result = await runWith(
+    `
+export const meta = { name: 'b', description: 'b', version: '1' };
+export default async function (ctx) {
+  return { total: ctx.budget.total, remaining: ctx.budget.remaining() };
+}
+    `.trim(),
+    stubHost({}),
+  );
+  const r = result as { total: unknown; remaining: unknown };
+  assert.equal(r.total, null);
+  assert.equal(r.remaining, Infinity);
+});
+
+test("ctx.budget: spent() accumulates after phase", async () => {
+  let spent = 0;
+  const host = stubHost({
+    phaseResults: (_name, handles) =>
+      handles.map((h) => {
+        spent += 15; // simulate token spend
+        return mkResultWithUsage(h.id, "reply", { input: 10, output: 5, totalTokens: 15 });
+      }),
+  });
+  // Override getBudgetSpent to use our local counter
+  (host as RunCtxHost & { getBudgetSpent: () => number }).getBudgetSpent = () => spent;
+  const result = await runWith(
+    `
+export const meta = { name: 'b', description: 'b', version: '1' };
+export default async function (ctx) {
+  const before = ctx.budget.spent();
+  await ctx.phase('work', [ctx.agent('task', { id: 'a' })]);
+  const after = ctx.budget.spent();
+  return { before, after };
+}
+    `.trim(),
+    host,
+  );
+  const r = result as { before: number; after: number };
+  assert.equal(r.before, 0);
+  assert.equal(r.after, 15);
+});
+
+test("budget global is same as ctx.budget", async () => {
+  const result = await runWith(
+    `
+export const meta = { name: 'b', description: 'b', version: '1' };
+export default async function (ctx) {
+  return budget.total === ctx.budget.total && budget.spent === ctx.budget.spent;
+}
+    `.trim(),
+    stubHost({}),
+  );
+  assert.equal(result, true);
+});
+
+// ─── failMode tests ────────────────────────────────────────────────
+
+test("ctx.phase failMode='null': returns null for failed agents", async () => {
+  const host = stubHost({
+    phaseResults: () => {
+      throw new Error("agent failed");
+    },
+  });
+  const result = await runWith(
+    `
+export const meta = { name: 'f', description: 'f', version: '1' };
+export default async function (ctx) {
+  const results = await ctx.phase('work', [ctx.agent('task', { id: 'a' })], { failMode: 'null' });
+  return results;
+}
+    `.trim(),
+    host,
+  );
+  const arr = result as Array<unknown>;
+  assert.equal(arr.length, 1);
+  assert.equal(arr[0], null);
+});
+
+test("ctx.phase default failMode: throws AggregateError on failure", async () => {
+  const host = stubHost({
+    phaseResults: () => {
+      throw new Error("agent failed");
+    },
+  });
+  await assert.rejects(
+    () =>
+      runWith(
+        `
+export const meta = { name: 'f', description: 'f', version: '1' };
+export default async function (ctx) {
+  return await ctx.phase('work', [ctx.agent('task', { id: 'a' })]);
+}
+        `.trim(),
+        host,
+      ),
+    /failed/,
+  );
+});
+
 // ─── helpers ───────────────────────────────────────────────────────
 
 /**
@@ -494,6 +678,22 @@ function mkResult(id: string, text: string): AgentResultLike {
     agentId: id,
     text,
     usage: { input: 0, output: 0, totalTokens: 0 },
+    durationMs: 0,
+    toolCalls: 0,
+    transcriptPath: "",
+    cached: false,
+  };
+}
+
+function mkResultWithUsage(
+  id: string,
+  text: string,
+  usage: { input: number; output: number; totalTokens: number },
+): AgentResultLike {
+  return {
+    agentId: id,
+    text,
+    usage: { ...usage },
     durationMs: 0,
     toolCalls: 0,
     transcriptPath: "",

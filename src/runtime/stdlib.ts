@@ -280,6 +280,51 @@ globalThis.__pi_install_stdlib = function (ctxRef) {
     });
   }
 
+  // ─── ctx.pipeline(items, ...stages) ────────────────────────────
+  //
+  // Runs each item through sequential stages. Items are processed
+  // concurrently; stages within an item are sequential. If a stage
+  // returns an AgentHandle (object with kind === 'agent'), it is
+  // automatically run through a single-agent phase. Each stage
+  // receives (previousValue, originalItem, index).
+  function pipeline(items) {
+    var stages = Array.prototype.slice.call(arguments, 1);
+    return Promise.resolve().then(function () {
+      if (!Array.isArray(items)) {
+        throw new TypeError('ctx.pipeline: first argument must be an array');
+      }
+      if (stages.some(function(s) { return typeof s !== 'function'; })) {
+        throw new TypeError('ctx.pipeline: all stage arguments must be functions');
+      }
+      return Promise.all(
+        items.map(function (item, index) {
+          function runStages(i, value) {
+            if (i >= stages.length) return Promise.resolve(value);
+            var stageResult;
+            try {
+              stageResult = stages[i](value, item, index);
+            } catch (e) {
+              return Promise.reject(e);
+            }
+            return Promise.resolve(stageResult).then(function (result) {
+              // Auto-run AgentHandle results through a single-agent phase.
+              if (result !== null && typeof result === 'object' &&
+                  result.kind === 'agent') {
+                return ctxRef.current.phase(
+                  'pipeline-stage-' + i, [result]
+                ).then(function (results) {
+                  return runStages(i + 1, results[0]);
+                });
+              }
+              return runStages(i + 1, result);
+            });
+          }
+          return runStages(0, item);
+        })
+      );
+    });
+  }
+
   // ─── ctx.sleep(ms, opts?) ───────────────────────────────────────
   //
   // Promise resolving after \`ms\` via \`setTimeout\` (the Context-
@@ -400,6 +445,7 @@ globalThis.__pi_install_stdlib = function (ctxRef) {
     vote: vote,
     consensus: consensus,
     parallel: parallel,
+    pipeline: pipeline,
     retry: retry,
     sleep: sleep,
   };

@@ -175,42 +175,55 @@ export function registerWriteWorkflowTool(opts: WriteWorkflowToolOpts): void {
       "Always include `export const meta = { name, description, version }` as the FIRST " +
         "statement — pi-workflows reads it to register the slash command.",
       "Workflows run in a sandboxed vm.Context — no direct fs/child_process/network. " +
-        "Use ctx.agent(prompt) to spawn a real pi sub-agent that CAN use those tools.",
-      "ctx.agent(prompt) returns { ok, output, tokens, durationMs } — always use .output to get the text. " +
-        "ctx.phase(label, agents) runs agents in parallel and returns AgentResult[] — map to .output for strings. " +
-        "ctx.vote(results) picks the plurality winner from AgentResult[].",
-      "Return a string, object, or array from main(ctx) — it becomes the workflow result " +
+        "Use ctx.agent(prompt) to tell a pi sub-agent (which HAS full tool access) to do file/shell work.",
+      "`ctx.agent(prompt, opts?)` is SYNCHRONOUS — it builds a handle, does NOT spawn anything. " +
+        "Use `ctx.phase(name, handles[])` to actually run handles in parallel. " +
+        "AgentResult has `.text` (string), `.usage`, `.durationMs`, `.cached` — NOT `.output`.",
+      "`ctx.parallel(items, fn)` maps items to handles and runs them in one phase — shorthand for ctx.phase + map.",
+      "`ctx.pipeline(items, ...stages)` runs sequential stages per item, concurrently across items.",
+      "ALL variables must be declared inside `export default async function (ctx)` — " +
+        "module-level `const`/`let` outside the function throw ReferenceError at runtime.",
+      "Never inline file contents in prompts — tell agents to read files with their own tools. " +
+        "Large inline content causes context crashes.",
+      "Phase fails with AggregateError if any agent fails. " +
+        "Pass `{ failMode: 'null' }` as third arg to ctx.phase() for resilient flows that survive partial failures.",
+      "Return a string, object, or array from the function — it becomes the workflow result " +
         "shown in the dashboard and in the chat card.",
       "After calling write_workflow, tell the user the workflow was saved and is already running — " +
         "direct them to /workflows to monitor progress.",
     ],
 
     promptSnippet: `
-// KEY: ctx.agent() returns { ok, output, tokens, durationMs } — use .output for the text.
-// ctx.phase() returns AgentResult[] — map .output to get strings.
+// ctx.agent() builds a handle (sync, no spawn). ctx.phase() runs handles in parallel.
+// AgentResult: { text, usage, durationMs, cached } — use .text NOT .output
 export const meta = {
-  name: "codebase-audit",
-  description: "Audit every top-level source directory in parallel",
+  name: "my-workflow",
+  description: "What this workflow does",
   version: "1.0.0",
+  // whenToUse: "Use when you need to fan-out work across many files or topics",
+  // phases: [{ title: "Recon" }, { title: "Analyze" }, { title: "Summarize" }],
 };
 
-export async function main(ctx) {
-  // Recon — always access .output for the agent's text response.
-  const recon = await ctx.agent(
-    "List every top-level source directory as a JSON array. Return ONLY the array."
-  );
-  const areas = JSON.parse(recon.output);  // .output, not recon directly
+export default async function (ctx) {
+  // Single agent — wrap in phase:
+  const [result] = await ctx.phase("step", [
+    ctx.agent("Do the thing.", { id: "doer" }),
+  ]);
+  const text = result.text;
 
-  // Parallel analysis — ctx.phase returns AgentResult[], map to .output for text.
-  const results = await ctx.phase(
-    "analyze",
-    areas.map((area) =>
-      ctx.agent(\`Audit \${area} for issues. Return JSON: { area, issues: string[] }.\`)
-    )
-  );
-  const findings = results.map(r => JSON.parse(r.output));  // r.output, not r
+  // Parallel agents:
+  const results = await ctx.phase("analyze", [
+    ctx.agent("Analyze area A", { id: "a" }),
+    ctx.agent("Analyze area B", { id: "b" }),
+  ]);
 
-  return { areas: areas.length, findings };
+  // ctx.parallel(items, fn) is shorthand for ctx.phase + map:
+  const perFile = await ctx.parallel(
+    ["file1.ts", "file2.ts"],
+    (file) => ctx.agent(\`Audit \${file} — read the file with your tools\`),
+  );
+
+  return { text, results: results.map(r => r.text) };
 }
 `.trim(),
 

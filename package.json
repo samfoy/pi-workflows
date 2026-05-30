@@ -1,7 +1,7 @@
 {
   "name": "@samfp/pi-workflows",
   "version": "0.2.0",
-  "description": "Dynamic workflows for pi \u2014 sandboxed JS scripts that drive sub-agent fleets, with TUI inspection and resume",
+  "description": "Dynamic workflows for pi — sandboxed JS scripts that drive sub-agent fleets, with TUI inspection and resume",
   "keywords": [
     "pi-package",
     "pi-extension",
@@ -67,6 +67,7 @@
     "LICENSE"
   ],
   "dependencies": {
-    "chokidar": "^5.0.0"
+    "chokidar": "^5.0.0",
+    "isexe": "^4.0.0"
   }
 }

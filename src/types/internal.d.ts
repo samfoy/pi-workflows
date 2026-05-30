@@ -31,6 +31,28 @@ export interface WorkflowFile {
   readonly scope: "project" | "personal";
 }
 
+/** One declared phase in the workflow meta. */
+export interface WorkflowMetaPhase {
+  readonly title: string;
+  readonly detail?: string;
+  readonly model?: string;
+}
+
+/**
+ * Parsed metadata from `export const meta = { ... }` at the top of a
+ * workflow script. The runtime reads these at trust-check time and
+ * surfaces them in the runs list and TUI overlay.
+ */
+export interface WorkflowMeta {
+  readonly name: string;
+  readonly description: string;
+  readonly version?: string;
+  /** Optional hint for the model about when to invoke this workflow. */
+  readonly whenToUse?: string;
+  /** Expected phases — shown upfront in TUI before they start. */
+  readonly phases?: ReadonlyArray<WorkflowMetaPhase>;
+}
+
 /** Result map keyed by workflow name. Project precedence already applied. */
 export type WorkflowRegistry = ReadonlyMap<string, WorkflowFile>;
 
@@ -466,6 +488,7 @@ export interface RunCtxHost {
   phase(
     name: unknown,
     agents: unknown,
+    opts?: unknown,
   ): Promise<RunCtxBridgeResult<readonly AgentResultLike[]>>;
   cacheGet(key: unknown): Promise<RunCtxBridgeResult<unknown>>;
   cacheSet(key: unknown, value: unknown): Promise<RunCtxBridgeResult<null>>;
@@ -479,6 +502,8 @@ export interface RunCtxHost {
    * "recorded but not yet fired").
    */
   finishCallback(prompt: unknown): RunCtxBridgeResult<null>;
+  /** Returns accumulated token spend across all agent results so far. Sync. */
+  getBudgetSpent(): number;
 }
 
 /**
