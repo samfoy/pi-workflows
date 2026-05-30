@@ -17,6 +17,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { GcCandidate, GcResult } from "./gc.js";
 import { runGc } from "./gc.js";
+import { runsHome } from "../util/paths.js";
 
 export interface GcDialogState {
   readonly candidates: ReadonlyArray<GcCandidate>;
@@ -48,10 +49,14 @@ export interface GcDialogOpts {
 }
 
 /**
- * Load GC candidates. Applies F4: any candidate whose `restartedFrom`
- * field points to a currently-active run is excluded from deletion.
- * (The source is still alive — it would be confusing/destructive to GC
- * the run that was restarted while the restart is still running.)
+ * Load GC candidates. Applies F4: any candidate that is the SOURCE of
+ * an active restart is excluded from deletion. Concretely, for each
+ * active run we read its `manifest.restartedFrom`; if it names a GC
+ * candidate, that candidate is protected. This prevents deleting
+ * provenance data while a restart is still running.
+ *
+ * (The old inverted check read the CANDIDATE's own `restartedFrom` —
+ * that protected restart-children, the wrong direction. BUG-075.)
  */
 export async function loadGcCandidates(
   opts: GcDialogOpts = {},
@@ -77,25 +82,35 @@ export async function loadGcCandidates(
     return result;
   }
 
-  // F4: filter out candidates whose new restartedFrom sibling is active.
-  // We read each candidate's manifest.json to check `restartedFrom`.
-  // A candidate is excluded if its `restartedFrom` value is a runId in
-  // activeRunIds — meaning the original run (the one that was restarted)
-  // is still alive.
-  const safeCandidates = result.candidates.filter((c) => {
-    const manifestPath = join(c.runDir, "manifest.json");
-    if (!existsSync(manifestPath)) return true; // no manifest → include
+  // F4: build a reverse-lookup set from ACTIVE runs' manifests.
+  // For each active run, read its manifest.json and collect its
+  // `restartedFrom` value into `protectedSources`.  A candidate whose
+  // runId appears in `protectedSources` is the SOURCE of an active
+  // restart and must not be deleted — removing it would destroy
+  // provenance while the restart is still running.
+  const runsRoot = opts.runsRootOverride ?? runsHome();
+  const protectedSources = new Set<string>();
+  for (const activeRunId of opts.activeRunIds) {
+    const manifestPath = join(runsRoot, activeRunId, "manifest.json");
+    if (!existsSync(manifestPath)) continue;
     try {
       const raw = readFileSync(manifestPath, "utf-8");
       const parsed = JSON.parse(raw) as Record<string, unknown>;
       const restartedFrom = parsed["restartedFrom"];
-      if (typeof restartedFrom === "string" && opts.activeRunIds!.has(restartedFrom)) {
-        // The run we restarted FROM is still active. Skip this candidate.
-        opts.log?.("info", `gc: skipping ${c.runId} — restartedFrom=${restartedFrom} is active`);
-        return false;
+      if (typeof restartedFrom === "string" && restartedFrom.length > 0) {
+        protectedSources.add(restartedFrom);
+        opts.log?.("info", `gc: active run ${activeRunId} protects source ${restartedFrom}`);
       }
     } catch {
-      /* corrupt manifest — include the candidate (safe default) */
+      /* corrupt manifest — skip this active run (safe: may over-delete, but
+         not worse than before the fix) */
+    }
+  }
+
+  const safeCandidates = result.candidates.filter((c) => {
+    if (protectedSources.has(c.runId)) {
+      opts.log?.("info", `gc: skipping ${c.runId} — it is the restartedFrom source of an active run`);
+      return false;
     }
     return true;
   });

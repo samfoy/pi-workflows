@@ -155,48 +155,67 @@ function makeRunDir(
   return dir;
 }
 
-test("F4: candidate with restartedFrom pointing to active run is excluded", async () => {
+test("F4: source run is excluded when an active restart references it", async () => {
+  // SOURCE_RUN is the old/original run (a GC candidate).
+  // ACTIVE_RESTART is a currently-running run whose manifest says
+  // restartedFrom=SOURCE_RUN. The fix reads ACTIVE_RESTART's manifest
+  // and adds SOURCE_RUN to protectedSources — so SOURCE_RUN must not
+  // appear in candidates.
   const root = mkdtempSync(join(tmpdir(), "gc-f4-"));
-  const ACTIVE_RUN = "wf-activerun0001";
-  const CANDIDATE = "wf-restarted001";
+  const SOURCE_RUN = "wf-sourcerun0001";
+  const ACTIVE_RESTART = "wf-activerstrt01";
 
-  makeRunDir(root, CANDIDATE, {
-    ageDays: 35,
-    restartedFrom: ACTIVE_RUN,
-  });
+  // SOURCE_RUN is old and terminal — a normal GC candidate.
+  makeRunDir(root, SOURCE_RUN, { ageDays: 35 });
+
+  // ACTIVE_RESTART is active (in activeRunIds) and its manifest says
+  // restartedFrom=SOURCE_RUN. We only need its manifest on disk;
+  // no ledger/result needed because it won't be scanned as a GC candidate.
+  mkdirSync(join(root, ACTIVE_RESTART), { recursive: true });
+  writeFileSync(
+    join(root, ACTIVE_RESTART, "manifest.json"),
+    JSON.stringify({ runId: ACTIVE_RESTART, restartedFrom: SOURCE_RUN }),
+  );
 
   const result = await loadGcCandidates({
     runsRootOverride: root,
     cutoffDays: 30,
-    activeRunIds: new Set([ACTIVE_RUN]),
+    activeRunIds: new Set([ACTIVE_RESTART]),
   });
 
   assert.equal(
-    result.candidates.find((c) => c.runId === CANDIDATE),
+    result.candidates.find((c) => c.runId === SOURCE_RUN),
     undefined,
-    "candidate with active restartedFrom should be excluded",
+    "source run must be excluded when an active restart references it",
   );
 });
 
-test("F4: candidate with restartedFrom pointing to NON-active run is included", async () => {
+test("F4: source run is included when its restart is no longer active", async () => {
+  // INACTIVE_RESTART has restartedFrom=SOURCE_RUN but is NOT in
+  // activeRunIds, so SOURCE_RUN is NOT protected and should appear as
+  // a normal GC candidate.
   const root = mkdtempSync(join(tmpdir(), "gc-f4-nonactive-"));
-  const INACTIVE_RUN = "wf-inactiverun001";
-  const CANDIDATE = "wf-restarted002";
+  const SOURCE_RUN = "wf-sourcerun0002";
+  const INACTIVE_RESTART = "wf-inactrestrt01";
 
-  makeRunDir(root, CANDIDATE, {
-    ageDays: 35,
-    restartedFrom: INACTIVE_RUN,
-  });
+  makeRunDir(root, SOURCE_RUN, { ageDays: 35 });
+
+  // INACTIVE_RESTART's manifest exists on disk but it is NOT listed as active.
+  mkdirSync(join(root, INACTIVE_RESTART), { recursive: true });
+  writeFileSync(
+    join(root, INACTIVE_RESTART, "manifest.json"),
+    JSON.stringify({ runId: INACTIVE_RESTART, restartedFrom: SOURCE_RUN }),
+  );
 
   const result = await loadGcCandidates({
     runsRootOverride: root,
     cutoffDays: 30,
-    activeRunIds: new Set(["wf-otherrun0001"]), // INACTIVE_RUN is NOT active
+    activeRunIds: new Set(["wf-otherrun0001"]), // INACTIVE_RESTART is NOT active
   });
 
   assert.ok(
-    result.candidates.some((c) => c.runId === CANDIDATE),
-    "candidate with non-active restartedFrom should be included",
+    result.candidates.some((c) => c.runId === SOURCE_RUN),
+    "source run should be included when its restart is no longer active",
   );
 });
 
