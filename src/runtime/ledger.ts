@@ -622,11 +622,14 @@ export function buildResultEntry(
 ): Extract<LedgerEntry, { type: "result" }> {
   let s: string;
   try {
-    s = typeof value === "string" ? value : JSON.stringify(value);
+    // JSON.stringify(undefined) returns JS undefined (not a string), so normalise
+    // undefined → null before serialising so the ledger never stores the literal
+    // string "undefined" (which is not valid JSON and misleads readers).
+    const normalised = value === undefined ? null : value;
+    s = typeof normalised === "string" ? normalised : JSON.stringify(normalised);
   } catch {
     s = String(value);
   }
-  if (s === undefined) s = "undefined";
   const bytes = Buffer.byteLength(s, "utf8");
   if (bytes <= LEDGER_RESULT_MAX_BYTES) {
     return { type: "result", at: now(), truncated: false, result: s };

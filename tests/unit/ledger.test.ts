@@ -744,6 +744,18 @@ test("buildResultEntry: exactly-4KB string → not truncated", () => {
   assert.equal(Buffer.byteLength(r.result, "utf8"), LEDGER_RESULT_MAX_BYTES);
 });
 
+test("buildResultEntry: undefined value → stored as JSON null, not the string \"undefined\"", () => {
+  const r = buildResultEntry(undefined, () => "ts");
+  assert.equal(r.result, "null");
+  assert.equal(r.truncated, false);
+});
+
+test("buildResultEntry: null value → stored as JSON null", () => {
+  const r = buildResultEntry(null, () => "ts");
+  assert.equal(r.result, "null");
+  assert.equal(r.truncated, false);
+});
+
 // ─── Hand-crafted fixtures ────────────────────────────────────────────
 
 test("fixture: full-run.jsonl replays to done", async () => {
