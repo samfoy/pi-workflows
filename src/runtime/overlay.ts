@@ -813,12 +813,12 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     // Slice 15: GC dialog intercepts keys.
     if (gcDialogState !== null) {
       const k = key.toLowerCase();
-      if (k === "y" || key === "Enter" || key === "RETURN" || key === "\r") {
+      if (gcDialogState.done !== undefined) {
+        // Done screen: any key closes it (BUG-076: must be checked before y/Enter).
+        handleAction({ kind: "gc-cancel" });
+      } else if (k === "y" || key === "Enter" || key === "RETURN" || key === "\r") {
         handleAction({ kind: "gc-apply" });
       } else if (k === "n" || key === "Escape" || key === "ESC" || key === "\u001b") {
-        handleAction({ kind: "gc-cancel" });
-      } else if (gcDialogState.done !== undefined) {
-        // Any key closes the done screen.
         handleAction({ kind: "gc-cancel" });
       }
       return;
