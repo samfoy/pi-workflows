@@ -592,3 +592,85 @@ test("recoverFromTranscript: returns null when entire file is unparseable", asyn
   const result = await recoverFromTranscript(transcriptPath, "corrupt");
   assert.equal(result, null);
 });
+
+// ─── unexpected-schema validation (parity gap fix) ───────────────────────────
+
+test("spawn-spy: agent_end missing 'messages' field → MalformedAgentOutputError reason=unexpected-schema", { timeout: 5000 }, async () => {
+  const runDir = tmpRunDir();
+  // Stream ends with an agent_end that has no 'messages' field — valid JSON, wrong shape.
+  const badStream =
+    '{"type":"session"}\n' +
+    '{"type":"agent_start"}\n' +
+    '{"type":"agent_end"}\n'; // missing required 'messages' field
+
+  const fake = makeFakeSpawn([{ stdout: [badStream], exitCode: 0 }]);
+  await assert.rejects(
+    () =>
+      dispatchAgent({
+        runDir,
+        agentId: "schema-bad",
+        prompt: "p",
+        promptHash: "ph",
+        cwd: runDir,
+        spawn: fake.spawn,
+        skipParentDeathGuard: true,
+        timeoutMs: 1500,
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof MalformedAgentOutputError);
+      assert.equal((err as MalformedAgentOutputError).reason, "unexpected-schema");
+      assert.equal((err as MalformedAgentOutputError).agentId, "schema-bad");
+      return true;
+    },
+  );
+});
+
+test("spawn-spy: agent_end missing messages on line 2 → correct lineNumber in error", { timeout: 5000 }, async () => {
+  const runDir = tmpRunDir();
+  // agent_end is the second non-empty line → lineNumber should be 2
+  const badStream =
+    '{"type":"session"}\n' +
+    '{"type":"agent_end"}\n'; // line 2, missing "messages"
+
+  const fake = makeFakeSpawn([{ stdout: [badStream], exitCode: 0 }]);
+  await assert.rejects(
+    () =>
+      dispatchAgent({
+        runDir,
+        agentId: "line-num-check",
+        prompt: "p",
+        promptHash: "ph",
+        cwd: runDir,
+        spawn: fake.spawn,
+        skipParentDeathGuard: true,
+        timeoutMs: 1500,
+      }),
+    (err: unknown) => {
+      assert.ok(err instanceof MalformedAgentOutputError);
+      assert.equal((err as MalformedAgentOutputError).reason, "unexpected-schema");
+      assert.equal((err as MalformedAgentOutputError).lineNumber, 2);
+      return true;
+    },
+  );
+});
+
+test("spawn-spy: unknown event types pass through without schema error", { timeout: 5000 }, async () => {
+  const runDir = tmpRunDir();
+  // A new pi event type we don't know — should be forward-compat, not an error.
+  const stream =
+    '{"type":"future_event","someNewField":"data"}\n' +
+    '{"type":"agent_end","messages":[{"role":"assistant","content":[{"type":"text","text":"ok"}]}]}\n';
+
+  const fake = makeFakeSpawn([{ stdout: [stream], exitCode: 0 }]);
+  const result = await dispatchAgent({
+    runDir,
+    agentId: "future",
+    prompt: "p",
+    promptHash: "ph",
+    cwd: runDir,
+    spawn: fake.spawn,
+    skipParentDeathGuard: true,
+    timeoutMs: 1500,
+  });
+  assert.equal(result.ok, true);
+});

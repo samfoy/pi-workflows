@@ -95,6 +95,20 @@ import type {
 export const PI_FINAL_RESULT_EVENT_TYPE = "agent_end";
 
 /**
+ * Best-effort shape validation for known `pi --mode json` event types.
+ * Maps event type → required top-level field names. Unknown types pass
+ * through (forward-compat with new pi event types). Any event whose type
+ * is listed here but is missing a required field triggers
+ * `MalformedAgentOutputError` with `reason: "unexpected-schema"`.
+ */
+const KNOWN_EVENT_SHAPES: Record<string, string[]> = {
+  // Verified against real pi 0.74.0 --mode json output (see realPiStream.ts).
+  // Only event types whose field requirements are confirmed appear here.
+  // Unknown / unconfirmed types pass through for forward-compat.
+  agent_end: ["messages"],
+};
+
+/**
  * The two env vars from PRD §13.7. Always set on every spawned child.
  * Order matters in the spread that follows — these come AFTER the
  * envBase spread so they overwrite any pre-existing parent values.
@@ -503,9 +517,25 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
   });
   const agg = newAggregator();
   let parseError: JsonStreamError | null = null;
+  let schemaError: { lineNumber: number; bytes: string } | null = null;
+  let schemaLineNumber = 0;
   try {
     for await (const ev of parser) {
-      ingest(agg, ev as Record<string, unknown>);
+      schemaLineNumber++;
+      const evTyped = ev as Record<string, unknown>;
+      const evType = evTyped.type;
+      if (typeof evType === "string" && evType in KNOWN_EVENT_SHAPES) {
+        const required = KNOWN_EVENT_SHAPES[evType]!;
+        const missing = required.filter((f) => !(f in evTyped));
+        if (missing.length > 0) {
+          schemaError = {
+            lineNumber: schemaLineNumber,
+            bytes: JSON.stringify(evTyped).slice(0, 256),
+          };
+          break;
+        }
+      }
+      ingest(agg, evTyped);
     }
   } catch (e) {
     if (e instanceof JsonStreamError) {
@@ -564,6 +594,18 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
   });
 
   // ─── Failure classification ─────────────────────────────────────
+  if (schemaError) {
+    await fs.appendFile(stderrPath, schemaError.bytes + "\n", "utf8");
+    throw new MalformedAgentOutputError({
+      agentId: opts.agentId,
+      cwd: opts.cwd,
+      exitCode,
+      bytes: schemaError.bytes,
+      lineNumber: schemaError.lineNumber,
+      reason: "unexpected-schema",
+    });
+  }
+
   if (parseError) {
     // Append the truncated bytes to stderr for forensics (PRD §5.5.2).
     await fs.appendFile(stderrPath, parseError.truncatedRegion + "\n", "utf8");

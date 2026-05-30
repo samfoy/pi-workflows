@@ -402,3 +402,42 @@ test("resource exhaustion: large array allocation completes (host survives)", as
   );
   assert.equal(r.returnValue, 1000000);
 });
+
+// ─── crypto.subtle (parity gap fix) ──────────────────────────────────────────
+
+test("crypto.subtle is accessible in sandbox and can digest", async () => {
+  const ctrl = new AbortController();
+  const r = await runScript(
+    `
+      const enc = new TextEncoder();
+      const data = enc.encode("hello");
+      const buf = await crypto.subtle.digest("SHA-256", data);
+      // ArrayBuffer: 32 bytes for SHA-256
+      return buf.byteLength;
+    `,
+    { signal: ctrl.signal },
+  );
+  assert.equal(r.returnValue, 32, "SHA-256 digest should be 32 bytes");
+});
+
+test("crypto.subtle.digest produces the correct SHA-256 hash", async () => {
+  const ctrl = new AbortController();
+  // SHA-256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+  const r = await runScript(
+    `
+      const enc = new TextEncoder();
+      const data = enc.encode("hello");
+      const buf = await crypto.subtle.digest("SHA-256", data);
+      const hex = Array.from(new Uint8Array(buf))
+        .map(b => b.toString(16).padStart(2, "0"))
+        .join("");
+      return hex;
+    `,
+    { signal: ctrl.signal },
+  );
+  assert.equal(
+    r.returnValue,
+    "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824",
+    "SHA-256('hello') hex mismatch",
+  );
+});

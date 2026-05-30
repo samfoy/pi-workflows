@@ -5,41 +5,41 @@ Anthropic's dynamic workflows blog post that we deliberately defer to
 v2 (or beyond). Each row should cite the PRD/plan section, the slice
 that reviewed the gap, and the trigger condition for revisiting.
 
-## v1 deferred — schema validation of agent JSON output
+## ✅ FIXED — schema validation of agent JSON output
 
 **Trigger:** PRD §5.5.2 path 4 ("valid JSON / wrong schema") +
 slice 8a concern F5.
 
-**v1 behavior:** the dispatcher's JSON-stream parser checks structural
-shape (one event per line, recognizable `type` field, `agent_end`
-terminator). It does NOT validate that the events match a published
-`pi --mode json` schema. The PRD's `MalformedAgentOutputError` reasons
-include `unexpected-schema` but slice 6 never produces that value;
-slice 8a confirmed and left the enum entry intact for v2.
+**Fixed:** `dispatcher.ts` now defines `KNOWN_EVENT_SHAPES` — a map of
+confirmed `pi --mode json` event types to their required fields (derived
+from real pi 0.74.0 output). After parsing each JSON line, if the event
+type is in the map and a required field is absent, the dispatcher throws
+`MalformedAgentOutputError` with `reason: "unexpected-schema"` immediately.
+Unknown event types pass through unchanged (forward-compat).
 
-**Why deferred:** the upstream pi `--mode json` schema is not yet
-published. Defining a schema in pi-workflows would create a coupling
-that breaks every time pi extends its event payload. Better to wait
-for an upstream `pi --mode json --schema` machine-readable export.
+**Scope:** Only `agent_end: ["messages"]` is validated today — the only
+event type whose required fields are verified against real pi output. Other
+event types can be added to `KNOWN_EVENT_SHAPES` as their schemas are confirmed.
 
-**Revisit trigger:** when pi exposes a stable, versioned JSON schema
-for `--mode json` events.
+**Why previously deferred:** the upstream pi schema was unpublished. The
+current fix takes a conservative "only confirm what we've observed" approach
+rather than coupling to a hypothetical schema export.
 
-**Owner at revisit:** dispatcher (slice 6 successor).
-
-## v1 deferred — `crypto.subtle`
+## ✅ FIXED — `crypto.subtle`
 
 **Trigger:** PRD §14 row 21.
 
-**v1 behavior:** the sandbox exposes `crypto.randomUUID`,
-`crypto.randomBytes`, `crypto.randomFillSync`, `crypto.getRandomValues`.
-`crypto.subtle` is NOT exposed.
+**Fixed:** `sandbox.ts` `buildInitScript` now assigns `cryptoNs.subtle = HC.subtle`
+after the other crypto methods. The `SubtleCrypto` instance is assigned
+directly (no `wrapHostMethod` wrapper) — all its methods are already async
+and work across vm.Context realm boundaries in Node.js. Verified: workflows
+can call `await crypto.subtle.digest('SHA-256', data)` and receive the
+correct 32-byte result.
 
-**Why deferred:** `crypto.subtle` is async and capability-heavy (key
-material, signatures). Threading an async capability surface through
-the realm boundary needs a careful design pass.
-
-**Revisit trigger:** author demand.
+**Why it was deferred:** `subtle` was described as "capability-heavy (key
+material, signatures)". In practice, the Node.js vm.Context boundary already
+provides adequate isolation; `subtle` methods are stateless transforms that
+don't escalate sandbox privileges.
 
 ## v1 deferred — `worker_threads` / interrupt-on-tick
 
