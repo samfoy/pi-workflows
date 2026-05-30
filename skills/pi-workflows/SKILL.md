@@ -128,7 +128,9 @@ const result = await runWorkflow({
   mockAgents: true,
   seedFixturesJsonl: JSON.stringify({
     agentId: "answer",
-    promptHash: sha256(`Answer: test input`),
+    // promptHash is a SHA-256 of the full prompt string
+    const { createHash } = require('node:crypto');
+    const promptHash = createHash('sha256').update(`Answer: test input`).digest('hex');
     result: { text: "42", usage: { input: 5, output: 2, cacheRead: 0, cacheWrite: 0, totalTokens: 7 } },
   }),
 });
