@@ -1213,7 +1213,7 @@ Add `Object.freeze(signal)` immediately before `return { signal: signal, abort: 
 
 ---
 
-## BUG-066 — resumeRun: `approved` and `pending` states excluded from RESUMABLE_STATES — handling branches are dead code
+## BUG-066 ✅ FIXED — resumeRun: `approved` and `pending` states excluded from RESUMABLE_STATES — handling branches are dead code
 
 **Area:** runtime / resumeRun
 **Severity:** high
