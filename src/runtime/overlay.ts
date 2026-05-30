@@ -581,6 +581,11 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       case "navigate-back":
         // Agent detail (slice 15): Esc returns to phase view.
         if (view === "agent-detail") {
+          // BUG-124: clear pending debounce so it doesn't fire after transition.
+          if (agentDetailDebounceTimer !== null) {
+            clearTimeout(agentDetailDebounceTimer);
+            agentDetailDebounceTimer = null;
+          }
           view = "phase-view";
           openedAgentId = undefined;
           agentLogTail = [];
@@ -709,8 +714,10 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         // Slice 15: actually load candidates and show the dialog.
         if (!gcBusy) {
           gcBusy = true;
+          // BUG-121: query live registry instead of stale lastSnapshot so
+          // runs started after the last debounce cycle are protected.
           const activeIds = new Set(
-            lastSnapshot
+            opts.registry.listSummaries()
               .filter((s) => s.state === "running" || s.state === "paused")
               .map((s) => s.runId),
           );
@@ -816,7 +823,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       if (gcDialogState.done !== undefined) {
         // Done screen: any key closes it (BUG-076: must be checked before y/Enter).
         handleAction({ kind: "gc-cancel" });
-      } else if (k === "y" || key === "Enter" || key === "RETURN" || key === "\r") {
+      } else if (k === "y" || key === "Enter" || key === "RETURN" || key === "\r" || key === "\n") {
         handleAction({ kind: "gc-apply" });
       } else if (k === "n" || key === "Escape" || key === "ESC" || key === "\u001b") {
         handleAction({ kind: "gc-cancel" });
