@@ -46,12 +46,13 @@ import type {
 import { CacheStore } from "./cache.js";
 import { LedgerWriter, log as ledgerLog } from "./ledger.js";
 import { agentErrorFromException } from "./ledger.js";
-import { dispatchAgent } from "./dispatcher.js";
+import { dispatchAgent, recoverFromTranscript } from "./dispatcher.js";
 import type { PauseGate } from "./pauseGate.js";
 import { captureError } from "./realmError.js";
 import { cacheKey } from "../util/hash.js";
 import { sha256 } from "../util/hash.js";
 import { makeSemaphore } from "./semaphore.js";
+import { agentTranscriptPath } from "../util/paths.js";
 
 /**
  * Construction options for `createRunCtxHost`. Mostly DI seams so
@@ -596,6 +597,72 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         cached: true,
         durationMs: nowMs() - t0,
         usage: result.usage,
+      });
+      try {
+        opts.emitOverlayEvent?.("pi-workflows.agent.ended", {
+          runId: opts.runMeta.id,
+          phaseName,
+          agentId: handle.id,
+          endedAt: nowIso(),
+          durationMs: nowMs() - t0,
+          cached: true,
+        });
+      } catch {
+        /* swallow */
+      }
+      return tagged;
+    }
+
+    // Cache miss: before acquiring a semaphore slot and re-dispatching,
+    // check whether a complete transcript already exists from a prior run
+    // that crashed after the subprocess finished but before
+    // `cache.setAgentResult()` flushed (late cache-hit recovery).
+    const transcriptPath = agentTranscriptPath(opts.runDirAbs, handle.id);
+    const recovered = await recoverFromTranscript(transcriptPath, handle.id);
+    if (recovered !== null) {
+      // Warm the cache so subsequent resumes get a true cache hit.
+      await opts.cache.setAgentResult(key, {
+        agentId: recovered.agentId,
+        text: recovered.text,
+        usage: recovered.usage as unknown as Readonly<Record<string, number>>,
+        durationMs: recovered.durationMs,
+        toolCalls: recovered.toolCalls,
+        transcriptPath: recovered.transcriptPath,
+      });
+      await opts.ledger.append({
+        type: "agent_cache_hit",
+        at: nowIso(),
+        phaseName,
+        agentId: handle.id,
+      });
+      // BUG-055 / BUG-100: transcript recovery is equivalent to a cache hit
+      // — tokens were already spent in the prior run; do not charge again.
+      budgetReserved -= 1;
+      // BUG-053 pattern: extract schema BEFORE logging agent_end so that
+      // an extractJson failure only writes agent_error, never agent_end.
+      const tagged = { ...recovered, cached: true } as AgentResult & { cached: boolean; output?: unknown };
+      try {
+        if (schema !== null) {
+          tagged.output = extractJson(recovered.text);
+        }
+      } catch (e) {
+        await opts.ledger.append({
+          type: "agent_error",
+          at: nowIso(),
+          phaseName,
+          agentId: handle.id,
+          error: agentErrorFromException(e),
+        });
+        throw e;
+      }
+      await opts.ledger.append({
+        type: "agent_end",
+        at: nowIso(),
+        phaseName,
+        agentId: handle.id,
+        cached: true,
+        durationMs: nowMs() - t0,
+        usage: recovered.usage,
       });
       try {
         opts.emitOverlayEvent?.("pi-workflows.agent.ended", {

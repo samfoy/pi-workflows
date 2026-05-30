@@ -20,6 +20,7 @@ import {
   PROPAGATED_BYPASS_ENV,
   RECURSION_GUARD_ENV,
   extractAssistantText,
+  recoverFromTranscript,
 } from "../../src/runtime/dispatcher.js";
 import {
   AgentSubprocessError,
@@ -511,4 +512,83 @@ test("FIFO at cap=4: 20 dispatches, random-ordered release, resolution monotonic
   }
   await Promise.all(tasks);
   assert.deepEqual(resolutionOrder, Array.from({ length: 20 }, (_, i) => i));
+});
+
+// ─── recoverFromTranscript ──────────────────────────────────────────
+
+test("recoverFromTranscript: returns null when file does not exist", async () => {
+  const result = await recoverFromTranscript("/nonexistent/path/agent.jsonl", "a1");
+  assert.equal(result, null);
+});
+
+test("recoverFromTranscript: returns null when transcript has no agent_end", async () => {
+  const { promises: fs } = await import("node:fs");
+  const runDir = tmpRunDir();
+  const agentsDir = join(runDir, "agents");
+  await fs.mkdir(agentsDir, { recursive: true });
+  // Partial stream: no agent_end (subprocess was killed mid-run).
+  const partial = [
+    JSON.stringify({ type: "session" }),
+    JSON.stringify({ type: "agent_start" }),
+    JSON.stringify({ type: "turn_start" }),
+  ].join("\n") + "\n";
+  const transcriptPath = join(agentsDir, "a1.jsonl");
+  await fs.writeFile(transcriptPath, partial);
+
+  const result = await recoverFromTranscript(transcriptPath, "a1");
+  assert.equal(result, null);
+});
+
+test("recoverFromTranscript: synthesizes AgentResult from complete transcript", async () => {
+  const { promises: fs } = await import("node:fs");
+  const runDir = tmpRunDir();
+  const agentsDir = join(runDir, "agents");
+  await fs.mkdir(agentsDir, { recursive: true });
+  const transcriptPath = join(agentsDir, "writer.jsonl");
+
+  // Use realPiStream to produce a realistic complete transcript.
+  const content = realPiStream({ text: "recovered text", toolCalls: 2, usage: { input: 10, output: 5, totalTokens: 15 } });
+  await fs.writeFile(transcriptPath, content);
+
+  const result = await recoverFromTranscript(transcriptPath, "writer");
+  assert.notEqual(result, null);
+  assert.equal(result!.ok, true);
+  assert.equal(result!.agentId, "writer");
+  assert.equal(result!.text, "recovered text");
+  assert.equal(result!.toolCalls, 2);
+  assert.equal(result!.usage.totalTokens, 15);
+  assert.equal(result!.usage.input, 10);
+  assert.equal(result!.usage.output, 5);
+  assert.equal(result!.durationMs, 0);
+  assert.equal(result!.exitCode, null);
+  assert.equal(result!.transcriptPath, transcriptPath);
+});
+
+test("recoverFromTranscript: tolerates torn tail (no trailing newline, last line corrupt)", async () => {
+  const { promises: fs } = await import("node:fs");
+  const runDir = tmpRunDir();
+  const agentsDir = join(runDir, "agents");
+  await fs.mkdir(agentsDir, { recursive: true });
+  const transcriptPath = join(agentsDir, "torn.jsonl");
+
+  // Complete transcript but with a torn last line (crash mid-write).
+  const complete = realPiStream({ text: "done" });
+  const torn = complete + "{this-is-torn-and-never-closes";  // no newline at end
+  await fs.writeFile(transcriptPath, torn);
+
+  const result = await recoverFromTranscript(transcriptPath, "torn");
+  assert.notEqual(result, null, "should recover despite torn tail");
+  assert.equal(result!.text, "done");
+});
+
+test("recoverFromTranscript: returns null when entire file is unparseable", async () => {
+  const { promises: fs } = await import("node:fs");
+  const runDir = tmpRunDir();
+  const agentsDir = join(runDir, "agents");
+  await fs.mkdir(agentsDir, { recursive: true });
+  const transcriptPath = join(agentsDir, "corrupt.jsonl");
+  await fs.writeFile(transcriptPath, "not-json\nalso-not-json\n");
+
+  const result = await recoverFromTranscript(transcriptPath, "corrupt");
+  assert.equal(result, null);
 });

@@ -231,6 +231,81 @@ function pickInt(obj: Record<string, unknown>, key: string): number {
 }
 
 /**
+ * Attempt to synthesize an `AgentResult` from an existing on-disk
+ * transcript file written by a prior `dispatchAgent` call.
+ *
+ * This is the **late cache-hit recovery** path: when pi crashes while an
+ * agent's subprocess is still running, any agent that wrote a complete
+ * `agents/<id>.jsonl` (i.e. its subprocess exited normally and teed a
+ * terminal `agent_end` event) but whose `cache.setAgentResult()` never
+ * flushed will be re-dispatched from scratch on resume — wasting tokens.
+ *
+ * Callers should invoke this on every cache-miss before spawning a new
+ * subprocess. On success the caller MUST call
+ * `cache.setAgentResult(key, result)` to warm the cache so subsequent
+ * resumes of the same run get a true cache hit.
+ *
+ * Returns `null` when:
+ *   - the file does not exist or cannot be read
+ *   - no `agent_end` event is found (subprocess crashed or was killed
+ *     before completing)
+ *   - the entire file is unparseable JSON
+ *
+ * Tolerates a **torn tail** (the last line may be a partial JSON fragment
+ * from a mid-write crash) by skipping unparseable lines. The
+ * `agent_end` event is emitted by pi before any post-event I/O, so it
+ * will always appear before any torn tail in a successfully-completed
+ * transcript.
+ */
+export async function recoverFromTranscript(
+  transcriptPath: string,
+  agentId: string,
+): Promise<AgentResult | null> {
+  let content: string;
+  try {
+    content = await fs.readFile(transcriptPath, "utf8");
+  } catch {
+    // File absent or unreadable — no recovery possible.
+    return null;
+  }
+
+  const agg = newAggregator();
+  for (const line of content.split("\n")) {
+    const trimmed = line.trim();
+    if (trimmed.length === 0) continue;
+    let ev: Record<string, unknown>;
+    try {
+      ev = JSON.parse(trimmed) as Record<string, unknown>;
+    } catch {
+      // Torn or corrupt line — skip. The transcript tail may be
+      // incomplete if the crash happened mid-write, but agent_end is
+      // always emitted before any post-event I/O, so we still recover
+      // if it appeared before the torn fragment.
+      continue;
+    }
+    ingest(agg, ev);
+  }
+
+  if (!agg.agentEnd) {
+    // No terminal event found: subprocess did not complete before crash.
+    return null;
+  }
+
+  return {
+    ok: true,
+    agentId,
+    text: extractAssistantText(agg.agentEnd),
+    usage: agg.usage,
+    toolCalls: agg.toolCalls,
+    // Original wall-time is unavailable after a crash; callers treat 0
+    // as "recovered" and the ledger entry carries the phase durationMs.
+    durationMs: 0,
+    transcriptPath,
+    exitCode: null,
+  };
+}
+
+/**
  * Extract the final assistant text from an `agent_end` event's
  * `messages` array. The structure (verified 0.74.0):
  *
