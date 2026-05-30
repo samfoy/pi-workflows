@@ -51,6 +51,7 @@ import type { PauseGate } from "./pauseGate.js";
 import { captureError } from "./realmError.js";
 import { cacheKey } from "../util/hash.js";
 import { sha256 } from "../util/hash.js";
+import { makeSemaphore } from "./semaphore.js";
 
 /**
  * Construction options for `createRunCtxHost`. Mostly DI seams so
@@ -83,6 +84,13 @@ export interface RunCtxHostOptions {
   readonly mockAgents: boolean;
   /** cwd to pass to the dispatcher (PRD §6.2 manifest.cwd). */
   readonly cwd: string;
+  /**
+   * Run-wide default agent timeout in ms. Applied when an individual
+   * `ctx.agent()` call does not supply `opts.timeoutMs`. Falls back
+   * to the dispatcher's hard-coded 600_000 ms when absent.
+   * Improvement 3.
+   */
+  readonly defaultAgentTimeoutMs?: number;
   /** Test seam: replace the dispatcher. */
   readonly dispatch?: typeof dispatchAgent;
   /** Test seam: replace `Date.now()` for deterministic stamps. */
@@ -106,7 +114,9 @@ export interface RunCtxHostOptions {
       | "pi-workflows.phase.ended"
       | "pi-workflows.agent.started"
       | "pi-workflows.agent.ended"
-      | "pi-workflows.meta.phases",
+      | "pi-workflows.meta.phases"
+      | "pi-workflows.progress"
+      | "pi-workflows.report",
     data: Readonly<Record<string, unknown>>,
   ) => void;
 }
@@ -261,6 +271,26 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         });
       }
 
+      // Improvement 2: per-phase semaphore cap.
+      const rawMaxConcurrent =
+        optsArg !== null && typeof optsArg === 'object'
+          ? (optsArg as Record<string, unknown>).maxConcurrent
+          : undefined;
+      const phaseSem =
+        typeof rawMaxConcurrent === 'number' && rawMaxConcurrent > 0
+          ? makeSemaphore({ cap: rawMaxConcurrent })
+          : null;
+
+      // Improvement 1: per-phase timeout.
+      const rawPhaseTimeout =
+        optsArg !== null && typeof optsArg === 'object'
+          ? (optsArg as Record<string, unknown>).timeoutMs
+          : undefined;
+      const phaseTimeoutMs =
+        typeof rawPhaseTimeout === 'number' && rawPhaseTimeout > 0
+          ? rawPhaseTimeout
+          : undefined;
+
       // Phase ledger entry.
       const phaseStartedAt = nowIso();
       const phaseT0 = nowMs();
@@ -290,9 +320,37 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       else opts.signal.addEventListener("abort", onRunAbort, { once: true });
 
       // Run each handle through the run's semaphore.
-      const settled: PromiseSettledResult<AgentResult>[] = await Promise.allSettled(
-        handles.map((h) => runOneAgent(h, nameArg, phaseCtrl)),
+      // Improvement 1: race allSettled against the phase timeout deadline.
+      const allSettled = Promise.allSettled(
+        handles.map((h) => runOneAgent(h, nameArg, phaseCtrl, phaseSem)),
       );
+      let settled: PromiseSettledResult<AgentResult>[];
+      if (phaseTimeoutMs !== undefined) {
+        let deadlineTimer: ReturnType<typeof setTimeout>;
+        const deadline = new Promise<never>((_, reject) => {
+          deadlineTimer = setTimeout(
+            () =>
+              reject(
+                new Error(
+                  `phase "${nameArg}" timed out after ${phaseTimeoutMs}ms`,
+                ),
+              ),
+            phaseTimeoutMs,
+          );
+        });
+        settled = await Promise.race([
+          allSettled.then((r) => {
+            clearTimeout(deadlineTimer);
+            return r;
+          }),
+          deadline.catch(() => {
+            phaseCtrl.abort();
+            return allSettled;
+          }),
+        ]);
+      } else {
+        settled = await allSettled;
+      }
 
       opts.signal.removeEventListener("abort", onRunAbort);
 
@@ -414,6 +472,8 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     handle: AgentHandleData,
     phaseName: string,
     phaseCtrl: AbortController,
+    /** Improvement 2: optional per-phase semaphore; overrides run semaphore. */
+    phaseSem?: Semaphore | null,
   ): Promise<AgentResult> {
     // Per-run agent cap (PRD §1.2 pin 6).
     if (agentCount >= opts.perRunAgentCap) {
@@ -439,11 +499,21 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     const t0 = nowMs();
 
     // BUG-W04: agent_start is logged AFTER semaphore acquire (see below).
-    // BUG-101: strip execution-only fields (timeoutMs) before hashing so
-    // innocent timeout changes don't invalidate valid cache entries.
-    const { timeoutMs: _omitTimeout, ...cacheableOpts } = handle.opts as Record<string, unknown> & { timeoutMs?: unknown };
+    // BUG-101: strip execution-only fields (timeoutMs, bindToWorkflowVersion)
+    // before hashing so innocent changes don't invalidate valid cache entries.
+    // Improvement 4: strip bindToWorkflowVersion from cacheable opts too.
+    const {
+      timeoutMs: _omitTimeout,
+      bindToWorkflowVersion: _omitBtv,
+      ...cacheableOpts
+    } = handle.opts as Record<string, unknown> & { timeoutMs?: unknown; bindToWorkflowVersion?: unknown };
+    // Improvement 4: skip workflowSourceSha256 when bindToWorkflowVersion===false.
+    const keySha =
+      (handle.opts as Record<string, unknown>).bindToWorkflowVersion === false
+        ? ''
+        : opts.workflowSourceSha256;
     const key = cacheKey({
-      workflowSourceSha256: opts.workflowSourceSha256,
+      workflowSourceSha256: keySha,
       phaseName,
       agentId: handle.id,
       prompt: handle.prompt,
@@ -556,7 +626,8 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       if (opts.pauseGate !== undefined) {
         await opts.pauseGate.waitWhilePaused(phaseCtrl.signal);
       }
-      token = await opts.semaphore.acquire(phaseCtrl.signal);
+      // Improvement 2: use phaseSem if provided, else run-level semaphore.
+      token = await (phaseSem ?? opts.semaphore).acquire(phaseCtrl.signal);
       if (opts.pauseGate === undefined || !opts.pauseGate.paused) break;
       // Race: pause() ran between the gate-check and the acquire-grant
       // (or this waiter was woken by a release while the gate was
@@ -606,9 +677,11 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         ...(typeof handle.opts.thinking === "string"
           ? { thinking: handle.opts.thinking }
           : {}),
-        ...(typeof handle.opts.timeoutMs === "number"
-          ? { timeoutMs: handle.opts.timeoutMs }
-          : {}),
+        // Improvement 3: per-agent timeout falls back to run-wide default.
+        timeoutMs:
+          typeof handle.opts.timeoutMs === 'number'
+            ? handle.opts.timeoutMs
+            : (opts.defaultAgentTimeoutMs ?? 600_000),
         // Slice-8a integration tests use the parent-death wrapper-free
         // path; `RunManager` owns this knob.
         skipParentDeathGuard: opts.mockAgents,
@@ -758,6 +831,106 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     }
   }
 
+  // ─── ctx.progress (Improvement 5) ───────────────────────────────
+  function progressFn(pct: unknown, message?: unknown): RunCtxBridgeResult<null> {
+    try {
+      if (typeof pct !== "number" || pct < 0 || pct > 100) {
+        throw new TypeError(
+          `ctx.progress: pct must be a number in [0, 100], got ${JSON.stringify(pct)}`,
+        );
+      }
+      const msg = message === undefined ? undefined : String(message);
+      // Overlay-only — no ledger write (ephemeral per spec).
+      try {
+        opts.emitOverlayEvent?.("pi-workflows.progress", {
+          runId: opts.runMeta.id,
+          pct,
+          ...(msg !== undefined ? { message: msg } : {}),
+        });
+      } catch {
+        /* emission failures must not abort the run */
+      }
+      return { ok: true, value: null };
+    } catch (e) {
+      return { ok: false, error: captureError(e) };
+    }
+  }
+
+  // ─── ctx.checkpoint (Improvement 6) ──────────────────────────────
+  async function checkpointFn(
+    label: unknown,
+    data?: unknown,
+  ): Promise<RunCtxBridgeResult<boolean>> {
+    try {
+      if (typeof label !== "string" || label.length === 0) {
+        throw new TypeError(
+          "ctx.checkpoint: label must be a non-empty string",
+        );
+      }
+      if (opts.cache.hasCheckpoint(label)) {
+        // Already set — checkpoint_hit (resumed run).
+        void opts.ledger.append({
+          type: "checkpoint_hit",
+          at: nowIso(),
+          label,
+        });
+        return { ok: true, value: false };
+      }
+      // First write — persist and record.
+      await opts.cache.setCheckpoint(label, data);
+      void opts.ledger.append({
+        type: "checkpoint_set",
+        at: nowIso(),
+        label,
+      });
+      return { ok: true, value: true };
+    } catch (e) {
+      return { ok: false, error: captureError(e) };
+    }
+  }
+
+  // ─── ctx.report (Improvement 7) ──────────────────────────────────
+  function reportFn(eventType: unknown, data?: unknown): RunCtxBridgeResult<null> {
+    try {
+      if (typeof eventType !== "string" || eventType.length === 0) {
+        throw new TypeError(
+          "ctx.report: eventType must be a non-empty string",
+        );
+      }
+      // JSON-serialize data to catch circular refs.
+      let parsedData: unknown;
+      if (data !== undefined) {
+        try {
+          parsedData = JSON.parse(JSON.stringify(data));
+        } catch (cycErr) {
+          throw new TypeError(
+            `ctx.report: data is not JSON-serializable (${(cycErr as Error).message})`,
+          );
+        }
+      }
+      // Append to ledger (fire-and-forget).
+      void opts.ledger.append({
+        type: "report",
+        at: nowIso(),
+        event: eventType,
+        ...(parsedData !== undefined ? { data: parsedData } : {}),
+      });
+      // Emit to overlay.
+      try {
+        opts.emitOverlayEvent?.("pi-workflows.report", {
+          runId: opts.runMeta.id,
+          event: eventType,
+          ...(parsedData !== undefined ? { data: parsedData as Record<string, unknown> } : {}),
+        });
+      } catch {
+        /* swallow */
+      }
+      return { ok: true, value: null };
+    } catch (e) {
+      return { ok: false, error: captureError(e) };
+    }
+  }
+
   const host: RunCtxHost = {
     runMeta: opts.runMeta,
     input: opts.input,
@@ -771,6 +944,9 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     log: logFn,
     finishCallback,
     getBudgetSpent: () => budgetSpent,
+    progress: progressFn,
+    checkpoint: checkpointFn,
+    report: reportFn,
   };
   return {
     host,

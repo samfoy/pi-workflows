@@ -98,6 +98,12 @@ interface RunCtxHostInternal {
   finishCallback(prompt: unknown): RunCtxBridgeResult<null>;
   getBudgetSpent(): number;
   readonly tokenBudget: number | null;
+  /** Improvement 5: ephemeral progress event. */
+  progress(pct: unknown, message?: unknown): RunCtxBridgeResult<null>;
+  /** Improvement 6: idempotent checkpoint. */
+  checkpoint(label: unknown, data?: unknown): Promise<RunCtxBridgeResult<boolean>>;
+  /** Improvement 7: structured report event. */
+  report(eventType: unknown, data?: unknown): RunCtxBridgeResult<null>;
 }
 
 /**
@@ -1345,6 +1351,16 @@ function buildInitScript(nonce: string): string {
     "  __base.pipeline  = __helpers.pipeline;",
     "  __base.retry     = __helpers.retry;",
     "  __base.sleep     = __helpers.sleep;",
+    "  // Improvements 5-7: progress, checkpoint, report bindings.",
+    "  if (__runCtxHost) {",
+    "    __base.progress    = wrapHostSync(__runCtxHost.progress);",
+    "    __base.checkpoint  = wrapHostAsync(__runCtxHost.checkpoint);",
+    "    __base.report      = wrapHostSync(__runCtxHost.report);",
+    "  } else {",
+    "    __base.progress   = function() { throw new Error('ctx.progress: no runtime (slice-2 stub)'); };",
+    "    __base.checkpoint = function() { throw new Error('ctx.checkpoint: no runtime (slice-2 stub)'); };",
+    "    __base.report     = function() { throw new Error('ctx.report: no runtime (slice-2 stub)'); };",
+    "  }",
     "  const ctx = Object.freeze(__base);",
     "  __ctxRef.current = ctx;",
     "  // Expose budget as a read-only top-level global (Michaelliv compat).",

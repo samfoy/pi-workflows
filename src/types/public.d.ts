@@ -48,6 +48,12 @@ export interface AgentOpts {
    * available as `result.output`.
    */
   readonly schema?: Record<string, unknown>;
+  /**
+   * When `false`, the workflow source SHA-256 is excluded from this
+   * agent's cache key. Use for stable recon agents that should survive
+   * a workflow file edit on `resume --latest`. Default: `true`.
+   */
+  readonly bindToWorkflowVersion?: boolean;
   /** Permits any author-defined fields. */
   readonly [extra: string]: unknown;
 }
@@ -136,6 +142,19 @@ export interface PhaseOpts {
    * `'null'`: failed agents return null in results; workflow continues.
    */
   readonly failMode?: 'throw' | 'null';
+  /**
+   * Phase-level wall-clock timeout in milliseconds. When the deadline
+   * fires, the phase AbortController is aborted and any pending agents
+   * are cancelled. Agents already done contribute their results;
+   * cancelled agents resolve as errors (subject to `failMode`).
+   */
+  readonly timeoutMs?: number;
+  /**
+   * Per-phase concurrency cap. Creates a child semaphore that limits
+   * how many agents in THIS phase may run simultaneously. Must be a
+   * positive integer. When absent, the run-level semaphore governs.
+   */
+  readonly maxConcurrent?: number;
 }
 
 export interface RetryOpts {
@@ -192,6 +211,28 @@ export interface WorkflowContext {
     /** Remaining tokens (Infinity if total is null). */
     remaining(): number;
   };
+
+  /**
+   * Emit an ephemeral progress update to the overlay. `pct` must be
+   * in `[0, 100]`. `message` is an optional human-readable label.
+   * No ledger write — overlay-only / ephemeral.
+   */
+  progress(pct: number, message?: string): void;
+
+  /**
+   * Idempotent checkpoint. Returns `true` if freshly written (first
+   * call for this label), `false` if the checkpoint was already set
+   * (resumed run hit an existing record). Use to skip expensive
+   * re-computation on resume.
+   */
+  checkpoint(label: string, data?: Record<string, unknown>): Promise<boolean>;
+
+  /**
+   * Append a structured report event to the ledger and emit to the
+   * overlay. Useful for workflow authors to emit domain-level
+   * observability events without polluting `ctx.log`.
+   */
+  report(eventType: string, data?: Record<string, unknown>): void;
 
   // ─── stdlib helpers ──────────────────────────────────────────────
   /**

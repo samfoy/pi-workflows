@@ -115,6 +115,9 @@ function stubHost(opts: {
     finishCallback: () => ok(null),
     getBudgetSpent: () => 0,
     tokenBudget: null,
+    progress: () => ok(null),
+    checkpoint: async () => ok(false),
+    report: () => ok(null),
   };
 }
 
