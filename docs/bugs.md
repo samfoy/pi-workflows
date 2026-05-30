@@ -1553,7 +1553,7 @@ Either await each call inside its try/catch block (`try { await opts.pi.sendMess
 
 ---
 
-## BUG-086 — ctx.pipeline undocumented in runtime-api.md
+## BUG-086 ✅ FIXED — ctx.pipeline undocumented in runtime-api.md
 
 **Area:** docs
 **Severity:** high
@@ -1570,7 +1570,7 @@ Add a `ctx.pipeline` section to runtime-api.md documenting the signature `pipeli
 
 ---
 
-## BUG-087 — ctx.budget undocumented in runtime-api.md
+## BUG-087 ✅ FIXED — ctx.budget undocumented in runtime-api.md
 
 **Area:** docs
 **Severity:** high
@@ -1587,7 +1587,7 @@ Add a `ctx.budget` section to runtime-api.md documenting the three members: `tot
 
 ---
 
-## BUG-088 — ctx.phase third argument (failMode) missing from runtime-api.md
+## BUG-088 ✅ FIXED — ctx.phase third argument (failMode) missing from runtime-api.md
 
 **Area:** docs
 **Severity:** high
@@ -1604,7 +1604,7 @@ Update the ctx.phase signature in runtime-api.md to `phase(name, agents, opts?)`
 
 ---
 
-## BUG-089 — schema option missing from AgentOpts in runtime-api.md
+## BUG-089 ✅ FIXED — schema option missing from AgentOpts in runtime-api.md
 
 **Area:** docs
 **Severity:** medium
