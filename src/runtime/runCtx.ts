@@ -202,16 +202,17 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     agentsArg: unknown,
     optsArg?: unknown,
   ): Promise<RunCtxBridgeResult<readonly (AgentResultLike | null)[]>> {
-    // Parse failMode from optional third arg.
-    const rawFailMode =
-      optsArg !== null && typeof optsArg === 'object'
-        ? (optsArg as Record<string, unknown>).failMode
-        : undefined;
-    const failMode: 'throw' | 'null' = rawFailMode === 'null' ? 'null' : 'throw';
     try {
+      // BUG-018 fix: parse failMode INSIDE the try block so a Proxy with a
+      // throwing getter cannot escape the RunCtxBridgeResult envelope.
       // BUG-056 fix: reject invalid failMode values so typos like 'NULL' or
       // 'null-on-error' are caught here and returned as an error envelope
       // rather than silently coercing to 'throw'.
+      const rawFailMode =
+        optsArg !== null && typeof optsArg === 'object'
+          ? (optsArg as Record<string, unknown>).failMode
+          : undefined;
+      const failMode: 'throw' | 'null' = rawFailMode === 'null' ? 'null' : 'throw';
       if (rawFailMode !== undefined && rawFailMode !== 'throw' && rawFailMode !== 'null') {
         throw new TypeError(
           `phase() opts.failMode must be 'throw' or 'null', got: ${JSON.stringify(rawFailMode)}`,
