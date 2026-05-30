@@ -1968,7 +1968,7 @@ Add PhaseOpts documentation to the ctx.phase section, document failMode:'throw' 
 
 ---
 
-## BUG-106 — Reflect namespace not frozen — Reflect.apply poisonable at runtime
+## BUG-106 ✅ FIXED — Reflect namespace not frozen — Reflect.apply poisonable at runtime
 
 **Area:** Sandbox / Security
 **Severity:** High
@@ -2002,7 +2002,7 @@ Track the fireCtxAbort listener as a class field (e.g. `private _abortListener: 
 
 ---
 
-## BUG-108 — AsyncFunction.prototype and GeneratorFunction.prototype not frozen
+## BUG-108 ✅ FIXED — AsyncFunction.prototype and GeneratorFunction.prototype not frozen
 
 **Area:** Sandbox / Security
 **Severity:** Medium
@@ -2036,7 +2036,7 @@ Replace the JSON round-trip with a recursive structured-clone that preserves und
 
 ---
 
-## BUG-110 — Shape C second export-async-function regex replace is dead code
+## BUG-110 ✅ FIXED — Shape C second export-async-function regex replace is dead code
 
 **Area:** Sandbox
 **Severity:** Low
