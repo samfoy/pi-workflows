@@ -104,6 +104,7 @@ interface RunCtxHostInternal {
   checkpoint(label: unknown, data?: unknown): Promise<RunCtxBridgeResult<boolean>>;
   /** Improvement 7: structured report event. */
   report(eventType: unknown, data?: unknown): RunCtxBridgeResult<null>;
+  gate(message: unknown, opts?: unknown): Promise<RunCtxBridgeResult<boolean>>;
 }
 
 /**
@@ -1297,6 +1298,7 @@ function buildInitScript(nonce: string): string {
     "        delete: function () { throw new Error('ctx.cache: no runtime (slice-2 stub)'); },",
     "      }),",
     "      finishCallback: function () { throw new Error('ctx.finishCallback: no runtime (slice-2 stub)'); },",
+    "      gate:           function () { throw new Error('ctx.gate: no runtime (slice-2 stub)'); },",
     "      budget: Object.freeze({ total: null, spent: function() { return 0; }, remaining: function() { return Infinity; } }),",
     "      run: Object.freeze({ id: 'wf-stub', workflowName: 'stub', startedAt: '1970-01-01T00:00:00Z', cwd: '.', resumed: false }),",
     "      input: '',",
@@ -1315,6 +1317,7 @@ function buildInitScript(nonce: string): string {
     "      phase:          wrapHostAsync(__runCtxHost.phase),",
     "      cache:          cache,",
     "      finishCallback: wrapHostSync(__runCtxHost.finishCallback),",
+    "      gate:           wrapHostAsync(__runCtxHost.gate),",
     "      run:            Object.freeze(runMeta),",
     "      input:          input,",
     "      signal:         signal,",

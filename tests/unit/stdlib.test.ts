@@ -118,6 +118,7 @@ function stubHost(opts: {
     progress: () => ok(null),
     checkpoint: async () => ok(false),
     report: () => ok(null),
+    gate: async () => ok(true),
   };
 }
 

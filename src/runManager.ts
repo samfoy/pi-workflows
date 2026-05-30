@@ -141,6 +141,11 @@ export interface Run {
    */
   stop(reason?: string): void;
   /**
+   * Slice gap/ctx-gate: resolve a pending ctx.gate() call. Pass
+   * `true` to approve, `false` to deny. No-op if no gate is pending.
+   */
+  respondGate(approved: boolean): void;
+  /**
    * Slice 10: resolves AFTER `promise` settles AND the ledger has
    * been flushed. Always resolves (never rejects) with the full
    * terminal classification. Slice 10's `deliverRunResult` consumes
@@ -288,6 +293,8 @@ export interface RunManagerStartOptions {
       | "pi-workflows.progress"
       | "pi-workflows.report"
       | "pi-workflows.agent.log",
+      | "pi-workflows.gate.requested"
+      | "pi-workflows.gate.resolved",
     data: Readonly<Record<string, unknown>>,
   ) => void;
 }
@@ -501,6 +508,7 @@ export async function startWorkflowRun(
       pause: () => Promise.resolve(false),
       resumePaused: () => Promise.resolve(false),
       stop: () => undefined,
+      respondGate: (_approved: boolean) => undefined,
     };
   }
 
@@ -521,6 +529,53 @@ export async function startWorkflowRun(
   // handle methods (NOT through ctx) per PRD §5.7 — author scripts
   // can't pause themselves.
   const pauseGate = new PauseGate();
+
+  // ─── ctx.gate() mechanism (gap/ctx-gate) ────────────────────────────────
+  // Single pending gate slot. ctx.gate() suspends the workflow script until
+  // respondGate(approved) is called (typically by the TUI overlay). If the
+  // run is aborted while waiting, the promise rejects via the abort signal.
+  let pendingGate: {
+    readonly message: string;
+    readonly resolve: (approved: boolean) => void;
+    readonly reject: (reason: unknown) => void;
+  } | null = null;
+
+  const waitForGate = (message: string, signal: AbortSignal): Promise<boolean> =>
+    new Promise<boolean>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason ?? new Error("aborted"));
+        return;
+      }
+      let settled = false;
+      const onAbort = (): void => {
+        if (!settled) {
+          settled = true;
+          pendingGate = null;
+          reject(signal.reason ?? new Error("aborted"));
+        }
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      pendingGate = {
+        message,
+        resolve: (approved: boolean) => {
+          if (!settled) {
+            settled = true;
+            signal.removeEventListener("abort", onAbort);
+            pendingGate = null;
+            resolve(approved);
+          }
+        },
+        reject: (reason: unknown) => {
+          if (!settled) {
+            settled = true;
+            signal.removeEventListener("abort", onAbort);
+            pendingGate = null;
+            reject(reason);
+          }
+        },
+      };
+    });
+
   // Serialize pause/resume against each other so two concurrent
   // `pause()` calls can't both decide they won the gate (the gate
   // itself is idempotent, but the ledger-write + sm.go() pair must
@@ -560,6 +615,7 @@ export async function startWorkflowRun(
     ...(opts.emitOverlayEvent
       ? { emitOverlayEvent: opts.emitOverlayEvent }
       : {}),
+    waitForGate,
   });
 
   const sandbox = new Sandbox({
@@ -793,6 +849,13 @@ export async function startWorkflowRun(
       ctrl.abort(
         reason !== undefined ? new Error(`stopped: ${reason}`) : undefined,
       );
+    },
+    respondGate: (approved: boolean) => {
+      // Resolve the pending ctx.gate() call. No-op if none is pending.
+      if (pendingGate !== null) {
+        pendingGate.resolve(approved);
+        // pendingGate is nulled inside resolve() after settlement.
+      }
     },
   };
 

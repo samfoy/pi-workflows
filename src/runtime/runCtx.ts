@@ -119,8 +119,16 @@ export interface RunCtxHostOptions {
       | "pi-workflows.progress"
       | "pi-workflows.report"
       | "pi-workflows.agent.log",
+      | "pi-workflows.gate.requested"
+      | "pi-workflows.gate.resolved",
     data: Readonly<Record<string, unknown>>,
   ) => void;
+  /**
+   * Slice gap/ctx-gate — optional gate resolver. When provided, ctx.gate()
+   * suspends execution until the function resolves (approved) or rejects
+   * (abort). When absent, gate() resolves immediately with `opts.default`.
+   */
+  readonly waitForGate?: (message: string, signal: AbortSignal) => Promise<boolean>;
 }
 
 /**
@@ -904,6 +912,70 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     }
   }
 
+  // ─── ctx.gate ────────────────────────────────────────────────────
+  async function gate(
+    messageArg: unknown,
+    optsArg?: unknown,
+  ): Promise<RunCtxBridgeResult<boolean>> {
+    try {
+      requireString(messageArg, "ctx.gate: message");
+      const message = messageArg as string;
+      const gateOpts =
+        optsArg !== null && typeof optsArg === "object"
+          ? (optsArg as Record<string, unknown>)
+          : {};
+      const defaultAnswer =
+        typeof gateOpts.default === "boolean" ? gateOpts.default : true;
+
+      // 1. Log the gate request to the ledger.
+      await opts.ledger.append({
+        type: "gate_requested",
+        at: nowIso(),
+        message,
+      });
+
+      // 2. Emit overlay event so the TUI can show the gate prompt.
+      try {
+        opts.emitOverlayEvent?.("pi-workflows.gate.requested", {
+          runId: opts.runMeta.id,
+          message,
+          defaultAnswer,
+        });
+      } catch {
+        /* overlay emission failures must not abort the gate */
+      }
+
+      // 3. Wait for a response (or fall back to the default if no mechanism
+      //    is wired — e.g. running outside the TUI).
+      let approved: boolean;
+      if (opts.waitForGate !== undefined) {
+        approved = await opts.waitForGate(message, opts.signal);
+      } else {
+        approved = defaultAnswer;
+      }
+
+      // 4. Log the gate resolution.
+      await opts.ledger.append({
+        type: "gate_resolved",
+        at: nowIso(),
+        approved,
+      });
+
+      try {
+        opts.emitOverlayEvent?.("pi-workflows.gate.resolved", {
+          runId: opts.runMeta.id,
+          approved,
+        });
+      } catch {
+        /* swallow */
+      }
+
+      return { ok: true, value: approved };
+    } catch (e) {
+      return { ok: false, error: captureError(e) };
+    }
+  }
+
   // ─── ctx.finishCallback ──────────────────────────────────────────
   function finishCallback(prompt: unknown): RunCtxBridgeResult<null> {
     try {
@@ -1035,6 +1107,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     progress: progressFn,
     checkpoint: checkpointFn,
     report: reportFn,
+    gate,
   };
   return {
     host,

@@ -541,6 +541,12 @@ export interface RunCtxHost {
    * and emit to the overlay. Sync (ledger write is fire-and-forget).
    */
   report(eventType: unknown, data?: unknown): RunCtxBridgeResult<null>;
+   * Human-in-the-loop suspend/confirm primitive (ctx.gate). Suspends
+   * execution until the user responds (approved or denied), or the run
+   * is aborted. Returns `{ ok: true, value: boolean }` on resolution;
+   * `{ ok: false, error }` on abort or error.
+   */
+  gate(message: unknown, opts?: unknown): Promise<RunCtxBridgeResult<boolean>>;
 }
 
 /**
@@ -1008,6 +1014,8 @@ export type LedgerEntry =
       readonly level: string;
       readonly message: string;
     };
+  | { readonly type: "gate_requested"; readonly at: string; readonly message: string }
+  | { readonly type: "gate_resolved"; readonly at: string; readonly approved: boolean };
 
 /**
  * Reader output from `LedgerReader.read()`. Shape designed for slice 11

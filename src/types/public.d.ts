@@ -292,6 +292,18 @@ export interface WorkflowContext {
    * to avoid leaks.
    */
   sleep(ms: number, opts?: SleepOpts): Promise<void>;
+
+  /**
+   * Human-in-the-loop suspend/confirm gate. Suspends workflow execution
+   * until the user approves or denies the operation in the TUI.
+   *
+   * Returns `true` if approved, `false` if denied.
+   * Throws `AbortError` if the run is killed while waiting.
+   *
+   * When no gate mechanism is wired (e.g. running outside the TUI),
+   * resolves immediately using `opts.default` (default `true`).
+   */
+  gate(message: string, opts?: { default?: boolean }): Promise<boolean>;
 }
 
 /** Default-exported workflow function. */

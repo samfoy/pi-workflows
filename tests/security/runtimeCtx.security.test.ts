@@ -67,6 +67,7 @@ function noopHost(): RunCtxHost {
     progress: () => ok(null),
     checkpoint: async () => ok(false),
     report: () => ok(null),
+    gate: async () => ok(true),
   };
 }
 
