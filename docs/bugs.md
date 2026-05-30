@@ -1196,7 +1196,7 @@ In the init-script catch block, call `this.timerBridge.dispose()` before re-thro
 
 ---
 
-## BUG-065 — Context-realm signal object not frozen — user code can replace `addEventListener`/`removeEventListener` on `ctx.signal`
+## BUG-065 ✅ FIXED — Context-realm signal object not frozen — user code can replace `addEventListener`/`removeEventListener` on `ctx.signal`
 
 **Area:** runtime / sandbox
 **Severity:** low
