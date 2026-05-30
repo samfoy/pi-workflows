@@ -395,3 +395,110 @@ test("§8.3.1 Function-constructor escape returns Context's globalThis only", as
   );
   assert.equal(r.returnValue, 0, "escape resolved to Context's stubbed env");
 });
+
+// ─── BUG-109: __pi_clone_into_ctx undefined preservation + circular ref ────
+
+test("BUG-109: __pi_clone_into_ctx preserves undefined object values (not dropped)", async () => {
+  const { signal } = fresh();
+  const r = await runScript(
+    `
+      const cloned = __pi_clone_into_ctx({ a: undefined, b: 1 });
+      return JSON.stringify({
+        hasA: Object.prototype.hasOwnProperty.call(cloned, 'a'),
+        aIsUndefined: cloned.a === undefined,
+        b: cloned.b,
+      });
+    `,
+    { signal },
+  );
+  const result = JSON.parse(r.returnValue as string);
+  assert.equal(result.hasA, true, "key 'a' with undefined value must be preserved");
+  assert.equal(result.aIsUndefined, true, "cloned.a must be undefined");
+  assert.equal(result.b, 1, "cloned.b must be 1");
+});
+
+test("BUG-109: __pi_clone_into_ctx preserves undefined array elements (not coerced to null)", async () => {
+  const { signal } = fresh();
+  const r = await runScript(
+    `
+      const arr = [undefined, 1, undefined];
+      const cloned = __pi_clone_into_ctx(arr);
+      return JSON.stringify({
+        length: cloned.length,
+        e0IsUndefined: cloned[0] === undefined,
+        e1: cloned[1],
+        e2IsUndefined: cloned[2] === undefined,
+      });
+    `,
+    { signal },
+  );
+  const result = JSON.parse(r.returnValue as string);
+  assert.equal(result.length, 3, "cloned array length must be 3");
+  assert.equal(result.e0IsUndefined, true, "cloned[0] must be undefined, not null");
+  assert.equal(result.e1, 1, "cloned[1] must be 1");
+  assert.equal(result.e2IsUndefined, true, "cloned[2] must be undefined, not null");
+});
+
+test("BUG-109: __pi_clone_into_ctx throws descriptive error on circular reference", async () => {
+  const { signal } = fresh();
+  const r = await runScript(
+    `
+      const obj = { a: 1 };
+      obj.self = obj;
+      let threw = null;
+      try {
+        __pi_clone_into_ctx(obj);
+      } catch (e) {
+        threw = e.message;
+      }
+      return threw;
+    `,
+    { signal },
+  );
+  assert.ok(
+    typeof r.returnValue === "string" &&
+      r.returnValue.includes("circular reference detected"),
+    `expected circular reference error, got: ${r.returnValue}`,
+  );
+});
+
+test("BUG-109: __pi_clone_into_ctx circular array detection throws", async () => {
+  const { signal } = fresh();
+  const r = await runScript(
+    `
+      const arr = [1, 2];
+      arr.push(arr);
+      let threw = null;
+      try {
+        __pi_clone_into_ctx(arr);
+      } catch (e) {
+        threw = e.message;
+      }
+      return threw;
+    `,
+    { signal },
+  );
+  assert.ok(
+    typeof r.returnValue === "string" &&
+      r.returnValue.includes("circular reference detected"),
+    `expected circular reference error, got: ${r.returnValue}`,
+  );
+});
+
+test("BUG-109: __pi_clone_into_ctx handles nested objects correctly (sibling re-use allowed)", async () => {
+  // Same object appearing as two separate siblings must NOT throw.
+  const { signal } = fresh();
+  const r = await runScript(
+    `
+      // obj appears as both .x and .y — shared but not circular.
+      const inner = { v: 42 };
+      const outer = { x: inner, y: inner };
+      const cloned = __pi_clone_into_ctx(outer);
+      return JSON.stringify({ xv: cloned.x.v, yv: cloned.y.v });
+    `,
+    { signal },
+  );
+  const result = JSON.parse(r.returnValue as string);
+  assert.equal(result.xv, 42, "cloned.x.v must be 42");
+  assert.equal(result.yv, 42, "cloned.y.v must be 42");
+});
