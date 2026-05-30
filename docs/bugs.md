@@ -2308,7 +2308,7 @@ Move vanish-fallback transitions out of buildRender() into the subscription call
 
 ---
 
-## BUG-126 — Stale compaction snapshot overwrites concurrent write when threshold crossed
+## BUG-126 ✅ FIXED — Stale compaction snapshot overwrites concurrent write when threshold crossed
 
 **Area:** Runtime / cache
 **Severity:** Medium
