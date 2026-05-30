@@ -523,6 +523,7 @@ export class LedgerReader {
       case "shutdown":
       case "result":
       case "error":
+      case "appendEntry":
         // Trust upstream — fields are emitted by writer in this
         // package; downstream readers shouldn't refuse a record
         // because of a single missing optional field.

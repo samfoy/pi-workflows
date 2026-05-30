@@ -40,6 +40,29 @@ export function runDir(runId: string): string {
 }
 
 /**
+ * `~/.pi/agent/workflows/runs/.active` — JSON file listing active run IDs.
+ * Written atomically (via `.active.tmp` rename) by `ActiveRunsRegistry`
+ * whenever run state changes. Read by `WorkflowClient.listActiveRuns()`.
+ */
+export function activeIndexPath(): string {
+  return join(runsHome(), ".active");
+}
+
+/** Tmp path used during atomic write of the active-runs index. */
+export function activeIndexTmpPath(): string {
+  return join(runsHome(), ".active.tmp");
+}
+
+/**
+ * `<runDir>/ctrl.jsonl` — append-only control command file.
+ * A supervisor writes JSON lines of `{ type, at?, reason? }` here;
+ * the run's ctrl-file watcher dispatches them to `run.pause()` etc.
+ */
+export function ctrlPath(runId: string): string {
+  return join(runDir(runId), "ctrl.jsonl");
+}
+
+/**
  * `<runDir>/cache.jsonl` — append-only cache file (PRD §6.3).
  * Slice 3 owner; consumed by slice 5 (dispatcher) and slice 8a
  * (`ctx.cache.*`).
