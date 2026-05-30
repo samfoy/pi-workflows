@@ -2223,7 +2223,7 @@ Mirror the phase-view logic: `dis('r', isPaused ? 'resume' : 'restart', noSel ||
 
 ---
 
-## BUG-121 — GC activeIds computed from stale lastSnapshot instead of live registry — newly-started runs unprotected
+## BUG-121 ✅ FIXED — GC activeIds computed from stale lastSnapshot instead of live registry — newly-started runs unprotected
 
 **Area:** TUI / overlay
 **Severity:** Medium
@@ -2240,7 +2240,7 @@ Replace `lastSnapshot` with a live query: `opts.registry.listSummaries().filter(
 
 ---
 
-## BUG-122 — GC dialog Enter handler doesn't cover '\n' (Unix newline) — some terminals send LF for Enter
+## BUG-122 ✅ FIXED — GC dialog Enter handler doesn't cover '\n' (Unix newline) — some terminals send LF for Enter
 
 **Area:** TUI / overlay
 **Severity:** Low
@@ -2274,7 +2274,7 @@ Replace condition with running-agent count: `const runningCount = phaseSnap.phas
 
 ---
 
-## BUG-124 — agentDetailDebounceTimer not cleared on navigate-back from agent-detail — stale render triggered after transition
+## BUG-124 ✅ FIXED — agentDetailDebounceTimer not cleared on navigate-back from agent-detail — stale render triggered after transition
 
 **Area:** TUI / overlay
 **Severity:** Low
