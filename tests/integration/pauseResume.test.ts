@@ -252,11 +252,9 @@ test("slice 12: pause mid-phase blocks new spawns; resume drains the rest", asyn
   );
 
   // pause/resume must appear between an agent_start and an agent_end
-  // (i.e. mid-phase, with at least one in-flight). Note: in slice 8a's
-  // ctx.phase, all agent_start records for a phase are emitted up
-  // front before any acquire, so we relax to start-vs-end ordering
-  // (matches plan §4 Slice 12 acceptance "between agent_start records"
-  // intent: pause was issued mid-phase, not pre/post).
+  // (i.e. mid-phase, with at least one in-flight). After BUG-W04 fix,
+  // agent_start is logged AFTER semaphore acquire so the two in-flight
+  // agents (a0, a1) log agent_start before the test calls pause.
   const idxPause = entries.findIndex((e) => e.type === "pause");
   const idxResume = entries.findIndex((e) => e.type === "resume");
   const firstStartIdx = entries.findIndex((e) => e.type === "agent_start");
