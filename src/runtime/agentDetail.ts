@@ -35,6 +35,12 @@ export interface AgentDetailOpts {
   readonly nowMs?: number;
   readonly help?: ReadonlyArray<HelpBullet>;
   readonly banner?: string;
+  /**
+   * Scroll offset into logTail — 0 = newest lines, positive = scroll
+   * back toward older entries. Clamped by the caller to
+   * [0, logTail.length - MAX_LOG_LINES]. BUG-034.
+   */
+  readonly scrollOffset?: number;
 }
 
 const MAX_LOG_LINES = 12;
@@ -122,14 +128,18 @@ export function renderAgentDetail(
     lines.push("Cache: hit");
   }
 
-  // Live tail
+  // Live tail (BUG-034: apply scrollOffset for keyboard scroll)
   lines.push("");
-  const logCount = Math.min(MAX_LOG_LINES, snap.logTail.length);
+  const scrollOffset = opts.scrollOffset ?? 0;
+  const startIdx = Math.max(0, snap.logTail.length - MAX_LOG_LINES - scrollOffset);
+  const endIdx = snap.logTail.length - scrollOffset;
+  const visibleLogLines = snap.logTail.slice(startIdx, endIdx > 0 ? endIdx : snap.logTail.length);
+  const logCount = visibleLogLines.length;
   lines.push(`Live tail (last ${logCount > 0 ? logCount : 0} lines)`);
   if (snap.logTail.length === 0) {
     lines.push("  (no output yet)");
   } else {
-    for (const l of snap.logTail.slice(-MAX_LOG_LINES)) {
+    for (const l of visibleLogLines) {
       lines.push(`  ${l}`);
     }
   }
