@@ -125,6 +125,8 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     // never block extension load.
     try {
       const sweep = await sweepCrashedRuns({
+        autoResume: initialCfg.autoResumeCrashedWorkflows,
+        activeRuns: getActiveRuns(),
         log: (level, message, details) => {
           // Best-effort surface of warn/error lines.
           if (level === "warn" || level === "error") {
@@ -157,6 +159,12 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
             }
           }
         }
+      }
+      if (sweep.resumed.length > 0) {
+        ctx.ui.notify(
+          `[pi-workflows] crash-sweep: auto-resumed ${sweep.resumed.length} run(s)`,
+          "info",
+        );
       }
       for (const e of sweep.errors) {
         ctx.ui.notify(

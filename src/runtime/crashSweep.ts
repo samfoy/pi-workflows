@@ -42,6 +42,9 @@ import {
 } from "./ledger.js";
 import { runsHome, manifestPath } from "../util/paths.js";
 import type { LedgerEntry, RunState } from "../types/internal.js";
+import type { ResumeOptions } from "./resumeRun.js";
+import type { Run } from "../runManager.js";
+import type { ActiveRunsRegistry } from "./activeRuns.js";
 
 // ─── Liveness primitives ──────────────────────────────────────────────
 
@@ -125,6 +128,19 @@ export interface CrashSweepResult {
     readonly runId: string;
     readonly message: string;
   }>;
+  /**
+   * Run IDs successfully auto-resumed (only populated when
+   * `autoResume: true` was set in options).
+   */
+  readonly resumed: ReadonlyArray<string>;
+  /**
+   * Run IDs that failed to auto-resume (only populated when
+   * `autoResume: true` was set in options).
+   */
+  readonly resumeFailed: ReadonlyArray<{
+    readonly runId: string;
+    readonly message: string;
+  }>;
 }
 
 export interface CrashSweepOptions {
@@ -144,6 +160,24 @@ export interface CrashSweepOptions {
     message: string,
     details?: Readonly<Record<string, unknown>>,
   ) => void;
+  /**
+   * When true, each run flipped to `failed: parent-crash` is
+   * automatically resumed via `resumeRun`. Off by default.
+   * Requires `activeRuns` if the resumed run should be registered
+   * in the active-runs registry.
+   */
+  readonly autoResume?: boolean;
+  /** Active-runs registry forwarded to each `resumeRun` call. */
+  readonly activeRuns?: ActiveRunsRegistry;
+  /**
+   * Test seam: override the resume implementation so tests don't need
+   * to stand up the full sandbox stack. Defaults to the real
+   * `resumeRun` when `autoResume: true`.
+   */
+  readonly resumeRunFn?: (
+    runId: string,
+    opts: ResumeOptions,
+  ) => Promise<Run>;
 }
 
 interface ManifestPartial {
@@ -186,12 +220,16 @@ export async function sweepCrashedRuns(
     skippedTerminal: string[];
     skippedAlive: string[];
     errors: { runId: string; message: string }[];
+    resumed: string[];
+    resumeFailed: { runId: string; message: string }[];
   } = {
     scanned: 0,
     transitioned: [],
     skippedTerminal: [],
     skippedAlive: [],
     errors: [],
+    resumed: [],
+    resumeFailed: [],
   };
 
   if (!existsSync(runsRoot)) {
@@ -239,6 +277,40 @@ export async function sweepCrashedRuns(
       });
     }
   }
+
+  // Auto-resume: for each run flipped to `failed: parent-crash`, try
+  // to resume it. Fire sequentially so the active-runs registry doesn't
+  // get hammered all at once.
+  if (opts.autoResume === true && result.transitioned.length > 0) {
+    // Lazy-load resumeRun to avoid pulling the sandbox stack when
+    // autoResume is off (the common case).
+    const resumeFn =
+      opts.resumeRunFn ??
+      (await import("./resumeRun.js")).resumeRun;
+
+    for (const t of result.transitioned) {
+      try {
+        const run = await resumeFn(t.runId, {
+          useLatest: false,
+          preApproved: true,
+          ...(opts.activeRuns !== undefined ? { activeRuns: opts.activeRuns } : {}),
+        });
+        // Fire-and-forget: we don't await the run's completion here.
+        run.promise.catch(() => undefined);
+        result.resumed.push(t.runId);
+        opts.log?.("info", `sweep: auto-resumed ${t.runId}`, {
+          runId: t.runId,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        result.resumeFailed.push({ runId: t.runId, message: msg });
+        opts.log?.("warn", `sweep: auto-resume failed for ${t.runId}: ${msg}`, {
+          runId: t.runId,
+        });
+      }
+    }
+  }
+
   return result;
 }
 
@@ -252,6 +324,8 @@ async function sweepOne(args: {
     skippedTerminal: string[];
     skippedAlive: string[];
     errors: { runId: string; message: string }[];
+    resumed: string[];
+    resumeFailed: { runId: string; message: string }[];
   };
   log?: CrashSweepOptions["log"];
   resolveLedgerPath?: (runId: string) => string;

@@ -517,6 +517,7 @@ export class LedgerReader {
       case "agent_end":
       case "agent_error":
       case "agent_cache_hit":
+      case "agent_log":
       case "log":
       case "pause":
       case "resume":

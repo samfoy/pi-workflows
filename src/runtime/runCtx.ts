@@ -116,7 +116,8 @@ export interface RunCtxHostOptions {
       | "pi-workflows.agent.ended"
       | "pi-workflows.meta.phases"
       | "pi-workflows.progress"
-      | "pi-workflows.report",
+      | "pi-workflows.report"
+      | "pi-workflows.agent.log",
     data: Readonly<Record<string, unknown>>,
   ) => void;
 }
@@ -807,9 +808,29 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
                 return String(message);
               }
             })();
-      // Fire-and-forget (PRD §4.2.4 returns void). Errors are swallowed
-      // via `.catch` since we're sync.
+      // Ledger write: existing `log` entry (PRD §4.2.4 returns void).
       void ledgerLog(opts.ledger, level, msg, nowIso).catch(() => undefined);
+      // Ledger write: new `agent_log` entry for completeness in the ledger
+      // (so `tail ledger.jsonl` shows ctx.log calls alongside agent events).
+      void opts.ledger.append({
+        type: "agent_log",
+        at: nowIso(),
+        agentId: "",
+        phaseName: "",
+        level,
+        message: msg,
+      }).catch(() => undefined);
+      // Overlay event: lets the TUI agent-detail view show ctx.log lines.
+      try {
+        opts.emitOverlayEvent?.("pi-workflows.agent.log", {
+          line: msg,
+          runId: opts.runMeta.id,
+          agentId: "",
+          level,
+        });
+      } catch {
+        /* swallow — overlay failures must not block the run */
+      }
       return { ok: true, value: null };
     } catch (e) {
       return { ok: false, error: captureError(e) };

@@ -68,6 +68,12 @@ export interface Config {
   readonly recursive: boolean;
   /** Source of the disable decision (debug-friendly). */
   readonly disabledBy: "env" | "setting" | null;
+  /**
+   * When true, crash-sweep automatically resumes orphaned runs instead
+   * of leaving them in `failed: parent-crash`. Default: false.
+   * Controlled by the `pi-workflows.autoResumeCrashedWorkflows` setting.
+   */
+  readonly autoResumeCrashedWorkflows: boolean;
 }
 
 /**
@@ -993,6 +999,14 @@ export type LedgerEntry =
       readonly at: string;
       readonly event: string;
       readonly data?: unknown;
+    }
+  | {
+      readonly type: "agent_log";
+      readonly at: string;
+      readonly agentId: string;
+      readonly phaseName: string;
+      readonly level: string;
+      readonly message: string;
     };
 
 /**
