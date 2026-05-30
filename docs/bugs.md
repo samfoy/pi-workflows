@@ -1162,7 +1162,7 @@ Add `tokenBudget: number | null` to `RunCtxHostInternal`. Verify the host-side b
 
 ---
 
-## BUG-063 — Context-realm `URLSearchParams` wrapper missing `[Symbol.iterator]` — `for...of` and spread throw `TypeError`
+## BUG-063 ✅ FIXED — Context-realm `URLSearchParams` wrapper missing `[Symbol.iterator]` — `for...of` and spread throw `TypeError`
 
 **Area:** runtime / sandbox
 **Severity:** medium
@@ -1179,7 +1179,7 @@ Before `Object.freeze(this)` in the URLSearchParams constructor, add: `this[Symb
 
 ---
 
-## BUG-064 — `Sandbox` constructor leaks `timerBridge` resources when init script throws
+## BUG-064 ✅ FIXED — `Sandbox` constructor leaks `timerBridge` resources when init script throws
 
 **Area:** runtime / sandbox
 **Severity:** low
