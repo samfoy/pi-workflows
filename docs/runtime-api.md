@@ -495,3 +495,140 @@ Workflow scripts execute inside a `node:vm` Context. The sandbox:
 - **v2 deferred:** `crypto.subtle`, worker-thread interrupt on sync loops.
 
 See [`docs/threat-model.md`](./threat-model.md) for the full escape-vector matrix.
+
+---
+
+## `ctx.progress(pct, message?)` — Progress reporting *(gap/dsl-primitives)*
+
+**Signature:**
+```ts
+progress(pct: number, message?: string): void
+```
+
+Emits an ephemeral progress event to the overlay. `pct` must be in `[0, 100]`.
+`message` is an optional human-readable label. **No ledger write** — this is
+overlay-only and ephemeral (not replayed on resume).
+
+```js
+ctx.progress(0, "Starting analysis");
+// ... work ...
+ctx.progress(50, "Halfway through");
+// ... more work ...
+ctx.progress(100, "Done");
+```
+
+Overlay event type: `pi-workflows.progress` with payload `{ runId, pct, message? }`.
+
+---
+
+## `ctx.checkpoint(label, data?)` — Idempotent checkpoint *(gap/dsl-primitives)*
+
+**Signature:**
+```ts
+checkpoint(label: string, data?: Record<string, unknown>): Promise<boolean>
+```
+
+Idempotent per-run gate. Returns `true` if the checkpoint was **freshly written**
+(first call for this label), `false` if it was **already set** (a resumed run hit
+an existing record). Use to skip expensive re-computation after a crash or resume.
+
+```js
+const fresh = await ctx.checkpoint("expensive-recon-done");
+if (fresh) {
+  // Run this block only once per run, even across resumes.
+  const results = await ctx.phase("recon", agents);
+  await ctx.cache.set("recon-results", results);
+} else {
+  // Resume path — skip re-computation.
+  const results = await ctx.cache.get("recon-results");
+}
+```
+
+Internally uses the author-cache under the `__chk__<label>` prefix key.
+Ledger entries: `checkpoint_set` (first write) / `checkpoint_hit` (resume hit).
+
+---
+
+## `ctx.report(eventType, data?)` — Structured report events *(gap/dsl-primitives)*
+
+**Signature:**
+```ts
+report(eventType: string, data?: Record<string, unknown>): void
+```
+
+Appends a structured domain-level event to the run ledger **and** emits it
+to the overlay. Use for observability events that are more structured than
+`ctx.log` but don't warrant their own phase.
+
+```js
+ctx.report("coverage.collected", { file: "src/auth.ts", lineCount: 312 });
+ctx.report("agent.output.saved", { agentId: "analyst", bytes: result.text.length });
+```
+
+`data` must be JSON-serialisable (circular references throw `TypeError`).
+Ledger entry type: `report` with fields `event`, `data?`.
+Overlay event type: `pi-workflows.report` with payload `{ runId, event, data? }`.
+
+---
+
+## `PhaseOpts` extensions *(gap/dsl-primitives)*
+
+Three new fields on the `PhaseOpts` object passed as the third arg to `ctx.phase()`:
+
+### `timeoutMs?: number` — Phase-level timeout
+
+```ts
+await ctx.phase("slow-analysis", agents, { timeoutMs: 30_000 });
+```
+
+When the deadline fires, the phase `AbortController` is aborted. Agents already
+done contribute their results; pending agents resolve as errors (subject to
+`failMode`). The deadline timer is cleared if all agents finish before it fires.
+
+### `maxConcurrent?: number` — Per-phase concurrency cap
+
+```ts
+await ctx.phase("fan-out", agents, { maxConcurrent: 4 });
+```
+
+Creates a child semaphore with the given cap for this phase only. Must be a
+positive integer. Other phases continue to use the run-level semaphore.
+
+---
+
+## `AgentOpts.bindToWorkflowVersion` *(gap/dsl-primitives)*
+
+```ts
+interface AgentOpts {
+  // ... existing fields ...
+  bindToWorkflowVersion?: boolean; // default: true
+}
+```
+
+When `false`, the workflow source SHA-256 is **excluded** from this agent's cache
+key. Useful for stable recon agents that should survive a workflow file edit when
+using `resume --latest`.
+
+```js
+const h = ctx.agent("Identify all exported functions", {
+  id: "recon-exports",
+  bindToWorkflowVersion: false, // cache hit survives workflow edits
+});
+```
+
+---
+
+## `RunOptions.defaultAgentTimeoutMs` *(gap/dsl-primitives)*
+
+```ts
+interface RunOptions {
+  // ... existing fields ...
+  defaultAgentTimeoutMs?: number;
+}
+```
+
+Run-wide default agent timeout in milliseconds. Applied when an individual
+`ctx.agent()` call does not supply `opts.timeoutMs`. Falls back to the
+dispatcher's hard-coded `600_000` ms (10 min) when absent.
+
+Configure via `RunManager` options or workflow manifest options.

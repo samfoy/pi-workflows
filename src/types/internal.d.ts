@@ -286,6 +286,12 @@ export interface RunOptions {
   readonly perRunAgentCap: number;
   /** Token budget cap for this run, or `null` for uncapped. */
   readonly tokenBudget: number | null;
+  /**
+   * Run-wide default agent timeout in ms. Used when an individual
+   * `ctx.agent()` call does not supply `opts.timeoutMs`. Falls back
+   * to the dispatcher's hard-coded 600_000 ms when absent.
+   */
+  readonly defaultAgentTimeoutMs?: number;
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -513,6 +519,22 @@ export interface RunCtxHost {
   finishCallback(prompt: unknown): RunCtxBridgeResult<null>;
   /** Returns accumulated token spend across all agent results so far. Sync. */
   getBudgetSpent(): number;
+  /**
+   * Improvement 5: emit an ephemeral progress event to the overlay.
+   * pct must be 0–100. No ledger write.
+   */
+  progress(pct: unknown, message?: unknown): RunCtxBridgeResult<null>;
+  /**
+   * Improvement 6: idempotent checkpoint. Returns true if freshly
+   * written, false if already set (resumed run hit). Async because
+   * it writes to the cache store.
+   */
+  checkpoint(label: unknown, data?: unknown): Promise<RunCtxBridgeResult<boolean>>;
+  /**
+   * Improvement 7: append a structured report event to the ledger
+   * and emit to the overlay. Sync (ledger write is fire-and-forget).
+   */
+  report(eventType: unknown, data?: unknown): RunCtxBridgeResult<null>;
 }
 
 /**
@@ -955,6 +977,22 @@ export type LedgerEntry =
       readonly type: "error";
       readonly at: string;
       readonly error: { readonly name: string; readonly message: string; readonly stack?: string };
+    }
+  | {
+      readonly type: "checkpoint_set";
+      readonly at: string;
+      readonly label: string;
+    }
+  | {
+      readonly type: "checkpoint_hit";
+      readonly at: string;
+      readonly label: string;
+    }
+  | {
+      readonly type: "report";
+      readonly at: string;
+      readonly event: string;
+      readonly data?: unknown;
     };
 
 /**
