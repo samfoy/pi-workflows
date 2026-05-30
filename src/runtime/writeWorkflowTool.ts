@@ -191,8 +191,7 @@ export function registerWriteWorkflowTool(opts: WriteWorkflowToolOpts): void {
         "Pass `{ failMode: 'null' }` as third arg to ctx.phase() for resilient flows that survive partial failures.",
       "Return a string, object, or array from the function — it becomes the workflow result " +
         "shown in the dashboard and in the chat card.",
-      "After calling write_workflow, tell the user the workflow was saved and is already running — " +
-        "direct them to /workflows to monitor progress.",
+      "After calling write_workflow, tell the user the workflow was saved and is registered as a slash command. Direct them to /workflows to launch and monitor it.",
     ],
 
     promptSnippet: `

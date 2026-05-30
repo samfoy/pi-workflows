@@ -711,8 +711,9 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   // ─── ctx.log ────────────────────────────────────────────────────
   function logFn(message: unknown, levelArg: unknown): RunCtxBridgeResult<null> {
     try {
-      const level: "info" | "warn" | "error" =
-        levelArg === "warn" || levelArg === "error" ? levelArg : "info";
+      const level: "info" | "warn" | "error" = (
+        (typeof levelArg === "string" ? levelArg : (levelArg as any)?.level) ?? "info"
+      ) as "info" | "warn" | "error";
       const msg =
         typeof message === "string"
           ? message

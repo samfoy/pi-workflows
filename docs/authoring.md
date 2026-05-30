@@ -161,7 +161,7 @@ severity via Borda count. The judge aggregates the ranking lists.
 **Phase 4 — summarise (1 agent):** takes the top-N findings and writes the
 final structured report.
 
-See `examples/codebase-audit.js` for the full source.
+See `examples/codebase-audit/codebase-audit.js` for the full source.
 
 ---
 
