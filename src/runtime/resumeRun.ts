@@ -230,18 +230,19 @@ export async function resumeRun(
   const manifest = await readManifestStrict(runDirAbs);
   const cwd = opts.cwdOverride ?? manifest.cwd ?? process.cwd();
 
-  // 3. Lock the runDir FIRST (before reading ledger) to eliminate the TOCTOU
-  // race in BUG-113. If we read the ledger before acquiring the lock, another
-  // pi process could acquire the lock, complete/transition the run, and release
-  // between our read and our lock acquisition -- leaving us with a stale
-  // finalState that causes us to resume an already-terminal run.
-  const lock = acquireResumeLock({ runDirAbs, runId });
+  // BUG-028: lock is acquired AFTER the approval gate resolves, not before.
+  // Holding the lock during user input (which can block for minutes) means a
+  // crash during the prompt leaves a stale lock that blocks any legitimate
+  // follow-up resume until process cleanup runs. Trade-off: the TOCTOU window
+  // described in BUG-113 is accepted; resumability is enforced by the
+  // state-machine transitions that follow lock acquisition.
+  let lock: ReturnType<typeof acquireResumeLock> | null = null;
   // BUG-070: declared outside the try block so the catch can inspect it.
   let iifeLaunched = false;
 
   try {
-    // 1. Read ledger \u2014 derive current state (inside the lock; state is
-    //    now stable because no concurrent process can mutate it).
+    // 1. Read ledger \u2014 derive current state (lock not yet held; the
+    //    TOCTOU window is accepted per BUG-028 rationale above).
     const reader = new LedgerReader({
       runId,
       ...(opts.resolveLedgerPath
@@ -348,6 +349,12 @@ export async function resumeRun(
         }
       }
     }
+
+    // 3. Acquire the resume lock now — the user has approved (or preApproved)
+    // and actual execution is about to begin. Acquiring here rather than
+    // before the approval gate means a crash during the prompt doesn't leave
+    // a stale lock blocking the next legitimate resume (BUG-028).
+    lock = acquireResumeLock({ runDirAbs, runId });
 
     // 6. Substrate.
     const startedAt = manifest.startedAt ?? new Date().toISOString();
@@ -582,8 +589,10 @@ export async function resumeRun(
                 },
         });
         // Release the resume lock once the run settles.
+        // lock is guaranteed non-null here: the IIFE only launches after
+        // lock acquisition (see BUG-028 restructuring above).
         try {
-          lock.release();
+          lock!.release();
         } catch {
           /* swallow */
         }
@@ -687,7 +696,7 @@ export async function resumeRun(
     // Release the lock only if the IIFE hasn't started yet (BUG-070).
     // If the IIFE is already executing it will release the lock itself
     // from its finally block.
-    if (!iifeLaunched) {
+    if (!iifeLaunched && lock !== null) {
       try {
         lock.release();
       } catch {
