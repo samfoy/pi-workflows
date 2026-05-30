@@ -270,6 +270,8 @@ export async function resumeRun(
 
   // 3. Lock the runDir.
   const lock = acquireResumeLock({ runDirAbs, runId });
+  // BUG-070: declared outside the try block so the catch can inspect it.
+  let iifeLaunched = false;
 
   try {
     // 4. Source resolution \u2014 frozen vs live.
@@ -584,6 +586,7 @@ export async function resumeRun(
       if (runError !== null) throw runError;
       return result;
     })();
+    iifeLaunched = true;
 
     const run: Run = {
       runId,
@@ -676,11 +679,15 @@ export async function resumeRun(
 
     return run;
   } catch (err) {
-    // Release the lock if we never made it to the run.
-    try {
-      lock.release();
-    } catch {
-      /* swallow */
+    // Release the lock only if the IIFE hasn't started yet (BUG-070).
+    // If the IIFE is already executing it will release the lock itself
+    // from its finally block.
+    if (!iifeLaunched) {
+      try {
+        lock.release();
+      } catch {
+        /* swallow */
+      }
     }
     throw err;
   }
