@@ -234,6 +234,7 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
   }
 
   if (k === "g") {
+    if (input.view !== "runs-list") return { kind: "noop", reason: "disabled-for-state" };
     return { kind: "open-gc-dialog" };
   }
 
