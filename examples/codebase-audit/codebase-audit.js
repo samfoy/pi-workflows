@@ -1,5 +1,7 @@
 /// <reference types="@samfp/pi-workflows" />
 
+export const meta = { name: 'codebase-audit', description: 'Audit a codebase for issues', version: '1.0.0' };
+
 /**
  * /codebase-audit — phased audit of the current repo.
  *

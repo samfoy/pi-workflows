@@ -1,5 +1,7 @@
 /// <reference types="@samfp/pi-workflows" />
 
+export const meta = { name: 'hello', description: 'Hello world workflow example', version: '1.0.0' };
+
 /**
  * hello — minimal "hello world" pi workflow.
  *
