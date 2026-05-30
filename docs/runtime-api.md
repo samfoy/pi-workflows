@@ -119,6 +119,7 @@ interface AgentResult {
   readonly toolCalls: number;
   readonly transcriptPath: string; // path to .jsonl transcript on disk
   readonly cached: boolean;        // true if result replayed from cache
+  readonly output?: unknown;        // parsed JSON object — set when opts.schema was provided to ctx.agent()
 }
 ```
 
