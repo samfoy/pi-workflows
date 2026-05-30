@@ -83,12 +83,22 @@ export default async function main(ctx, input) {
   // Note: ctx.vote() is for single-winner judging. Here we need ranked
   // selection (top 10 ordered from 3 voters) — the explicit Borda loop
   // below demonstrates how to compose phases for richer aggregation.
-  const findingsJson = JSON.stringify(allFindings, null, 2);
+  //
+  // Truncate to top 30 findings by severity to avoid context crashes from
+  // inlining large findings JSON into voter prompts (SKILL.md anti-pattern:
+  // "Never inline file contents in prompts — causes context crashes").
+  const severityOrder = { high: 0, med: 1, low: 2 };
+  const totalCount = allFindings.length;
+  const topFindings = allFindings
+    .slice()
+    .sort((a, b) => (severityOrder[a.severity] ?? 3) - (severityOrder[b.severity] ?? 3))
+    .slice(0, 30);
+  const findingsJson = JSON.stringify(topFindings, null, 2);
   const voters = [0, 1, 2].map((i) =>
     ctx.agent(
-      `Below are ${allFindings.length} audit findings. Rank-order the TOP 10
-      most critical for a code review. Consider severity, blast radius, fix
-      difficulty. Return JSON:
+      `Analyzing top ${topFindings.length} of ${totalCount} total findings.
+      Rank-order the TOP 10 most critical for a code review. Consider
+      severity, blast radius, fix difficulty. Return JSON:
       [{"rank": 1, "title": "...", "justification": "..."}, ...].
       Findings:\n${findingsJson}`,
       { id: `voter-${i}`, thinking: "high" },
