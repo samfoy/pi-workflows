@@ -1736,7 +1736,7 @@ Two complementary fixes:
 
 ---
 
-## BUG-W04 — `agent_start` ledger event logged before semaphore acquire
+## BUG-W04 ✅ FIXED — `agent_start` ledger event logged before semaphore acquire
 
 **Area:** `src/runtime/runCtx.ts`  
 **Severity:** Low — misleading timing in TUI and logs  
