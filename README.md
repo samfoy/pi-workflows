@@ -161,7 +161,7 @@ Full reference: [`docs/runtime-api.md`](./docs/runtime-api.md)
 
 ### Security model
 
-Workflow scripts run inside a sandboxed `node:vm` Context. There is **no direct access** to `fs`, `net`, `child_process`, `process.env`, or any Node built-in not explicitly allowed. The sandbox exposes: `Buffer`, `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `atob`, `btoa`, `crypto` (randomUUID/randomBytes/getRandomValues only), frozen `process` stub (platform/arch/versions — no env, no exit). `crypto.subtle` is deferred to v2 (see [parity gaps](./docs/parity-gaps.md)).
+Workflow scripts run inside a sandboxed `node:vm` Context. There is **no direct access** to `fs`, `net`, `child_process`, `process.env`, or any Node built-in not explicitly allowed. The sandbox exposes: `Buffer`, `URL`, `URLSearchParams`, `TextEncoder`, `TextDecoder`, `atob`, `btoa`, `crypto` (randomUUID/randomBytes/getRandomValues/subtle), frozen `process` stub (platform/arch/versions — no env, no exit). See [parity gaps](./docs/parity-gaps.md) for remaining limitations.
 
 ---
 
@@ -188,13 +188,10 @@ Runs survive pi restart. Use `/workflows resume <runId>` to re-attach to a compl
 
 ## Parity gaps vs Claude Code
 
-See [`docs/parity-gaps.md`](./docs/parity-gaps.md) for the full list. Key v1 gaps:
+See [`docs/parity-gaps.md`](./docs/parity-gaps.md) for the full list. Remaining v1 gaps:
 
-- No `workflow` keyword trigger (requires `/` slash command)
-- No `/effort ultracode` modifier
-- `crypto.subtle` deferred to v2
-- Synchronous infinite loop wedges the event loop (no worker-thread interrupt)
-- `acceptEdits` permission elevation not supported — inherits parent allowlist
+- Synchronous infinite loop wedges the event loop after first `await` (worker-thread interrupt in progress)
+- No `/effort ultracode` modifier (auto-workflow for every task)
 
 ---
 

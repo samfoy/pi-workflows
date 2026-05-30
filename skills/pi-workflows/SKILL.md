@@ -44,10 +44,22 @@ On first run pi shows an approval prompt with the file SHA-256 and first 40 line
 
 ## Writing a workflow
 
-A workflow is a `.js` file with a default export:
+A workflow file must start with `export const meta` as the very first statement:
 
 ```js
-// ~/.pi/agent/workflows/my-workflow.js
+export const meta = {
+  name: "my-workflow",
+  description: "What this workflow does",
+  version: "1.0.0",
+  whenToUse: "Hint for the model about when to call write_workflow for this task type",
+  // Optional: auto-approve file edits for all subagents (like CC's acceptEdits mode)
+  acceptEdits: true,
+  phases: [
+    { title: "Analyze" },
+    { title: "Implement" },
+  ],
+};
+
 export default async function (ctx, input) {
   const [result] = await ctx.phase("main", [
     ctx.agent(`Answer: ${input}`, { id: "answer" }),
@@ -55,6 +67,8 @@ export default async function (ctx, input) {
   return result.text;
 }
 ```
+
+**Keyword trigger:** include the word `workflow` anywhere in your prompt to automatically trigger `write_workflow`. Pi notifies you when the keyword is detected.
 
 Key `ctx` API:
 
@@ -211,12 +225,17 @@ workflows that should continue with partial results.
 
 ---
 
+## Bundled workflows
+
+`/deep-research <question>` — ships in the package, installed to `~/.pi/agent/workflows/` on first session start. Fans out web research across 4–6 angles, cross-checks uncertain claims, returns a cited Markdown report.
+
+`/codebase-audit` — same self-install, audits a codebase for issues using parallel analysis agents.
+
+---
+
 ## Parity gaps vs Claude Code (v1)
 
-- Use `/workflow-name` not a `workflow` keyword
 - No `/effort ultracode` modifier (v2)
-- `crypto.subtle` not available (v2)
-- Synchronous infinite loops wedge the event loop
-- `acceptEdits` not supported — inherits parent allowlist
+- Async infinite loops wedge the event loop (worker-threads in progress)
 
 Full list: `docs/parity-gaps.md` in the package.
