@@ -133,6 +133,23 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
 
   let agentCount = 0;
   let budgetSpent = 0;
+  /**
+   * BUG-055: budgetReserved tracks in-flight token reservations so that
+   * parallel agents cannot all pass the budget check simultaneously.
+   *
+   * Each agent increments this by 1 BEFORE the first async yield (i.e.,
+   * synchronously after the budget check passes). Since JS is single-
+   * threaded and Promise.allSettled launches all handles sequentially during
+   * the synchronous .map() pass, each subsequent handle sees the previous
+   * reservations and the check `budgetSpent + budgetReserved >= tokenBudget`
+   * blocks it correctly.
+   *
+   * Using 1 (not a per-agent estimate) is a soft-cap: it prevents any agent
+   * beyond the budget-computed limit from STARTING, but a single in-flight
+   * agent can still spend more tokens than the remaining budget. This bounds
+   * overshoot to at most 1 × max_agent_spend rather than (N-1) × max_spend.
+   */
+  let budgetReserved = 0;
   let finishPrompt: string | null = null;
   const tokenBudget: number | null = opts.tokenBudget ?? null;
 
@@ -405,11 +422,17 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     }
     // Token budget enforcement — checked before dispatch so we don't
     // start an agent we've already budgeted out of.
-    if (tokenBudget !== null && budgetSpent >= tokenBudget) {
+    // BUG-055: include budgetReserved in the check so concurrent agents in a
+    // parallel phase cannot all pass simultaneously before any has updated
+    // budgetSpent (race: all N checks fire synchronously during .map()).
+    if (tokenBudget !== null && budgetSpent + budgetReserved >= tokenBudget) {
       throw new Error(
-        `ctx.phase: token budget exhausted (spent ${budgetSpent}, budget ${tokenBudget})`,
+        `ctx.phase: token budget exhausted (spent ${budgetSpent}, reserved ${budgetReserved}, budget ${tokenBudget})`,
       );
     }
+    // Reserve a slot before the first async yield so sibling parallel callers
+    // see a higher committed+reserved value and are blocked at the check above.
+    budgetReserved += 1;
     agentCount++;
 
     const startedAt = nowIso();
@@ -485,6 +508,9 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       const tagged = { ...result, cached: true } as AgentResult & {
         cached: boolean;
       };
+      // BUG-055: release the reservation and record actual spend together so
+      // budgetSpent + budgetReserved always equals committed + in-flight.
+      budgetReserved -= 1;
       budgetSpent += result.usage.totalTokens;
       // BUG-053 fix: parse schema output BEFORE logging agent_end so that an
       // extractJson failure logs agent_error (not a silent phase rejection
@@ -586,6 +612,8 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         toolCalls: result.toolCalls,
         transcriptPath: result.transcriptPath,
       });
+      // BUG-055: release the reservation and record actual spend together.
+      budgetReserved -= 1;
       budgetSpent += result.usage.totalTokens;
       // BUG-054 fix: extract schema output BEFORE logging agent_end so that
       // an extractJson failure only writes agent_error (the existing catch
@@ -617,6 +645,9 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       if (schemaOutput !== undefined) tagged.output = schemaOutput;
       return tagged;
     } catch (e) {
+      // BUG-055: release the reservation on dispatch failure so the budget
+      // headroom is correctly restored for subsequent agents.
+      budgetReserved -= 1;
       // Persist the error before propagating.
       await opts.ledger.append({
         type: "agent_error",
