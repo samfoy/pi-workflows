@@ -156,7 +156,7 @@ given path. Returns structured JSON.
 deep security/quality dive. Results cached by prompt hash + file hash.
 
 **Phase 3 — vote (3 agents, parallel):** each voter ranks the findings by
-severity via Borda count. The judge aggregates the ranking lists.
+severity via Borda count. A Borda-count aggregation in the workflow script combines the ranked lists (no judge agent — pure JS aggregation).
 
 **Phase 4 — summarise (1 agent):** takes the top-N findings and writes the
 final structured report.

@@ -286,9 +286,25 @@ export async function runSaveScript(
     };
   }
 
-  // git-add prompt — only if `.git` is present in the project root.
-  let gitAdded = false;
+  // .gitignore check — must run BEFORE the 'Add to git?' prompt so
+  // the user is informed (or the prompt is skipped) rather than
+  // silently failing after they answer 'y' (BUG-129).
+  let gitignoreWarned = false;
   if (found.hasGit) {
+    const gitignore = await opts.io.readGitIgnore(found.rootAbs);
+    if (gitignoreCoversPi(gitignore)) {
+      gitignoreWarned = true;
+      opts.notify?.(
+        ".gitignore ignores .pi/ — saved file will NOT be tracked by git.",
+        "warning",
+      );
+    }
+  }
+
+  // git-add prompt — only if `.git` is present and .gitignore doesn't
+  // already ignore .pi/ (no point prompting if git would ignore it).
+  let gitAdded = false;
+  if (found.hasGit && !gitignoreWarned) {
     const yes = await opts.ui.prompt(
       `Saved to ${actualTarget}. Add to git?`,
       ["y", "n"],
@@ -304,19 +320,6 @@ export async function runSaveScript(
           "warning",
         );
       }
-    }
-  }
-
-  // .gitignore warning.
-  let gitignoreWarned = false;
-  if (found.hasGit) {
-    const gitignore = await opts.io.readGitIgnore(found.rootAbs);
-    if (gitignoreCoversPi(gitignore)) {
-      gitignoreWarned = true;
-      opts.notify?.(
-        ".gitignore ignores .pi/ — saved file will NOT be tracked by git.",
-        "warning",
-      );
     }
   }
 

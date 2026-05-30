@@ -29,7 +29,6 @@
  */
 
 import { closeSync, fsyncSync, openSync, promises as fs, existsSync, readFileSync } from "node:fs";
-import { tmpdir as _tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 

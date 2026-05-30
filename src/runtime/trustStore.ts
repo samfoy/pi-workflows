@@ -260,17 +260,26 @@ async function addTrustUnlocked(
   scope: TrustScope,
 ): Promise<{ readonly path: string; readonly scope: TrustScope }> {
   // Read existing settings file (any keys, not just ours).
+  // Note: no existsSync guard — avoid TOCTOU race between the
+  // existence check and the subsequent async readFile (BUG-131).
+  // Instead, handle ENOENT in the catch block as "file absent".
   let parsed: Record<string, unknown> = {};
-  if (existsSync(path)) {
+  {
     let raw: string;
     try {
       raw = await fs.readFile(path, "utf-8");
     } catch (e) {
-      throw new TrustWriteError(path, "io", e);
+      if ((e as NodeJS.ErrnoException).code === "ENOENT") {
+        // File absent — start with empty settings (same as pre-existing
+        // behaviour when existsSync returned false).
+        raw = "";
+      } else {
+        throw new TrustWriteError(path, "io", e);
+      }
     }
-    if (raw.trim().length > 0) {
+    if (raw!.trim().length > 0) {
       try {
-        const j = JSON.parse(raw) as unknown;
+        const j = JSON.parse(raw!) as unknown;
         if (j && typeof j === "object" && !Array.isArray(j)) {
           parsed = j as Record<string, unknown>;
         } else {
