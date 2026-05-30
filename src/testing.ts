@@ -198,3 +198,18 @@ export async function runWorkflow(opts: RunWorkflowOptions): Promise<RunWorkflow
     }
   }
 }
+
+// ─── Convenience re-export ───────────────────────────────────────────────────
+
+/**
+ * sha256 of a prompt string — the same function the dispatcher uses to
+ * compute `promptHash`. Re-exported here so fixture builders can import
+ * both `runWorkflow` and `sha256` from the same module.
+ *
+ * @example
+ * ```ts
+ * import { runWorkflow, sha256 } from "@samfp/pi-workflows/testing";
+ * const fixtures = JSON.stringify({ agentId: "main", promptHash: sha256(prompt), result: { text: "ok" } });
+ * ```
+ */
+export { sha256 } from "./util/hash.js";

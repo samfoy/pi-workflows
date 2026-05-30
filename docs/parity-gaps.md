@@ -65,11 +65,17 @@ hits only happen WITHIN a single run unless the author preserves the
 runDir (e.g. via `--keep-runs`). Slice 14's `s` save-script extracts
 the cache for re-use.
 
-**Why deferred:** workflow scripts are author-versioned. A cross-run
-cache requires script-version-aware invalidation, which couples
-slice 8a's cache key derivation to slice 14's save format. Slice 11
-(resume) is the closest cousin and it does cross-run only WITHIN a
-single workflow run.
+**Partial mitigation (gap/ctx-memo):** `ctx.memo(key, fn, opts?)` was
+added as a cross-run memoization primitive that stores results in a
+shared `memo.jsonl` file keyed by `(scope, key)`. This gives authors
+a simple "skip re-running expensive agents across workflow runs" path
+without requiring the full script-version-aware cache invalidation
+infrastructure. See `src/runtime/ctxMemo.ts`.
+
+**Why still deferred (full cache):** workflow scripts are author-versioned.
+A true cross-run cache for every `ctx.phase` agent still requires
+script-version-aware invalidation, which couples slice 8a's cache key
+derivation to slice 14's save format.
 
 **Revisit trigger:** documented author workflow that would benefit
 (e.g. CI runs of the same audit workflow against PRs).

@@ -531,3 +531,61 @@ test("BUG-109: __pi_clone_into_ctx handles nested objects correctly (sibling re-
   assert.equal(result.xv, 42, "cloned.x.v must be 42");
   assert.equal(result.yv, 42, "cloned.y.v must be 42");
 });
+
+// ─── BUG-001 regression: await ctx.agent() must throw immediately ─────────
+
+test("BUG-001: await ctx.agent() throws TypeError (AgentHandle is not awaitable)", async () => {
+  // Without the fix, `await ctx.agent(prompt)` resolves immediately to the
+  // handle object — the agent never runs and result.text is undefined.
+  // With the fix, accessing `.then` on the handle throws TypeError so the
+  // await surfaces the error immediately.
+  const { signal } = fresh();
+  const host = hostReturning(null);
+  // Override the phase to never resolve (should not be reached anyway).
+  const frozenHost: RunCtxHost = {
+    ...host,
+    agent: () => ({ ok: true as const, value: { kind: 'agent' as const, id: 'x', prompt: 'p', opts: Object.freeze({}) } }),
+    phase: () => new Promise(() => { /* never resolves */ }),
+  };
+  const r = await runScript(
+    `
+      let threw = null;
+      try {
+        // This should throw, not silently return the handle.
+        const result = await ctx.agent("what is the capital of France?", { id: "geo" });
+        threw = null; // should not reach here
+      } catch (e) {
+        threw = e.message;
+      }
+      return threw;
+    `,
+    { signal, runCtxHost: frozenHost },
+  );
+  assert.ok(
+    typeof r.returnValue === "string" &&
+      r.returnValue.includes("AgentHandle is not awaitable"),
+    `expected "AgentHandle is not awaitable" error, got: ${JSON.stringify(r.returnValue)}`,
+  );
+});
+
+test("BUG-001: ctx.agent() used correctly via ctx.phase() still works", async () => {
+  const { signal } = fresh();
+  const stubText = "Paris";
+  const host: RunCtxHost = {
+    ...hostReturning(null),
+    phase: async () => ({
+      ok: true as const,
+      value: [{ text: stubText, usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 }, agentId: 'geo', durationMs: 0, cached: false, finishReason: 'stop' }],
+    }),
+  };
+  const r = await runScript(
+    `
+      const [result] = await ctx.phase("lookup", [
+        ctx.agent("what is the capital of France?", { id: "geo" }),
+      ]);
+      return result.text;
+    `,
+    { signal, runCtxHost: host },
+  );
+  assert.equal(r.returnValue, stubText, "result.text should be 'Paris'");
+});
