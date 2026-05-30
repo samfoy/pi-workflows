@@ -97,6 +97,7 @@ interface RunCtxHostInternal {
   log(message: unknown, level: unknown): RunCtxBridgeResult<null>;
   finishCallback(prompt: unknown): RunCtxBridgeResult<null>;
   getBudgetSpent(): number;
+  readonly tokenBudget: number | null;
 }
 
 /**
