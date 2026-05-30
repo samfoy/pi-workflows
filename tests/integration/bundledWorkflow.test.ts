@@ -94,13 +94,20 @@ function buildPrompts(cwd: string) {
       `      Be specific; cite line numbers.`,
   }));
 
-  const findingsJson = JSON.stringify(ALL_FINDINGS, null, 2);
+  // Workflow truncates to top 30 by severity before passing to voters.
+  const severityOrder: Record<string, number> = { high: 0, med: 1, low: 2 };
+  const totalCount = ALL_FINDINGS.length;
+  const topFindings = ALL_FINDINGS
+    .slice()
+    .sort((a, b) => (severityOrder[(a as any).severity] ?? 3) - (severityOrder[(b as any).severity] ?? 3))
+    .slice(0, 30);
+  const topFindingsJson = JSON.stringify(topFindings, null, 2);
   const votePrompt =
-    `Below are ${ALL_FINDINGS.length} audit findings. Rank-order the TOP 10\n` +
-    `      most critical for a code review. Consider severity, blast radius, fix\n` +
-    `      difficulty. Return JSON:\n` +
+    `Analyzing top ${topFindings.length} of ${totalCount} total findings.\n` +
+    `      Rank-order the TOP 10 most critical for a code review. Consider\n` +
+    `      severity, blast radius, fix difficulty. Return JSON:\n` +
     `      [{"rank": 1, "title": "...", "justification": "..."}, ...].\n` +
-    `      Findings:\n${findingsJson}`;
+    `      Findings:\n${topFindingsJson}`;
 
   // For summarize: the workflow takes top10Detail — after Borda count the
   // top findings will be ALL_FINDINGS (scores: MD5=28+27+26, Expiry=27+26+25,
