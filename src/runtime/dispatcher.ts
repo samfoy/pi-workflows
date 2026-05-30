@@ -360,6 +360,8 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
 
   // Subprocess timeout.
   const timeoutMs = opts.timeoutMs ?? 600_000;
+  // BUG-068: hoist killTimeoutHandle so every cleanup path can cancel it.
+  let killTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
   const timeoutHandle = setTimeout(() => {
     try {
       child.kill("SIGTERM");
@@ -367,15 +369,15 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
       // ignore
     }
     // Escalate to SIGKILL after a 5 s grace period if SIGTERM is ignored.
-    const killHandle = setTimeout(() => {
+    killTimeoutHandle = setTimeout(() => {
       try {
         child.kill("SIGKILL");
       } catch {
         // ignore
       }
     }, 5_000);
-    if (typeof (killHandle as { unref?: () => void }).unref === "function") {
-      (killHandle as unknown as { unref: () => void }).unref();
+    if (typeof (killTimeoutHandle as { unref?: () => void }).unref === "function") {
+      (killTimeoutHandle as unknown as { unref: () => void }).unref();
     }
   }, timeoutMs);
   if (typeof (timeoutHandle as { unref?: () => void }).unref === "function") {
@@ -401,6 +403,7 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
   // FIRST malformed line; we capture it for re-wrapping.
   if (!child.stdout) {
     clearTimeout(timeoutHandle);
+    if (killTimeoutHandle) { clearTimeout(killTimeoutHandle); killTimeoutHandle = null; }
     await exitPromise;
     await new Promise<void>((resolve) => {
       tee.once("close", resolve);
@@ -432,6 +435,7 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
     } else {
       // Unexpected — clean up + rethrow.
       clearTimeout(timeoutHandle);
+      if (killTimeoutHandle) { clearTimeout(killTimeoutHandle); killTimeoutHandle = null; }
       try {
         child.kill("SIGTERM");
       } catch {
@@ -450,6 +454,7 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
   }
 
   clearTimeout(timeoutHandle);
+  if (killTimeoutHandle) { clearTimeout(killTimeoutHandle); killTimeoutHandle = null; }
   await exitPromise;
   // Await tee close so the transcript file is fully flushed before
   // any caller reads `result.transcriptPath`.
@@ -465,7 +470,7 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
   // outlive the `exit` event, so wait for stderr's `end` before
   // declaring the agent done.
   await new Promise<void>((resolve) => {
-    if (stderrTee.writableEnded) {
+    if (stderrTee.writableFinished) {
       resolve();
       return;
     }
