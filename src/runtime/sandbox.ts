@@ -680,6 +680,15 @@ export class Sandbox {
       );
     }
 
+    // BUG-022: remove __pi_build_ctx and __pi_make_signal before user code
+    // runs. They were needed during the bind phase but user code must not
+    // be able to call them to create a second wired ctx (budget bypass).
+    vm.runInContext(
+      "delete globalThis.__pi_build_ctx; delete globalThis.__pi_make_signal;",
+      this.context,
+      { filename: "pi-workflows-cleanup.js" },
+    );
+
     // Wire host signal → Context signal.
     const hostSignal = this.opts.signal;
     const fireCtxAbort = (): void => {
@@ -910,6 +919,10 @@ function minimalCtxLiteral(): string {
 function buildInitScript(nonce: string): string {
   return [
     "'use strict';",
+    // BUG-023: IIFE makes all helper functions closure-local so they are
+    // NOT properties of globalThis and user code cannot overwrite them
+    // (e.g. poisoning __pi_unwrap to suppress error propagation).
+    "(function() {",
     `const __bridge = globalThis[${JSON.stringify(nonce)}];`,
     `delete globalThis[${JSON.stringify(nonce)}];`,
     "const __h = __bridge.timer;",
@@ -1361,6 +1374,7 @@ function buildInitScript(nonce: string): string {
     "Object.freeze(Object.getPrototypeOf(async function*(){}));",
     "// Note: globalThis itself is frozen at the very end of init by",
     "// finalFreeze() — host-side, after we install console+crypto+webapis.",
+    "}());",
   ].join("\n");
 }
 
