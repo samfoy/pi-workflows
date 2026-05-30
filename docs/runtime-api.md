@@ -84,13 +84,27 @@ interface AgentOpts {
   thinking?: string;     // "on" | "off" | "auto"
   timeoutMs?: number;    // per-agent timeout
   cacheKeyExtra?: unknown; // additional cache key seed
+  schema?: Record<string, unknown>; // JSON Schema for structured output
   [extra: string]: unknown;
 }
 ```
 
-**Example:**
+**`schema`:** JSON Schema for structured output. When provided, the agent
+returns parsed JSON in `result.output`. The schema is injected into the
+agent's system prompt as a constraint. Example:
+
 ```js
-const h = ctx.agent("List all TODO comments in this file", { id: "todos" });
+const [h] = await ctx.phase("extract", [
+  ctx.agent("List the top 3 issues found", {
+    id: "issues",
+    schema: {
+      type: "object",
+      properties: { issues: { type: "array", items: { type: "string" } } },
+      required: ["issues"],
+    },
+  }),
+]);
+const { issues } = h.output; // typed parsed object
 ```
 
 **Cache key:** `sha256(prompt + JSON.stringify(cacheKeyExtra ?? ""))`. Stable
@@ -317,6 +331,33 @@ For semantic consensus, use `ctx.vote` with a judge agent.
 
 ---
 
+## `ctx.budget` — Token budget tracker
+
+**Type:** read-only object (frozen)
+
+```ts
+{
+  total: number | null;  // configured budget, or null if uncapped
+  spent(): number;       // tokens consumed so far (sum of agent totalTokens)
+  remaining(): number;   // remaining tokens, or Infinity when total is null
+}
+```
+
+Updated after each agent completes. Use before launching expensive phases to
+avoid blowing past a budget.
+
+**Example — gating an expensive phase:**
+```js
+ctx.log(`tokens spent so far: ${ctx.budget.spent()}`);
+if (ctx.budget.remaining() < 50_000) {
+  ctx.log("Budget nearly exhausted — skipping deep analysis", { level: "warn" });
+} else {
+  const results = await ctx.phase("deep-analysis", handles);
+}
+```
+
+---
+
 ## `ctx.parallel(items, fn, opts?)` — Map-phase
 
 **Signature:**
@@ -344,6 +385,48 @@ const results = await ctx.parallel(files, (file) =>
 interface ParallelOpts {
   phaseName?: string; // default: "parallel"
 }
+```
+
+---
+
+## `ctx.pipeline(items, ...stages)` — Sequential stages, concurrent items
+
+**Signature:**
+```ts
+pipeline<T, R>(
+  items: T[],
+  ...stages: Array<(prev: unknown, originalItem: T, index: number) => unknown>,
+): Promise<R[]>
+```
+
+Runs items through sequential stages. Items are processed concurrently;
+stages within a single item are sequential. If a stage returns an
+`AgentHandle`, it is automatically executed via a single-agent phase —
+the resolved `AgentResult` is passed to the next stage.
+
+**Stage callback signature:**
+```ts
+(prevResult: unknown, originalItem: T, index: number) => unknown
+// prevResult — result from the previous stage (or the raw item for stage 0)
+// originalItem — the original item from the input array (unchanged)
+// index — position in items[]
+// return: any value, a Promise, or an AgentHandle (auto-dispatched)
+```
+
+**Example:**
+```js
+const files = ["src/auth.ts", "src/db.ts", "src/api.ts"];
+const reports = await ctx.pipeline(
+  files,
+  // Stage 0: read the file (agent auto-dispatched)
+  (file) => ctx.agent(`Read and summarise ${file}`, { id: `read-${file}` }),
+  // Stage 1: fix issues found in stage 0 (AgentResult passed as prevResult)
+  (readResult, file) => ctx.agent(
+    `Fix issues in ${file} based on: ${readResult.text}`,
+    { id: `fix-${file}` },
+  ),
+);
+// reports[i].text = fix-agent response for files[i]
 ```
 
 ---
