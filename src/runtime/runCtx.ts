@@ -455,12 +455,15 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       /* swallow */
     }
 
+    // BUG-101: strip execution-only fields (timeoutMs) before hashing so
+    // innocent timeout changes don't invalidate valid cache entries.
+    const { timeoutMs: _omitTimeout, ...cacheableOpts } = handle.opts as Record<string, unknown> & { timeoutMs?: unknown };
     const key = cacheKey({
       workflowSourceSha256: opts.workflowSourceSha256,
       phaseName,
       agentId: handle.id,
       prompt: handle.prompt,
-      opts: handle.opts,
+      opts: cacheableOpts,
     });
 
     // Extract schema from opts (used for prompt injection + output parsing).
@@ -510,8 +513,9 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       };
       // BUG-055: release the reservation and record actual spend together so
       // budgetSpent + budgetReserved always equals committed + in-flight.
+      // BUG-100: cache hits consume no real tokens — skip budgetSpent
+      // accumulation so cache replays cannot exhaust the token budget.
       budgetReserved -= 1;
-      budgetSpent += result.usage.totalTokens;
       // BUG-053 fix: parse schema output BEFORE logging agent_end so that an
       // extractJson failure logs agent_error (not a silent phase rejection
       // against a ledger that already shows agent_end success).
