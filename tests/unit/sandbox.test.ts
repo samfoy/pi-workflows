@@ -422,6 +422,8 @@ function hostReturning(value: unknown): RunCtxHost {
     checkpoint: async () => ok(false),
     report: () => ok(null),
     gate: async () => ok(true),
+    memo_check: async () => ok({ hit: false as const }),
+    memo_set: async () => ok(null),
   };
 }
 

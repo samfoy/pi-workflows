@@ -105,6 +105,15 @@ interface RunCtxHostInternal {
   /** Improvement 7: structured report event. */
   report(eventType: unknown, data?: unknown): RunCtxBridgeResult<null>;
   gate(message: unknown, opts?: unknown): Promise<RunCtxBridgeResult<boolean>>;
+  memo_check(
+    key: string,
+    opts?: unknown,
+  ): Promise<RunCtxBridgeResult<{ hit: boolean; value?: unknown }>>;
+  memo_set(
+    key: string,
+    value: unknown,
+    opts?: unknown,
+  ): Promise<RunCtxBridgeResult<null>>;
 }
 
 /**
@@ -1299,6 +1308,7 @@ function buildInitScript(nonce: string): string {
     "      }),",
     "      finishCallback: function () { throw new Error('ctx.finishCallback: no runtime (slice-2 stub)'); },",
     "      gate:           function () { throw new Error('ctx.gate: no runtime (slice-2 stub)'); },",
+    "      memo:           function () { throw new Error('ctx.memo: no runtime (slice-2 stub)'); },",
     "      budget: Object.freeze({ total: null, spent: function() { return 0; }, remaining: function() { return Infinity; } }),",
     "      run: Object.freeze({ id: 'wf-stub', workflowName: 'stub', startedAt: '1970-01-01T00:00:00Z', cwd: '.', resumed: false }),",
     "      input: '',",
@@ -1318,6 +1328,15 @@ function buildInitScript(nonce: string): string {
     "      cache:          cache,",
     "      finishCallback: wrapHostSync(__runCtxHost.finishCallback),",
     "      gate:           wrapHostAsync(__runCtxHost.gate),",
+    "      memo:           async function(key, fn, opts) {",
+    "        if (typeof key !== 'string') throw new TypeError('ctx.memo: key must be a string');",
+    "        if (typeof fn !== 'function') throw new TypeError('ctx.memo: fn must be a function');",
+    "        var checkResult = __pi_unwrap(await __runCtxHost.memo_check(key, opts));",
+    "        if (checkResult.hit) return checkResult.value;",
+    "        var value = await fn();",
+    "        __pi_unwrap(await __runCtxHost.memo_set(key, value, opts));",
+    "        return value;",
+    "      },",
     "      run:            Object.freeze(runMeta),",
     "      input:          input,",
     "      signal:         signal,",

@@ -44,6 +44,7 @@ import type {
   Semaphore,
 } from "../types/internal.js";
 import { CacheStore } from "./cache.js";
+import { getMemoStore } from "./memoStore.js";
 import { LedgerWriter, log as ledgerLog } from "./ledger.js";
 import { agentErrorFromException } from "./ledger.js";
 import { dispatchAgent, recoverFromTranscript } from "./dispatcher.js";
@@ -1010,6 +1011,55 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       } catch {
         /* emission failures must not abort the run */
       }
+  // ─── ctx.memo (gap/ctx-memo) ─────────────────────────────────────────
+  // memo_check: check the persistent memo store for a hit.
+  // memo_set:   persist a value after a sandbox-side fn() produces it.
+  // Both operate on ~/ (global) or per-project JSONL stores.
+  const DEFAULT_MEMO_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+  async function memo_check(
+    key: unknown,
+    optsArg?: unknown,
+  ): Promise<RunCtxBridgeResult<{ hit: boolean; value?: unknown }>> {
+    try {
+      requireString(key, "ctx.memo: key");
+      const { scope, ttlMs } = parseMemoOpts(optsArg);
+      const store = await getMemoStore(scope, scope === "project" ? opts.cwd : undefined);
+      const keyHash = sha256(key as string);
+      void ttlMs; // checked at set-time; check here is informational only
+      if (!store.has(keyHash)) {
+        return { ok: true, value: { hit: false } };
+      }
+      const entry = store.get(keyHash);
+      if (entry === null) {
+        return { ok: true, value: { hit: false } };
+      }
+      return { ok: true, value: { hit: true, value: entry.value } };
+    } catch (e) {
+      return { ok: false, error: captureError(e) };
+    }
+  }
+
+  async function memo_set(
+    key: unknown,
+    value: unknown,
+    optsArg?: unknown,
+  ): Promise<RunCtxBridgeResult<null>> {
+    try {
+      requireString(key, "ctx.memo: key");
+      // Eagerly check JSON-cloneability — better error site than disk.
+      try {
+        JSON.stringify(value);
+      } catch (cycErr) {
+        throw new TypeError(
+          `ctx.memo: value is not JSON-serializable (${(cycErr as Error).message})`,
+        );
+      }
+      const { scope, ttlMs } = parseMemoOpts(optsArg);
+      const store = await getMemoStore(scope, scope === "project" ? opts.cwd : undefined);
+      const keyHash = sha256(key as string);
+      const cloned: unknown = JSON.parse(JSON.stringify(value));
+      await store.set(keyHash, cloned, ttlMs);
       return { ok: true, value: null };
     } catch (e) {
       return { ok: false, error: captureError(e) };
@@ -1089,6 +1139,23 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     } catch (e) {
       return { ok: false, error: captureError(e) };
     }
+  function parseMemoOpts(optsArg: unknown): { scope: "global" | "project"; ttlMs: number } {
+    const scope: "global" | "project" =
+      optsArg !== null &&
+      typeof optsArg === "object" &&
+      (optsArg as Record<string, unknown>).scope === "project"
+        ? "project"
+        : "global";
+    let ttlMs = DEFAULT_MEMO_TTL_MS;
+    if (
+      optsArg !== null &&
+      typeof optsArg === "object" &&
+      typeof (optsArg as Record<string, unknown>).ttl === "number"
+    ) {
+      const raw = (optsArg as Record<string, unknown>).ttl as number;
+      if (raw > 0) ttlMs = raw;
+    }
+    return { scope, ttlMs };
   }
 
   const host: RunCtxHost = {
@@ -1108,6 +1175,8 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     checkpoint: checkpointFn,
     report: reportFn,
     gate,
+    memo_check,
+    memo_set,
   };
   return {
     host,
