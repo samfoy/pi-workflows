@@ -33,7 +33,7 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { closeSync, fsyncSync, openSync, promises as fs } from "node:fs";
 import { join } from "node:path";
 
 import type {
@@ -233,6 +233,8 @@ export async function writeResultFile(
   const tmp = join(runDirAbs, `result.json.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`);
   const body = JSON.stringify(payload, null, 2) + "\n";
   await fs.writeFile(tmp, body, "utf8");
+  const fd = openSync(tmp, "r+");
+  try { fsyncSync(fd); } finally { closeSync(fd); }
   await fs.rename(tmp, target);
 }
 
