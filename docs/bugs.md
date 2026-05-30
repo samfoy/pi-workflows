@@ -1332,7 +1332,7 @@ In dispose(), call opts.done() after cleanup() (guarded by the same idempotency 
 
 ---
 
-## BUG-073 — phaseCursor not clamped when running-phase agent list shrinks during debounced registry update
+## BUG-073 ✅ FIXED — phaseCursor not clamped when running-phase agent list shrinks during debounced registry update
 
 **Area:** overlay / TUI
 **Severity:** medium
@@ -1349,7 +1349,7 @@ In the debouncedRender timeout callback, after clamping cursor, also clamp phase
 
 ---
 
-## BUG-074 — buildRender mutates view and openedAgentId as side effects, leaving openedRunId and phaseCursor stale on fallback
+## BUG-074 ✅ FIXED — buildRender mutates view and openedAgentId as side effects, leaving openedRunId and phaseCursor stale on fallback
 
 **Area:** overlay / TUI
 **Severity:** medium
