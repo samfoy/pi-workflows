@@ -1264,7 +1264,7 @@ Hoist `killHandle` to a variable in the outer `dispatchAgent` scope (e.g. `let k
 
 ---
 
-## BUG-069 — runLock: TOCTOU window between O_EXCL create and writeSync allows concurrent process to steal the lock
+## BUG-069 ✅ FIXED — runLock: TOCTOU window between O_EXCL create and writeSync allows concurrent process to steal the lock
 
 **Area:** runtime / runLock
 **Severity:** low
