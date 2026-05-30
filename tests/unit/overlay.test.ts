@@ -30,7 +30,9 @@ import {
   mountOverlay,
   __resetOverlayOpenForTest,
   __isOverlayOpenForTest,
+  type OverlayHandleForTest,
 } from "../../src/runtime/overlay.js";
+import { PhaseRegistry } from "../../src/runtime/phaseRegistry.js";
 import type { Run, RunTerminalInfo } from "../../src/runManager.js";
 
 function fakeRun(opts: {
@@ -274,6 +276,131 @@ test("F4: `p` toggles pause↔resume by current state", async () => {
   assert.equal(pauseCalls, 1);
   assert.equal(resumeCalls, 1);
   mount!.done();
+});
+
+test("BUG-007: dispose() cleans up phase subscription, appendEntry shim, and debounce timers", async () => {
+  const pi = makeFakePi();
+  const registry = new ActiveRunsRegistry();
+  const phaseRegistry = new PhaseRegistry();
+
+  // Track phase-listener subscription count — a leaked unsubPhase would
+  // leave the registry with a listener pointing at dead state.
+  let phaseListenerFired = 0;
+  const origPhaseSubscribe = phaseRegistry.subscribe.bind(phaseRegistry);
+  // @ts-ignore -- spy wrapper
+  phaseRegistry.subscribe = (listener: (rid: string) => void) => {
+    const unsub = origPhaseSubscribe(listener);
+    return () => {
+      phaseListenerFired++; // counts unsubscribe calls
+      unsub();
+    };
+  };
+
+  // Capture the original appendEntry so we can check it's restored.
+  const originalAppendEntry = pi.appendEntry;
+
+  let capturedCtx: NonNullable<Parameters<typeof mountOverlay>[0]["ctx"]> | null = null;
+  pi.registerCommand("bug007", {
+    handler: async (_a, c) => {
+      capturedCtx = c as unknown as typeof capturedCtx;
+    },
+  });
+  await pi.invokeCommand("bug007", "");
+
+  await mountOverlay({
+    pi,
+    ctx: capturedCtx!,
+    registry,
+    phaseRegistry,
+    forceTTY: true,
+  });
+  const mount = pi.overlayMounts[0];
+  assert.ok(mount, "overlay must have mounted");
+
+  // Verify appendEntry was shimmed by the overlay.
+  assert.notEqual(
+    pi.appendEntry,
+    originalAppendEntry,
+    "appendEntry should be shimmed while overlay is open",
+  );
+
+  // dispose() — simulates pi-tui forced teardown without user pressing Esc.
+  mount!.component.dispose?.();
+  mount!.done();
+  // _overlayOpen is reset in the .finally() on the customApi promise chain
+  // (fakeCustom async → catch → finally = 3 microtask layers). Drain all.
+  await new Promise((r) => setTimeout(r, 0));
+
+  // 1. Phase subscription must have been cleaned up (unsubPhase called).
+  assert.equal(
+    phaseListenerFired,
+    1,
+    "unsubPhase must be called exactly once on dispose()",
+  );
+
+  // 2. appendEntry shim must be restored.
+  assert.equal(
+    pi.appendEntry,
+    originalAppendEntry,
+    "pi.appendEntry must be restored to original after dispose()",
+  );
+
+  // 3. _overlayOpen must be cleared (no stuck overlay via BUG-072).
+  assert.equal(
+    __isOverlayOpenForTest(),
+    false,
+    "_overlayOpen must be false after dispose()",
+  );
+});
+
+test("BUG-007: cleanup() is idempotent — dispose() then close() does not double-unsubscribe", async () => {
+  const pi = makeFakePi();
+  const registry = new ActiveRunsRegistry();
+  const phaseRegistry = new PhaseRegistry();
+
+  let unsubPhaseCallCount = 0;
+  const origPhaseSubscribe = phaseRegistry.subscribe.bind(phaseRegistry);
+  // @ts-ignore -- spy wrapper
+  phaseRegistry.subscribe = (listener: (rid: string) => void) => {
+    const unsub = origPhaseSubscribe(listener);
+    return () => {
+      unsubPhaseCallCount++;
+      unsub();
+    };
+  };
+
+  let capturedCtx: NonNullable<Parameters<typeof mountOverlay>[0]["ctx"]> | null = null;
+  pi.registerCommand("bug007b", {
+    handler: async (_a, c) => {
+      capturedCtx = c as unknown as typeof capturedCtx;
+    },
+  });
+  await pi.invokeCommand("bug007b", "");
+
+  let handle: OverlayHandleForTest | null = null;
+  await mountOverlay({
+    pi,
+    ctx: capturedCtx!,
+    registry,
+    phaseRegistry,
+    forceTTY: true,
+    onMounted: (api) => { handle = api; },
+  });
+  const mount = pi.overlayMounts[0];
+  assert.ok(mount, "overlay must have mounted");
+  assert.ok(handle, "onMounted callback must fire");
+
+  // Simulate Esc (user closes) then dispose() (pi-tui also tears down).
+  (handle as OverlayHandleForTest).close();
+  mount!.done();
+  mount!.component.dispose?.();
+
+  // unsubPhase must fire exactly once despite double close.
+  assert.equal(
+    unsubPhaseCallCount,
+    1,
+    "unsubPhase must be called exactly once even when close() and dispose() both run",
+  );
 });
 
 test("disabled hotkey on terminal run is a silent noop (F1)", async () => {
