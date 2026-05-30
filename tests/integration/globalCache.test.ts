@@ -179,3 +179,18 @@ test("globalCache: modified script sha256 → cache miss (different directory)",
     rmSync(tmpWfDir, { recursive: true, force: true });
   }
 });
+
+test("production call sites: workflowCmd.ts and index.ts both set enableGlobalCache: true", () => {
+  // Static regression guard — prevents accidentally dropping the flag from
+  // either production startWorkflowRun call site.
+  const cmdSrc = readFileSync(join(PKG_ROOT, "src/commands/workflowCmd.ts"), "utf8");
+  assert.ok(
+    cmdSrc.includes("enableGlobalCache: true"),
+    "workflowCmd.ts startWorkflowRun call must set enableGlobalCache: true",
+  );
+  const indexSrc = readFileSync(join(PKG_ROOT, "src/index.ts"), "utf8");
+  assert.ok(
+    indexSrc.includes("enableGlobalCache: true"),
+    "index.ts write_workflow tool startWorkflowRun call must set enableGlobalCache: true",
+  );
+});

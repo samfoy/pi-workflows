@@ -58,29 +58,29 @@ externally. That re-architecture is deferred to v2.
 
 **Workaround for async loops:** SIGINT pi from another terminal.
 
-## v1 deferred — true cross-run cache
+## ✅ FIXED — true cross-run cache
 
 **Trigger:** PRD §6.3 + slice 3.
 
-**v1 behavior:** `cache.jsonl` lives under each run's directory. Cache
-hits only happen WITHIN a single run unless the author preserves the
-runDir (e.g. via `--keep-runs`). Slice 14's `s` save-script extracts
-the cache for re-use.
+**Fixed:** `CacheStore.openGlobal(scriptSha256)` opens a shared cache at
+`~/.pi/agent/workflows/global-cache/<sha16>/cache.jsonl` keyed by the first
+16 hex chars of the workflow script's sha256. Any change to the workflow
+source produces a different directory — natural cache invalidation with no
+explicit versioning bookkeeping. Both production call sites (`workflowCmd.ts`
+and the `write_workflow` tool path in `index.ts`) now pass `enableGlobalCache: true`
+so global cache is on by default for all workflow runs. The per-run
+`runCtx.ts` cache lookup checks the global store first, then falls back to
+the per-run store. Cache writes go to both. Tests: `tests/integration/globalCache.test.ts`
+(cold start, hit, disabled, sha256-invalidation).
 
-**Partial mitigation (gap/ctx-memo):** `ctx.memo(key, fn, opts?)` was
-added as a cross-run memoization primitive that stores results in a
-shared `memo.jsonl` file keyed by `(scope, key)`. This gives authors
-a simple "skip re-running expensive agents across workflow runs" path
-without requiring the full script-version-aware cache invalidation
-infrastructure. See `src/runtime/ctxMemo.ts`.
+**Partial mitigation preserved:** `ctx.memo(key, fn, opts?)` remains available
+as an author-controlled cross-run memoization primitive with TTL and scope
+controls — it provides finer-grained control than the automatic global cache.
+See `src/runtime/memoStore.ts`.
 
-**Why still deferred (full cache):** workflow scripts are author-versioned.
-A true cross-run cache for every `ctx.phase` agent still requires
-script-version-aware invalidation, which couples slice 8a's cache key
-derivation to slice 14's save format.
-
-**Revisit trigger:** documented author workflow that would benefit
-(e.g. CI runs of the same audit workflow against PRs).
+**Why previously deferred:** the original concern was coupling cache key
+derivation to save format for script-version-aware invalidation. The sha256-
+based directory approach solves this cleanly without that coupling.
 
 ## Author-API alignment (slice 9 update)
 

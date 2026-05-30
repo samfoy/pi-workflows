@@ -136,6 +136,10 @@ export function registerWorkflowCommands(
           const run = await startWorkflowRun(file, args, {
             approval,
             emitBanner,
+            // Enable cross-run agent result reuse keyed by script sha256.
+            // Natural cache invalidation: any change to the workflow source
+            // produces a different sha256 → different global cache dir.
+            enableGlobalCache: true,
             // Slice 13/F3: register the live Run handle into the
             // per-process active-runs registry so the overlay's hotkey
             // wiring (`p`/`x`/`r`) and `/workflows kill` find it.

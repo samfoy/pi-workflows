@@ -113,6 +113,7 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
         cwd: sessionCwd,
         preApproved: true,
         activeRuns: getActiveRuns(),
+        enableGlobalCache: true,
       });
     },
   });
