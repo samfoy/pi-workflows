@@ -410,6 +410,9 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
       tee.once("finish", resolve);
       tee.end();
     });
+    // BUG-029 fix: close stderrTee on this early-exit path to avoid leaking
+    // the file descriptor when child.stderr is non-null.
+    stderrTee.end();
     if (wrapperPath) await removeParentDeathWrapper(wrapperPath);
     if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
     throw new AgentSubprocessError({

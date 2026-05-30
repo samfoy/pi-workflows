@@ -606,13 +606,19 @@ export class Sandbox {
    *   - AbortError if the run signal fires before/during compile.
    */
   async runScript(source: string): Promise<SandboxResult> {
+    // BUG-024 fix: record log cursor so we return only logs from THIS call,
+    // not all logs accumulated since construction.
+    const logStart = this.logSink.length;
     if (this.disposed) {
       throw violation("init-script-failed", "sandbox already disposed");
     }
     if (this.opts.signal.aborted) {
-      throw new (vm.runInContext("Error", this.context) as ErrorConstructor)(
+      const e = new (vm.runInContext("Error", this.context) as ErrorConstructor)(
         "aborted before run",
       );
+      // BUG-025 fix: set name='AbortError' to match raceWithAbort() output.
+      Object.defineProperty(e, 'name', { value: 'AbortError', configurable: true, writable: true, enumerable: false });
+      throw e;
     }
 
     const t0 = Date.now();
@@ -753,7 +759,8 @@ export class Sandbox {
     const durationMs = Date.now() - t0;
     return {
       returnValue,
-      log: this.logSink.slice(),
+      // BUG-024 fix: slice from logStart so only this call's logs are returned.
+      log: this.logSink.slice(logStart),
       durationMs,
     };
   }
