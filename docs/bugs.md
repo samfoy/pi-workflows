@@ -469,7 +469,7 @@ Wrap the compile+run+raceWithAbort region in a try/finally that calls hostSignal
 
 ---
 
-## BUG-022 — __pi_build_ctx and __pi_make_signal left on globalThis throughout script execution — user code can create rogue ctx objects accessing the host bridge
+## BUG-022 ✅ FIXED — __pi_build_ctx and __pi_make_signal left on globalThis throughout script execution — user code can create rogue ctx objects accessing the host bridge
 
 **Area:** sandbox
 **Severity:** high
@@ -486,7 +486,7 @@ After the bind script runs (and ctx is captured), run a small cleanup script via
 
 ---
 
-## BUG-023 — Init-script function declarations (wrapHostAsync, __pi_unwrap, etc.) become globalThis properties — user code can overwrite __pi_unwrap to bypass ctx method error handling
+## BUG-023 ✅ FIXED — Init-script function declarations (wrapHostAsync, __pi_unwrap, etc.) become globalThis properties — user code can overwrite __pi_unwrap to bypass ctx method error handling
 
 **Area:** sandbox
 **Severity:** medium
