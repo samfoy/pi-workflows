@@ -301,6 +301,9 @@ export class ActiveRunsRegistry {
         const d = entry.data;
         if (!d.runId) return;
         const prior = this.#summaries.get(d.runId);
+        // BUG-071: guard against duplicate/out-of-order entries overwriting
+        // a correct terminal summary, consistent with the started/transitioned cases.
+        if (prior && isTerminalState(prior.state)) return;
         const next: RunSummary = {
           runId: d.runId,
           workflowName: d.workflowName ?? prior?.workflowName ?? "<unknown>",
