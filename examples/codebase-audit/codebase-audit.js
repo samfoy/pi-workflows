@@ -23,6 +23,50 @@ export const meta = { name: 'codebase-audit', description: 'Audit a codebase for
  */
 
 export default async function main(ctx, input) {
+  // ─── BUG-W01 fix: robust JSON extractor ────────────────────────────────────
+  //
+  // Agents frequently wrap JSON in markdown fences or add prose before/after
+  // the JSON block. A simple .match() regex fails when agents emit preamble
+  // like "Here are the areas:" — the match may anchor on a partial nested array
+  // or miss the outer array entirely.
+  //
+  // Fix: scan for the first opening brace/bracket, then track depth to extract
+  // the outermost balanced JSON structure. Uses char codes throughout to avoid
+  // literal { } in string literals — the sandbox's shape-B brace-walker is a
+  // simple counter that doesn't track strings, so brace literals in strings
+  // would corrupt its depth count and cause "braces unbalanced" errors.
+  //
+  // Char code reference: 123={ 125=} 91=[ 93=] 92=\ 34="
+  function extractJsonFromText(text) {
+    if (typeof text !== 'string') return null;
+    let start = -1;
+    for (let i = 0; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      if (c === 123 || c === 91) { start = i; break; } // { or [
+    }
+    if (start === -1) return null;
+    const openerCode = text.charCodeAt(start);
+    const closerCode = openerCode === 123 ? 125 : 93;  // } or ]
+    let depth = 0;
+    let inString = false;
+    let escape = false;
+    for (let i = start; i < text.length; i++) {
+      const c = text.charCodeAt(i);
+      if (escape) { escape = false; continue; }
+      if (c === 92 && inString) { escape = true; continue; } // backslash
+      if (c === 34) { inString = !inString; continue; }       // double-quote
+      if (inString) continue;
+      if (c === openerCode) depth++;
+      else if (c === closerCode) {
+        depth--;
+        if (depth === 0) {
+          try { return JSON.parse(text.slice(start, i + 1)); } catch { return null; }
+        }
+      }
+    }
+    return null;
+  }
+
   ctx.log(`codebase-audit starting on ${ctx.run.cwd}; input="${input}"`);
 
   // ---- Phase 1: recon ----
@@ -37,12 +81,10 @@ export default async function main(ctx, input) {
     ),
   ]);
 
-  let areas;
-  try {
-    const match = recon.text.match(/\[[\s\S]*\]/);
-    areas = JSON.parse(match[0]);
-  } catch (e) {
-    throw new Error(`recon agent did not return parseable JSON: ${e.message}`);
+  // BUG-W01 fix: use extractJsonFromText() instead of bare regex.
+  const areas = extractJsonFromText(recon.text);
+  if (!Array.isArray(areas) || areas.length === 0) {
+    throw new Error(`recon agent did not return parseable JSON array`);
   }
   ctx.log(`recon: identified ${areas.length} areas to audit`);
   await ctx.cache.set("areas", areas);
@@ -62,12 +104,13 @@ export default async function main(ctx, input) {
 
   const allFindings = [];
   for (const a of analyses) {
-    try {
-      const m = a.text.match(/\[[\s\S]*\]/);
-      allFindings.push(...JSON.parse(m[0]));
-    } catch (e) {
+    // BUG-W01 fix: use extractJsonFromText() instead of bare regex.
+    const parsed = extractJsonFromText(a.text);
+    if (Array.isArray(parsed)) {
+      allFindings.push(...parsed);
+    } else {
       ctx.log(
-        { msg: "analyze agent returned unparseable JSON", agentId: a.agentId, err: e.message },
+        { msg: "analyze agent returned unparseable JSON", agentId: a.agentId },
         { level: "warn" },
       );
     }
@@ -110,10 +153,13 @@ export default async function main(ctx, input) {
   // first-voter preference.
   const scores = new Map();
   for (const v of votes) {
+    // BUG-W01 fix: use extractJsonFromText() for voter outputs too.
     try {
-      const ranked = JSON.parse(v.text.match(/\[[\s\S]*\]/)[0]);
-      for (const r of ranked) {
-        scores.set(r.title, (scores.get(r.title) || 0) + (11 - r.rank));
+      const ranked = extractJsonFromText(v.text);
+      if (Array.isArray(ranked)) {
+        for (const r of ranked) {
+          scores.set(r.title, (scores.get(r.title) || 0) + (11 - r.rank));
+        }
       }
     } catch { /* skip malformed voter — resilient aggregation */ }
   }

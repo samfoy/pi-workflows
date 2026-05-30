@@ -268,11 +268,11 @@ Remove the `if (input.view !== 'runs-list') return false` guards from the `p` an
 
 ---
 
-## BUG-W01 — Workflow: hunt agents silently dropped when output is not bare JSON
+## BUG-W01 ✅ FIXED — Workflow: hunt agents silently dropped when output is not bare JSON
 
 **Area:** hunt-bugs-loop workflow  
 **Severity:** Medium — bug findings silently lost, no user-visible error  
-**Location:** `~/.pi/agent/workflows/hunt-bugs-loop.js`, hunt phase parse loop  
+**Location:** `examples/hunt-bugs-loop/hunt-bugs-loop.js`, hunt phase parse loop  
 **Discovered:** iteration-1  
 
 ### Description
@@ -284,19 +284,23 @@ bugs I found:" before the JSON block. The result is silently discarded with a
 generic `ctx.log("Could not parse hunt result")`. 4 of 6 agents were dropped in
 iteration 1 — nearly all findings lost.
 
-### Suggested Fix
+### Fix Applied
 
-Use a more robust extractor: scan for the first `{` or `[`, then extract the
-outermost balanced JSON object/array from that point. Fall back to asking a
-triage agent to re-parse the raw text as a last resort.
+`examples/hunt-bugs-loop/hunt-bugs-loop.js` — `extractJsonFromText()` helper
+added (inline in the main function body). Scans for the first `{` or `[`,
+then walks forward tracking brace depth to extract the outermost balanced
+JSON object/array. Handles markdown fences, leading prose, and trailing
+content gracefully. Returns `null` (logged as warn) instead of silently
+discarding. Also applied to `examples/codebase-audit/codebase-audit.js`
+(recon, analyze, and voter output parsing).
 
 ---
 
-## BUG-W02 — Workflow: fix agents run in parallel against the same worktree
+## BUG-W02 ✅ FIXED — Workflow: fix agents run in parallel against the same worktree
 
 **Area:** hunt-bugs-loop workflow  
 **Severity:** High — concurrent edits to the same files cause conflicts and corrupt fixes  
-**Location:** `~/.pi/agent/workflows/hunt-bugs-loop.js`, fix phase  
+**Location:** `examples/hunt-bugs-loop/hunt-bugs-loop.js`, fix phase  
 **Discovered:** iteration-1  
 
 ### Description
@@ -307,12 +311,13 @@ race to read, edit, and write it — last writer wins, earlier fixes are silentl
 overwritten. The build gate may catch the corruption but by then the fixes are
 lost and git history is a mess.
 
-### Suggested Fix
+### Fix Applied
 
-Use `git worktree add /tmp/pi-fix-<bugId> -b fix/<bugId>` to give each fix
-agent an isolated working tree. After all fixes succeed, cherry-pick each branch
-back to main in order. If worktree setup is unavailable, fall back to
-`ctx.pipeline` (serial execution) which eliminates the race at the cost of speed.
+`examples/hunt-bugs-loop/hunt-bugs-loop.js` — Phase 3 uses `ctx.pipeline()`
+instead of a flat `ctx.phase()` fan-out, dispatching each bug as an independent
+item through the run semaphore. A `// BUG-W02 fix` comment block documents the
+tradeoff and points authors toward the strictly-serial for-loop alternative
+(or git-worktree isolation) for projects with high same-file bug density.
 
 ---
 
