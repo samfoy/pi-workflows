@@ -160,8 +160,52 @@ and phase structure tests.
 | Phase hangs forever | Agent timeout not set; check `opts.timeoutMs` | Add `timeoutMs` to `ctx.agent` opts |
 | `Cannot find workflow` | File not in a discovered directory | Move to `~/.pi/agent/workflows/` or `.pi/workflows/` |
 | `ReferenceError: require is not defined` | Workflow uses Node built-in | Use `ctx.agent` to delegate file/shell ops |
+| `ReferenceError: X is not defined` | Variable declared at module level | Move ALL `const`/`let` inside `export default function` body — only `export const meta` and `export default function` are valid at module level |
 | `AbortError` mid-run | User pressed `k` or pi shut down | Check `ctx.signal?.aborted` in loops |
 | TUI overlay shows `[remote]` | Run started in a different pi session | Kill/manage via `/workflows` commands |
+| `empty-stdout-failure` on agent crash | Agent prompt is too large | Don't interpolate full file contents into prompts — tell agents to read files themselves |
+
+---
+
+## Authoring patterns
+
+### File content — never inline, always delegate
+```js
+// WRONG — interpolating file content into downstream agent prompts
+// causes context crashes on large files
+const impl = await ctx.agent(`Fix this file:\n${fileContent}`)
+
+// RIGHT — tell agents to read files using their tools
+const impl = await ctx.agent(`Read /path/to/file, then fix the issue.`)
+```
+
+### Implement agents should write directly — skip a separate apply phase
+Give implement agents write tool access. They read → modify → verify in one turn.
+A separate "apply" agent that receives full file contents as interpolated strings will
+hit context limits and crash.
+
+### Scope ALL variables inside the function body
+```js
+// WRONG — module-level const silently unavailable inside the function
+const BASE = '/Users/me/project'
+export default async function(ctx) {
+  ctx.agent(`${BASE}/file.ts`) // ReferenceError: BASE is not defined
+}
+
+// RIGHT
+export default async function(ctx) {
+  const BASE = '/Users/me/project'
+  ...
+}
+```
+
+### Return structured data from recon agents
+End recon agent prompts with an explicit JSON format instruction. Downstream agents
+receive structured data, not prose — less parsing ambiguity.
+
+### Phase failure is an AggregateError
+`ctx.phase()` throws if any agent fails. Wrap phases in try/catch for resilient
+workflows that should continue with partial results.
 
 ---
 
