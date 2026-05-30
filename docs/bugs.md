@@ -1434,7 +1434,7 @@ In dispatchHotkey, add a view guard before returning open-gc-dialog: if (input.v
 
 ---
 
-## BUG-079 — writeResultFile tmp filename lacks random suffix — same-millisecond concurrent calls share identical tmp path
+## BUG-079 ✅ FIXED — writeResultFile tmp filename lacks random suffix — same-millisecond concurrent calls share identical tmp path
 
 **Area:** runtime / resultDelivery
 **Severity:** medium
