@@ -451,7 +451,7 @@ test("deliverRunResult: finishCallbackPrompt → pi.sendUserMessage AFTER card",
   assert.deepEqual(order, ["card", "user"]);
 });
 
-test("deliverRunResult: no finishCallback → no sendUserMessage call", async () => {
+test("deliverRunResult: no finishCallback → default trigger message sent", async () => {
   const pi = makeFakePi();
   const dir = mkdtempSync(join(tmpdir(), "pi-wf-deliver-nofc-"));
   await deliverRunResult({
@@ -469,7 +469,9 @@ test("deliverRunResult: no finishCallback → no sendUserMessage call", async ()
     approval: APPROVED_USER_ONCE,
     finishCallbackPrompt: null,
   });
-  assert.equal(pi.userMessages.length, 0);
+  // No finishCallback → always inject a default trigger so the agent resumes.
+  assert.equal(pi.userMessages.length, 1);
+  assert.match(pi.userMessages[0]!.prompt, /finished with outcome/);
 });
 
 test("deliverRunResult: persisted result is JSON-stringified for non-string values", async () => {
@@ -571,7 +573,7 @@ test("deliverRunResult: appendEntry-less pi build is OK (no throw)", async () =>
   assert.equal(pi.entries.length, 0);
 });
 
-test("deliverRunResult: sendUserMessage-less pi build → fallback annotation card", async () => {
+test("deliverRunResult: sendUserMessage-less pi build → fallback card with triggerTurn", async () => {
   const pi = makeFakePi();
   // Simulate pi build without sendUserMessage.
   (pi as { sendUserMessage?: unknown }).sendUserMessage = undefined;
@@ -591,11 +593,9 @@ test("deliverRunResult: sendUserMessage-less pi build → fallback annotation ca
     approval: APPROVED_TRUSTED,
     finishCallbackPrompt: "follow up please",
   });
-  // The first card is the result; the second is the fallback annotation.
+  // The first card is the result; the second is the fallback trigger card.
   const cards = pi.messages.filter((m) => m.customType === RESULT_CUSTOM_TYPE);
   assert.equal(cards.length, 2);
-  assert.match(
-    cards[1]!.content,
-    /\[finishCallback queued — pi build does not support sendUserMessage\]\nfollow up please/,
-  );
+  // Fallback card carries the finishCallback prompt directly (no wrapper text).
+  assert.match(cards[1]!.content, /follow up please/);
 });

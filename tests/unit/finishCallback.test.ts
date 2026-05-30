@@ -70,7 +70,7 @@ test("finishCallback: Run.terminated.finishCallbackPrompt mirrors ctx.finishCall
   assert.equal(info.finishCallbackPrompt, "hello LLM");
 });
 
-test("finishCallback: empty/missing prompt → no sendUserMessage call", async () => {
+test("finishCallback: empty/missing prompt → default trigger message sent", async () => {
   const { runsRoot, cwd, home, resolveRunDir } = makeTmp();
   const wfPath = join(runsRoot, "no-fc.workflow.js");
   writeFileSync(wfPath, `return "ok";`, "utf8");
@@ -99,9 +99,10 @@ test("finishCallback: empty/missing prompt → no sendUserMessage call", async (
     approval: info.approval,
     finishCallbackPrompt: info.finishCallbackPrompt,
   });
-  // Card sent, no sendUserMessage.
+  // Card sent AND a default trigger message so the agent always resumes.
   assert.ok(pi.messages.find((m) => m.customType === RESULT_CUSTOM_TYPE));
-  assert.equal(pi.userMessages.length, 0);
+  assert.equal(pi.userMessages.length, 1);
+  assert.match(pi.userMessages[0]!.prompt, /finished with outcome/);
 });
 
 test("finishCallback: ctx.finishCallback called twice — last value wins", async () => {

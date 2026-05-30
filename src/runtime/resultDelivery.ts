@@ -339,37 +339,41 @@ export async function deliverRunResult(opts: DeliverOptions): Promise<RunResultF
   // ledger flush AND after the card is sent. The ledger flush
   // happened upstream in runManager (`await ledger.flush()` runs
   // before this delivery is invoked).
-  if (
-    opts.finishCallbackPrompt !== null &&
-    opts.finishCallbackPrompt.length > 0
-  ) {
-    if (typeof opts.pi.sendUserMessage === "function") {
-      try {
-        await Promise.resolve(opts.pi.sendUserMessage(opts.finishCallbackPrompt));
-      } catch {
-        /* swallow */
-      }
-    } else {
-      // Fallback for older pi builds — surface as an annotation card.
-      try {
-        await Promise.resolve(opts.pi.sendMessage(
-          {
-            customType: RESULT_CUSTOM_TYPE,
-            content:
-              `[finishCallback queued — pi build does not support sendUserMessage]\n` +
-              opts.finishCallbackPrompt,
-            display: true,
-            details: {
-              kind: "finishCallback-fallback",
-              runId: opts.runId,
-              prompt: opts.finishCallbackPrompt,
-            },
+  //
+  // We ALWAYS trigger a turn when a workflow completes so the agent
+  // resumes. If the workflow set a finishCallbackPrompt, that becomes
+  // the user-role message. If not, we inject a minimal default so the
+  // agent can acknowledge the result card that was just delivered.
+  const triggerPrompt =
+    opts.finishCallbackPrompt !== null && opts.finishCallbackPrompt.length > 0
+      ? opts.finishCallbackPrompt
+      : `Workflow "${opts.workflowName}" finished with outcome: ${opts.outcome}. The result card above contains the details.`;
+
+  if (typeof opts.pi.sendUserMessage === "function") {
+    try {
+      await Promise.resolve(opts.pi.sendUserMessage(triggerPrompt));
+    } catch {
+      /* swallow */
+    }
+  } else {
+    // Fallback for pi builds that don't expose sendUserMessage: use
+    // triggerTurn: true so the agent wakes up and sees the result card.
+    try {
+      await Promise.resolve(opts.pi.sendMessage(
+        {
+          customType: RESULT_CUSTOM_TYPE,
+          content: triggerPrompt,
+          display: true,
+          details: {
+            kind: "finishCallback-fallback",
+            runId: opts.runId,
+            prompt: triggerPrompt,
           },
-          { triggerTurn: false, deliverAs: "nextTurn" },
-        ));
-      } catch {
-        /* swallow */
-      }
+        },
+        { triggerTurn: true, deliverAs: "nextTurn" },
+      ));
+    } catch {
+      /* swallow */
     }
   }
 
