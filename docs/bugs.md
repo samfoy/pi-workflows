@@ -2121,7 +2121,7 @@ Capture `killHandle` in an outer variable and call `clearTimeout(killHandle)` af
 
 ---
 
-## BUG-115 — `stderrTee` WriteStream not drained before `fs.appendFile` in the parse-error path, causing a write race on the stderr file
+## BUG-115 ✅ FIXED — `stderrTee` WriteStream not drained before `fs.appendFile` in the parse-error path, causing a write race on the stderr file
 
 **Area:** Runtime / dispatcher
 **Severity:** Medium
@@ -2138,7 +2138,7 @@ Before calling `fs.appendFile`, await the same `stderrTee` drain pattern used in
 
 ---
 
-## BUG-116 — Resume lock file has an open-then-write TOCTOU race that can grant two processes the lock simultaneously
+## BUG-116 ✅ FIXED — Resume lock file has an open-then-write TOCTOU race that can grant two processes the lock simultaneously
 
 **Area:** Runtime / runLock
 **Severity:** Medium

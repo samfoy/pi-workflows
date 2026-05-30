@@ -29,7 +29,7 @@
  * resume of the same run is operator error in the first place.
  */
 
-import { existsSync, openSync, readFileSync, closeSync, unlinkSync, writeSync } from "node:fs";
+import { existsSync, openSync, readFileSync, closeSync, unlinkSync, writeSync, fsyncSync } from "node:fs";
 import { join } from "node:path";
 
 import { isParentAlive, readBootId, currentBootId } from "./crashSweep.js";
@@ -180,6 +180,11 @@ export function acquireResumeLock(opts: {
   };
   try {
     writeSync(fd, JSON.stringify(lockBody, null, 2) + "\n");
+    // BUG-116: fsync before closeSync so the lock body is durable on disk
+    // before the fd is released. Without this, a reader in another process
+    // could see an empty file body in the window between closeSync completing
+    // (making the fd available for reuse) and the OS flushing the dirty pages.
+    fsyncSync(fd);
   } finally {
     closeSync(fd);
   }

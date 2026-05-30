@@ -466,9 +466,14 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
   if (wrapperPath) await removeParentDeathWrapper(wrapperPath);
   if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
 
-  // Drain stderrTee — its writes happen on `data` events which may
-  // outlive the `exit` event, so wait for stderr's `end` before
-  // declaring the agent done.
+  // BUG-115: explicitly end stderrTee so the finish/close sequence
+  // is guaranteed to fire even if child.stderr never emitted 'end'
+  // (e.g. the child exited without flushing stderr, or died via
+  // SIGPIPE before the parser finished). end() is idempotent — it is
+  // a no-op when child.stderr's 'end' handler already called it.
+  // We must drain BEFORE the fs.appendFile in the parseError path
+  // below, otherwise the two writes to stderrPath can interleave.
+  stderrTee.end();
   await new Promise<void>((resolve) => {
     if (stderrTee.writableFinished) {
       resolve();
