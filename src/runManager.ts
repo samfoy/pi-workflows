@@ -85,6 +85,14 @@ export function extractMetaPhases(source: string): Array<{ title: string }> {
   return titles;
 }
 
+/**
+ * Lightweight static extractor for `meta.acceptEdits` from a workflow
+ * script. Returns true only when `acceptEdits: true` appears in source.
+ */
+export function extractMetaAcceptEdits(source: string): boolean {
+  return /acceptEdits\s*:\s*true/.test(source);
+}
+
 /** Public-ish handle returned by `RunManager.start`. */
 export interface Run {
   readonly runId: string;
@@ -279,6 +287,13 @@ export interface RunManagerStartOptions {
    */
   readonly enableGlobalCache?: boolean;
   /**
+   * When true, subagents spawned by this workflow run with
+   * `PI_BYPASS_PERMISSIONS=1` so file edits are auto-approved without
+   * interactive prompts. Extracted from `meta.acceptEdits` in the
+   * workflow source, or passed directly by callers.
+   */
+  readonly acceptEdits?: boolean;
+  /**
    * Slice 14 — lineage marker set by the `r` (restart) hotkey. When
    * set, RunManager writes `restartedFrom: <prior runId>` into the
    * manifest.json so audit + GC can identify the chain.
@@ -342,6 +357,8 @@ export async function startWorkflowRun(
   // Read the workflow source + hash it.
   const sourceText = await fs.readFile(workflow.absPath, "utf8");
   const workflowSourceSha256 = sha256(sourceText);
+  // Extract meta.acceptEdits — prefer caller-supplied override.
+  const acceptEdits = opts.acceptEdits ?? extractMetaAcceptEdits(sourceText);
 
   // Slice 11 (resume support): freeze a copy of the script bytes into
   // `<runDir>/script.js`. PRD §6.1 declares this the canonical resume
@@ -620,6 +637,7 @@ export async function startWorkflowRun(
     tokenBudget: runOptions.tokenBudget,
     mockAgents: runOptions.mockAgents,
     cwd,
+    ...(acceptEdits ? { acceptEdits: true } : {}),
     ...(opts.dispatch ? { dispatch: opts.dispatch } : {}),
     ...(opts.nowIso ? { nowIso: opts.nowIso } : {}),
     ...(opts.nowMs ? { nowMs: opts.nowMs } : {}),

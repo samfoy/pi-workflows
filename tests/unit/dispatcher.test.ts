@@ -22,6 +22,7 @@ import {
   extractAssistantText,
   recoverFromTranscript,
 } from "../../src/runtime/dispatcher.js";
+import { extractMetaAcceptEdits } from "../../src/runManager.js";
 import {
   AgentSubprocessError,
   MalformedAgentOutputError,
@@ -673,4 +674,28 @@ test("spawn-spy: unknown event types pass through without schema error", { timeo
     timeoutMs: 1500,
   });
   assert.equal(result.ok, true);
+});
+
+test("buildChildEnv: acceptEdits injects PI_BYPASS_PERMISSIONS=1 via extra", () => {
+  const base = { PATH: "/usr/bin", HOME: "/home/sam" };
+  const env = buildChildEnv(base, { PI_BYPASS_PERMISSIONS: "1" });
+  assert.equal(env.PI_BYPASS_PERMISSIONS, "1", "PI_BYPASS_PERMISSIONS must be set when acceptEdits is true");
+  // Recursion guard must still win over everything.
+  assert.equal(env.PI_DISABLE_WORKFLOWS, "1");
+  assert.equal(env.PI_WORKFLOWS_RECURSIVE, "1");
+});
+
+test("extractMetaAcceptEdits: returns true for acceptEdits: true in meta", () => {
+  const src = `export const meta = { name: "test", description: "x", version: "1.0.0", acceptEdits: true };`;
+  assert.equal(extractMetaAcceptEdits(src), true);
+});
+
+test("extractMetaAcceptEdits: returns false when absent", () => {
+  const src = `export const meta = { name: "test", description: "x", version: "1.0.0" };`;
+  assert.equal(extractMetaAcceptEdits(src), false);
+});
+
+test("extractMetaAcceptEdits: returns false for acceptEdits: false", () => {
+  const src = `export const meta = { name: "test", description: "x", acceptEdits: false };`;
+  assert.equal(extractMetaAcceptEdits(src), false);
 });

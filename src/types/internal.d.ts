@@ -51,6 +51,13 @@ export interface WorkflowMeta {
   readonly whenToUse?: string;
   /** Expected phases — shown upfront in TUI before they start. */
   readonly phases?: ReadonlyArray<WorkflowMetaPhase>;
+  /**
+   * When true, subagents spawned by this workflow run with file-edit
+   * permissions automatically approved (CC's `acceptEdits` parity).
+   * Sets `PI_BYPASS_PERMISSIONS=1` in the child process env.
+   * Default: false.
+   */
+  readonly acceptEdits?: boolean;
 }
 
 /** Result map keyed by workflow name. Project precedence already applied. */
@@ -118,6 +125,8 @@ export interface ExtensionAPI {
   ): void;
   on(event: "session_start", handler: (event: unknown, ctx: ExtensionContextLike) => void | Promise<void>): void;
   on(event: "session_shutdown", handler: (event: unknown, ctx: ExtensionContextLike) => void | Promise<void>): void;
+  /** Catch-all for events not individually typed (input, before_agent_start, etc.). */
+  on(event: string, handler: (event: unknown, ctx: ExtensionContextLike) => unknown): void;
   sendMessage<T = unknown>(
     message: {
       customType: string;
@@ -807,6 +816,12 @@ export interface DispatcherOptions {
   readonly nowMs?: () => number;
   /** Production never sets this; integration tests do. */
   readonly skipParentDeathGuard?: boolean;
+  /**
+   * When true, adds `PI_BYPASS_PERMISSIONS=1` to the child env so file
+   * edits are auto-approved without prompting. Maps from
+   * `WorkflowMeta.acceptEdits`.
+   */
+  readonly acceptEdits?: boolean;
 }
 
 /** Minimal ChildProcess shape the dispatcher needs. */

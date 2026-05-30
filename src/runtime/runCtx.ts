@@ -92,6 +92,11 @@ export interface RunCtxHostOptions {
   readonly perRunAgentCap: number;
   /** `--mock-agents` mode flag. */
   readonly mockAgents: boolean;
+  /**
+   * When true, sets `PI_BYPASS_PERMISSIONS=1` in the child env so file
+   * edits are auto-approved. Mirrors `WorkflowMeta.acceptEdits`.
+   */
+  readonly acceptEdits?: boolean;
   /** cwd to pass to the dispatcher (PRD §6.2 manifest.cwd). */
   readonly cwd: string;
   /**
@@ -768,6 +773,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         cwd: opts.cwd,
         signal: phaseCtrl.signal,
         mockAgents: opts.mockAgents,
+        ...(opts.acceptEdits ? { acceptEdits: true } : {}),
         ...(typeof handle.opts.model === "string"
           ? { model: handle.opts.model }
           : {}),

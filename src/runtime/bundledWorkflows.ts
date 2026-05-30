@@ -206,9 +206,14 @@ export function resolveBundledWorkflows(
   for (const root of candidates) {
     const probe = join(root, "examples", "codebase-audit", "codebase-audit.js");
     if (existsSync(probe)) {
-      return [
+      const deepResearchPath = join(root, "examples", "deep-research", "deep-research.js");
+      const workflows: BundledWorkflow[] = [
         { destName: "codebase-audit.js", srcPath: probe },
       ];
+      if (existsSync(deepResearchPath)) {
+        workflows.push({ destName: "deep-research.js", srcPath: deepResearchPath });
+      }
+      return workflows;
     }
   }
   // No bundled workflows found — not fatal; return empty.

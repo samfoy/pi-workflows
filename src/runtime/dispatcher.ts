@@ -386,7 +386,10 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
   // ── Real spawn branch ─────────────────────────────────────────────
   const transcriptPath = agentTranscriptPathBy(opts.runDir, opts.agentId);
   const stderrPath = agentStderrPathBy(opts.runDir, opts.agentId);
-  const childEnv = buildChildEnv(envBase);
+  const childEnv = buildChildEnv(
+    envBase,
+    opts.acceptEdits ? { PI_BYPASS_PERMISSIONS: "1" } : undefined,
+  );
   const args = buildPiArgs({
     prompt: opts.prompt,
     ...(opts.model !== undefined ? { model: opts.model } : {}),

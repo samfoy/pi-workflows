@@ -118,6 +118,63 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     },
   });
 
+  // ── Keyword trigger ────────────────────────────────────────────────
+  // When the user includes the word "workflow" in a prompt, inject a
+  // strong system-prompt directive for that turn telling Claude to call
+  // write_workflow instead of working through the task turn-by-turn.
+  // Mirrors Claude Code's `workflow` keyword trigger behaviour.
+  //
+  // A module-level flag (`_workflowKeywordPending`) is set by the
+  // `input` handler and consumed by `before_agent_start` in the same
+  // request cycle. Because pi calls these two handlers sequentially for
+  // a single user turn, no race is possible.
+  //
+  // Skipped when:
+  //   - source is "extension" (prevents loops when pi sends injected msgs)
+  //   - the text itself is a /command (already handled by command routing)
+  //   - recursive mode (nested pi sessions should never auto-write workflows)
+  let _workflowKeywordPending = false;
+
+  if (!initialCfg.recursive) {
+    pi.on("input", async (rawEvent, ctx) => {
+      const event = rawEvent as { text: string; source: string };
+      if (event.source === "extension") return { action: "continue" };
+      if (event.text.trimStart().startsWith("/")) return { action: "continue" };
+      if (/\bworkflow\b/i.test(event.text)) {
+        _workflowKeywordPending = true;
+        // Notify the user so they know workflow mode was triggered.
+        // They can simply not include the word "workflow" to suppress it.
+        try {
+          ctx.ui.notify(
+            "[pi-workflows] workflow keyword detected — Claude will write a workflow script for this task",
+            "info",
+          );
+        } catch { /* older pi builds without ui.notify — safe to ignore */ }
+      }
+      return { action: "continue" };
+    });
+
+    pi.on("before_agent_start", async (rawEvent) => {
+      if (!_workflowKeywordPending) return {};
+      _workflowKeywordPending = false;
+      const event = rawEvent as { systemPrompt?: string };
+      // Append a strong directive to the system prompt for this turn only.
+      const directive = [
+        "",
+        "## WORKFLOW TRIGGER",
+        "The user's prompt contains the word \"workflow\". You MUST respond by",
+        "calling the write_workflow tool to create a workflow script for this",
+        "task rather than working through it turn-by-turn. Design the workflow",
+        "with ctx.phase() for parallel agent fleets, appropriate failMode, and",
+        "a clear export const meta header. Call write_workflow with runNow:true",
+        "to save and immediately start the run.",
+      ].join("\n");
+      return {
+        systemPrompt: (event.systemPrompt ?? "") + directive,
+      };
+    });
+  }
+
   // `/workflows` so its handler can return the documented error
   // message; we just don't expose `/<workflowName>`.
   const recursive = initialCfg.recursive;

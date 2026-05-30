@@ -100,7 +100,9 @@ export type FakeCustomFn = NonNullable<ExtensionContextLike["ui"]["custom"]>;
 export interface FakePi {
   // ── ExtensionAPI surface ──────────────────────────────────────
   registerCommand(name: string, options: Omit<FakeRegisteredCommand, "name">): void;
-  on(event: string, handler: (e: unknown, ctx: FakeContext) => Promise<void> | void): void;
+  on(event: "session_start", handler: (e: unknown, ctx: ExtensionContextLike) => void | Promise<void>): void;
+  on(event: "session_shutdown", handler: (e: unknown, ctx: ExtensionContextLike) => void | Promise<void>): void;
+  on(event: string, handler: (e: unknown, ctx: ExtensionContextLike) => unknown): void;
   sendMessage<T = unknown>(
     message: { customType: string; content: string; display?: boolean; details?: T },
     options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
@@ -191,7 +193,7 @@ export function makeFakePi(_opts: MakeFakePiOpts = {}): FakePi {
     },
     on(event, handler) {
       const list = handlers.get(event) ?? [];
-      list.push(handler);
+      list.push(handler as (e: unknown, ctx: FakeContext) => void | Promise<void>);
       handlers.set(event, list);
     },
     sendMessage(message, options) {
