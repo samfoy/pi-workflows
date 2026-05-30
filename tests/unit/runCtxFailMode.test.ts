@@ -140,6 +140,30 @@ test("ctx.phase failMode='null': success results still returned alongside nulls"
   }
 });
 
+// BUG-056: invalid failMode values must be rejected with a TypeError
+test("ctx.phase: invalid failMode value throws TypeError", async () => {
+  const runDir = mkdtempSync(join(tmpdir(), "pi-wf-fm-invalid-"));
+  try {
+    const { host } = await makeCtx(runDir, successDispatch);
+    const h = host.agent("test", { id: "x" });
+    assert.ok(h.ok);
+
+    // Typo: 'NULL' instead of 'null'
+    const r1 = await host.phase("work", [h.value], { failMode: "NULL" });
+    assert.ok(!r1.ok, "expect error envelope for invalid failMode");
+    assert.match(r1.error.message, /failMode.*must be.*throw.*null/i);
+
+    // Typo: 'Throw' instead of 'throw'
+    const h2 = host.agent("test2", { id: "y" });
+    assert.ok(h2.ok);
+    const r2 = await host.phase("work", [h2.value], { failMode: "Throw" });
+    assert.ok(!r2.ok, "expect error envelope for invalid failMode");
+    assert.match(r2.error.message, /failMode.*must be.*throw.*null/i);
+  } finally {
+    rmSync(runDir, { recursive: true, force: true });
+  }
+});
+
 test("getBudgetSpent: starts at 0, accumulates totalTokens after phase", async () => {
   const runDir = mkdtempSync(join(tmpdir(), "pi-wf-budget-"));
   try {
