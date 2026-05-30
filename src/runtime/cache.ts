@@ -289,12 +289,43 @@ export class CacheStore {
    * atomicity is asserted by a test that injects
    * `__compactionPanicBeforeRename`: when that throws, the original
    * `cache.jsonl` must remain intact.
+   *
+   * BUG-126: the snapshot MUST be built inside the queued callback,
+   * not before chaining. If built outside, a concurrent `setAgentResult`
+   * caller may have already enqueued its disk-write (so it appears in
+   * cache.jsonl) but not yet called `agentResults.set()` (so it is
+   * absent from the in-memory map). That stale snapshot then renames
+   * over cache.jsonl, permanently erasing the concurrent write.
+   * Building inside the callback ensures the snapshot is taken only
+   * after all previously-queued writes — and their in-memory
+   * `agentResults.set()` / `authorCache.set()` calls — have completed.
    */
   private async runCompaction(): Promise<boolean> {
-    // Build snapshot text from in-memory maps, last-value-per-key.
-    // Author-cache deletes are dropped (the in-memory map already
-    // reflects them; replaying without the tombstone is fine because
-    // the delete is no longer needed once we've collapsed).
+    // Funnel through the write queue so an in-flight append doesn't
+    // interleave with the rename.  Build the snapshot INSIDE the
+    // callback so it captures in-memory state only after all
+    // previously-queued writes have completed (fixes BUG-126).
+    const next = this.writeQueue.then(async () => {
+      const snapshot = this.buildSnapshotString();
+      await this.writeSnapshotAndRename(snapshot);
+    });
+    this.writeQueue = next.catch(() => undefined);
+    await next;
+    this.entriesSinceCompaction = 0;
+    return true;
+  }
+
+  /**
+   * Build the full JSONL snapshot string from the current in-memory
+   * maps. Author-cache deletes are dropped — the in-memory map already
+   * reflects them; replaying without the tombstone is correct because
+   * the delete is no longer needed once we've collapsed.
+   *
+   * Called exclusively from inside the `writeQueue` callback in
+   * `runCompaction()` so that in-memory state is consistent with
+   * what is on disk.
+   */
+  private buildSnapshotString(): string {
     const snapshotAt = this.now();
     const lines: string[] = [];
     for (const [key, value] of this.agentResults) {
@@ -305,17 +336,7 @@ export class CacheStore {
       const r: CacheRecord = { type: "author_cache", key, value, at: snapshotAt };
       lines.push(JSON.stringify(r));
     }
-    const snapshot = lines.length ? lines.join("\n") + "\n" : "";
-
-    // Funnel through the write queue so an in-flight append doesn't
-    // interleave with the rename.
-    const next = this.writeQueue.then(() =>
-      this.writeSnapshotAndRename(snapshot),
-    );
-    this.writeQueue = next.catch(() => undefined);
-    await next;
-    this.entriesSinceCompaction = 0;
-    return true;
+    return lines.length ? lines.join("\n") + "\n" : "";
   }
 
   private async writeSnapshotAndRename(snapshot: string): Promise<void> {
