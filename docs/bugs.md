@@ -554,7 +554,7 @@ Add 'approved' and 'pending' to RESUMABLE_STATES in ledger.ts: `export const RES
 
 ---
 
-## BUG-027 — RunStateMachine.go() has no concurrency guard — isValidTransition check and currentState update are not atomic, allowing two concurrent calls to both pass validation against the same stale state
+## BUG-027 ✅ FIXED — RunStateMachine.go() has no concurrency guard — isValidTransition check and currentState update are not atomic, allowing two concurrent calls to both pass validation against the same stale state
 
 **Area:** ledger
 **Severity:** medium
@@ -571,7 +571,7 @@ Serialize go() calls through an internal queue analogous to LedgerWriter.writeQu
 
 ---
 
-## BUG-028 — Resume lock held during interactive approval gate — lock blocks concurrent-resume detection for the entire duration of user input
+## BUG-028 ✅ FIXED — Resume lock held during interactive approval gate — lock blocks concurrent-resume detection for the entire duration of user input
 
 **Area:** resumeRun
 **Severity:** medium
