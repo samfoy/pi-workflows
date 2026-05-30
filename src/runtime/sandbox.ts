@@ -729,7 +729,17 @@ export class Sandbox {
     }
 
     // Honor abort: race the script promise against the signal.
-    const returnValue = await raceWithAbort(promise, this.opts.signal, this.context);
+    // BUG-061: always remove the fireCtxAbort listener after the run
+    // completes (normal return, abort, or non-abort rejection). The
+    // { once: true } flag only self-removes when the signal fires; on
+    // all other exit paths the listener stays registered, preventing
+    // GC of the Context realm as long as the AbortController lives.
+    let returnValue: unknown;
+    try {
+      returnValue = await raceWithAbort(promise, this.opts.signal, this.context);
+    } finally {
+      hostSignal.removeEventListener("abort", fireCtxAbort);
+    }
 
     const durationMs = Date.now() - t0;
     return {
