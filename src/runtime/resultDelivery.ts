@@ -211,7 +211,7 @@ function truncateChars(s: string, max: number): { text: string; truncated: boole
 
 function cancelReasonText(decision: ApprovalDecision | null): string {
   if (decision === null) return "approval denied";
-  if (decision.approved) return "approval denied";
+  if (decision.approved) return "(internal error: approved=true on cancelled run)";
   // approved=false branch
   if (decision.reason === "user-N") return "user denied at approval prompt";
   if (decision.reason === "pi-p-untrusted") return decision.error ?? "untrusted in pi -p strict mode";
