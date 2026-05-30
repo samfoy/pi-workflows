@@ -176,6 +176,25 @@ export function memoPathTmp(scope: 'global' | 'project', projectRoot?: string): 
   return join(memoScopeDir(scope, projectRoot), 'memo.jsonl.tmp');
 }
 
+
+// ─── Global cache paths ──────────────────────────────────────────────────────
+
+/**
+ * `~/.pi/agent/workflows/global-cache/<scriptSha256[0:16]>/cache.jsonl`
+ *
+ * Cross-run agent result cache. Partitioned by the first 16 hex chars of
+ * the workflow source sha256 — a script change produces a different
+ * directory, giving natural invalidation without complex version tracking.
+ */
+export function globalCachePath(scriptSha256: string): string {
+  return join(workflowsHome(), "global-cache", scriptSha256.slice(0, 16), "cache.jsonl");
+}
+
+/** Tmp path used during atomic compaction of the global cache. */
+export function globalCachePathTmp(scriptSha256: string): string {
+  return join(workflowsHome(), "global-cache", scriptSha256.slice(0, 16), "cache.jsonl.tmp");
+}
+
 /**
  * `<projectRoot>/.pi/workflows/` — the project-scoped workflow root.
  *

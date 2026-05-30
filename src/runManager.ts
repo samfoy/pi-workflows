@@ -272,6 +272,13 @@ export interface RunManagerStartOptions {
   /** Slice 8a doesn't flush approval dialogs; this is purely for tests. */
   readonly trustedAtStart?: boolean;
   /**
+   * When `true`, opens a cross-run `GlobalCacheStore` keyed by the workflow
+   * source sha256 and passes it to `createRunCtxHost`. Agent results are read
+   * from (and written to) the global cache so future runs of the same workflow
+   * version reuse them without re-dispatching. Default: false (opt-in).
+   */
+  readonly enableGlobalCache?: boolean;
+  /**
    * Slice 14 — lineage marker set by the `r` (restart) hotkey. When
    * set, RunManager writes `restartedFrom: <prior runId>` into the
    * manifest.json so audit + GC can identify the chain.
@@ -437,6 +444,10 @@ export async function startWorkflowRun(
     resolveCachePath: (id) => join(resolveRunDir(id), "cache.jsonl"),
     resolveCacheTmpPath: (id) => join(resolveRunDir(id), "cache.jsonl.tmp"),
   });
+  // Cross-run global cache (opt-in via enableGlobalCache).
+  const globalCache = opts.enableGlobalCache === true
+    ? await CacheStore.openGlobal(workflowSourceSha256)
+    : undefined;
   const semaphore = makeSemaphore({ cap: runOptions.maxConcurrent });
 
   // Append the `init` ledger entry (PRD §6.4 init carries the manifest
@@ -615,6 +626,7 @@ export async function startWorkflowRun(
     ...(opts.emitOverlayEvent
       ? { emitOverlayEvent: opts.emitOverlayEvent }
       : {}),
+    ...(globalCache !== undefined ? { globalCache } : {}),
     waitForGate,
   });
 

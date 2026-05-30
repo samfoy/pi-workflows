@@ -41,9 +41,12 @@ import {
   writeSync,
 } from "node:fs";
 
+import { dirname } from "node:path";
 import {
   cachePath as defaultCachePath,
   cachePathTmp as defaultCachePathTmp,
+  globalCachePath,
+  globalCachePathTmp,
 } from "../util/paths.ts";
 import type {
   AgentResultLike,
@@ -161,6 +164,28 @@ export class CacheStore {
     const store = new CacheStore(opts);
     await store.replay();
     return store;
+  }
+
+  /**
+   * Open the cross-run global cache for a specific workflow version.
+   *
+   * The store lives at `~/.pi/agent/workflows/global-cache/<sha16>/cache.jsonl`.
+   * Using the first 16 chars of the script sha256 as a directory name gives
+   * natural cache invalidation: any change to the workflow source produces a
+   * different directory, so stale entries are never reused.
+   *
+   * The directory is created if absent. Cache misses are a no-op (replay
+   * starts empty); the caller may call `setAgentResult` to populate.
+   */
+  static async openGlobal(scriptSha256: string): Promise<CacheStore> {
+    const cachePth = globalCachePath(scriptSha256);
+    const cacheTmpPth = globalCachePathTmp(scriptSha256);
+    await fsp.mkdir(dirname(cachePth), { recursive: true });
+    return CacheStore.open({
+      runId: scriptSha256.slice(0, 16),
+      resolveCachePath: () => cachePth,
+      resolveCacheTmpPath: () => cacheTmpPth,
+    });
   }
 
   // ─── reads ────────────────────────────────────────────────────────

@@ -68,6 +68,14 @@ export interface RunCtxHostOptions {
   /** SHA-256 of the workflow source (cache-key input + manifest field). */
   readonly workflowSourceSha256: string;
   readonly cache: CacheStore;
+  /**
+   * Optional cross-run global cache. When supplied, `runOneAgent` checks
+   * here before the per-run cache (global hit → skip dispatch) and writes
+   * here after a cache miss so future runs of the same workflow version
+   * can reuse the result. Disabled by default; opt-in via
+   * `RunManagerStartOptions.enableGlobalCache`.
+   */
+  readonly globalCache?: CacheStore;
   readonly ledger: LedgerWriter;
   readonly semaphore: Semaphore;
   /** Per-run abort signal — propagates to all agent dispatches. */
@@ -540,7 +548,19 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         : null;
 
     // Cache hit short-circuits the dispatcher.
-    const cached = opts.cache.getAgentResult(key);
+    // Global cache checked first (cross-run hits), then per-run cache.
+    const globalCachedResult = opts.globalCache?.getAgentResult(key);
+    if (globalCachedResult !== undefined) {
+      // Warm the per-run cache so subsequent same-run agents hit locally.
+      await opts.cache.setAgentResult(key, globalCachedResult);
+      void opts.ledger.append({
+        type: "log",
+        at: nowIso(),
+        level: "info",
+        message: `[global cache hit] agent=${handle.id} key=${key.slice(0, 16)}…`,
+      }).catch(() => undefined);
+    }
+    const cached = globalCachedResult ?? opts.cache.getAgentResult(key);
     if (cached !== undefined) {
       await opts.ledger.append({
         type: "agent_cache_hit",
@@ -764,14 +784,20 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         skipParentDeathGuard: opts.mockAgents,
       });
       // Cache the success.
-      await opts.cache.setAgentResult(key, {
+      const cacheEntry = {
         agentId: result.agentId,
         text: result.text,
         usage: result.usage as unknown as Readonly<Record<string, number>>,
         durationMs: result.durationMs,
         toolCalls: result.toolCalls,
         transcriptPath: result.transcriptPath,
-      });
+      };
+      await opts.cache.setAgentResult(key, cacheEntry);
+      // Also write to the global cache so future runs of the same workflow
+      // version can reuse this result without re-dispatching.
+      if (opts.globalCache !== undefined) {
+        await opts.globalCache.setAgentResult(key, cacheEntry);
+      }
       // BUG-055: release the reservation and record actual spend together.
       budgetReserved -= 1;
       budgetSpent += result.usage.totalTokens;
