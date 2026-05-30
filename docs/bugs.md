@@ -1230,7 +1230,7 @@ Add `"approved"` and `"pending"` to `RESUMABLE_STATES` in `ledger.ts`: `new Set<
 
 ---
 
-## BUG-067 — dispatcher: stderrTee drain uses `writableEnded` instead of `writableFinished` — resolves before data is flushed
+## BUG-067 ✅ FIXED — dispatcher: stderrTee drain uses `writableEnded` instead of `writableFinished` — resolves before data is flushed
 
 **Area:** runtime / dispatcher
 **Severity:** medium
@@ -1247,7 +1247,7 @@ Replace `if (stderrTee.writableEnded)` with `if (stderrTee.writableFinished)` in
 
 ---
 
-## BUG-068 — dispatcher: inner SIGKILL timer `killHandle` is never cancelled — can fire against a recycled PID
+## BUG-068 ✅ FIXED — dispatcher: inner SIGKILL timer `killHandle` is never cancelled — can fire against a recycled PID
 
 **Area:** runtime / dispatcher
 **Severity:** medium
