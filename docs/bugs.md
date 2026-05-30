@@ -102,7 +102,7 @@ to `failMode: 'null'` as a demonstration of the recommended pattern.
 
 ---
 
-## BUG-003 — Dispatcher: signal-killed process (timeout/abort) misclassified as MalformedAgentOutputError
+## BUG-003 ✅ FIXED — Dispatcher: signal-killed process (timeout/abort) misclassified as MalformedAgentOutputError
 
 **Area:** dispatcher
 **Severity:** high
@@ -128,7 +128,7 @@ Or fold both into one condition: `exitCode !== 0 && exitCode !== null || exitSig
 
 ---
 
-## BUG-004 — Dispatcher: timeout sends SIGTERM with no SIGKILL escalation — can hang forever
+## BUG-004 ✅ FIXED (duplicate) — Dispatcher: timeout sends SIGTERM with no SIGKILL escalation — can hang forever
 
 **Area:** dispatcher
 **Severity:** medium
@@ -154,7 +154,7 @@ Or store a `killHandle` reference and clear it alongside `clearTimeout(timeoutHa
 
 ---
 
-## BUG-005 — ActiveRunsRegistry.reset() does not clear #everLocal, breaking test isolation
+## BUG-005 ✅ FIXED — ActiveRunsRegistry.reset() does not clear #everLocal, breaking test isolation
 
 **Area:** activeRuns
 **Severity:** low
@@ -179,7 +179,7 @@ reset(): void {
 
 ---
 
-## BUG-006 — resumeRun uses !TERMINAL_STATES for resumability, diverging from the exported RESUMABLE_STATES contract
+## BUG-006 ✅ FIXED (duplicate) — resumeRun uses !TERMINAL_STATES for resumability, diverging from the exported RESUMABLE_STATES contract
 
 **Area:** resumeRun / ledger
 **Severity:** medium
@@ -213,7 +213,7 @@ Extract the cleanup body of `close()` into a shared `cleanup()` helper (guarded 
 
 ---
 
-## BUG-008 — GC F4 filter checks the wrong direction: reads candidate's restartedFrom instead of active runs' restartedFrom
+## BUG-008 ✅ FIXED (duplicate) — GC F4 filter checks the wrong direction: reads candidate's restartedFrom instead of active runs' restartedFrom
 
 **Area:** gcDialog
 **Severity:** medium
@@ -230,7 +230,7 @@ Build a reverse-lookup set from the active runs: for each active run, read its m
 
 ---
 
-## BUG-009 — phaseCursor bounded by totalAgents (all phases) but only running-phase agent rows are rendered, causing phantom cursor movement and wrong Enter target
+## BUG-009 ✅ FIXED (duplicate) — phaseCursor bounded by totalAgents (all phases) but only running-phase agent rows are rendered, causing phantom cursor movement and wrong Enter target
 
 **Area:** overlay / TUI
 **Severity:** medium
@@ -247,7 +247,7 @@ Use `agentRows.length` (from a fresh `renderPhaseView` call or a cached count) a
 
 ---
 
-## BUG-010 — isHotkeyEnabled returns false for p and x on phase-view but dispatchHotkey fires pause/stop actions
+## BUG-010 ✅ FIXED — isHotkeyEnabled returns false for p and x on phase-view but dispatchHotkey fires pause/stop actions
 
 **Area:** hotkeys
 **Severity:** low
@@ -312,7 +312,7 @@ back to main in order. If worktree setup is unavailable, fall back to
 
 ---
 
-## BUG-013 — extractJson throws after agent_end ledger entry written and result cached — creates ledger inconsistency and permanent stuck-failure loop
+## BUG-013 ✅ FIXED (duplicate) — extractJson throws after agent_end ledger entry written and result cached — creates ledger inconsistency and permanent stuck-failure loop
 
 **Area:** runtime/runCtx
 **Severity:** high
@@ -329,7 +329,7 @@ Move extractJson call to BEFORE opts.cache.setAgentResult and opts.ledger.append
 
 ---
 
-## BUG-014 — Token budget check is not atomic — concurrent runOneAgent calls all pass the check before any updates budgetSpent, allowing large budget overruns
+## BUG-014 ✅ FIXED (duplicate) — Token budget check is not atomic — concurrent runOneAgent calls all pass the check before any updates budgetSpent, allowing large budget overruns
 
 **Area:** runtime/runCtx
 **Severity:** medium
@@ -346,7 +346,7 @@ Maintain a committed budget separate from spent budget. Before acquiring the sem
 
 ---
 
-## BUG-015 — runtime-api.md documents RetryOpts.maxAttempts but implementation reads opts.attempts — authors using maxAttempts silently get default 3
+## BUG-015 ✅ FIXED (duplicate) — runtime-api.md documents RetryOpts.maxAttempts but implementation reads opts.attempts — authors using maxAttempts silently get default 3
 
 **Area:** stdlib / docs
 **Severity:** high
@@ -363,7 +363,7 @@ Either (a) rename the implementation to read opts.maxAttempts and update public.
 
 ---
 
-## BUG-016 — runtime-api.md documents ConsensusResult.scores field that does not exist — runtime TypeError for any author following the docs
+## BUG-016 ✅ FIXED (duplicate) — runtime-api.md documents ConsensusResult.scores field that does not exist — runtime TypeError for any author following the docs
 
 **Area:** stdlib / docs
 **Severity:** high
@@ -380,7 +380,7 @@ Update runtime-api.md to document the actual return shape: 'responses: ReadonlyA
 
 ---
 
-## BUG-017 — consensus uses a single threshold for both Jaccard similarity floor and pair-fraction agreement — the docs describe two independent parameters but only one is implemented
+## BUG-017 ✅ FIXED (duplicate) — consensus uses a single threshold for both Jaccard similarity floor and pair-fraction agreement — the docs describe two independent parameters but only one is implemented
 
 **Area:** stdlib
 **Severity:** medium
@@ -414,7 +414,7 @@ Move the failMode parsing inside the try block so any access-time exception is c
 
 ---
 
-## BUG-019 — runtime-api.md documents retry default backoffMs as 500ms but implementation defaults to 100ms
+## BUG-019 ✅ FIXED (duplicate) — runtime-api.md documents retry default backoffMs as 500ms but implementation defaults to 100ms
 
 **Area:** stdlib / docs
 **Severity:** low
@@ -431,7 +431,7 @@ Either update the implementation default to 500ms to match the docs, or update t
 
 ---
 
-## BUG-020 — runtime-api.md documents consensus default threshold as 0.5 but implementation defaults to 0.6
+## BUG-020 ✅ FIXED (duplicate) — runtime-api.md documents consensus default threshold as 0.5 but implementation defaults to 0.6
 
 **Area:** stdlib / docs
 **Severity:** low
@@ -448,7 +448,7 @@ Align to a single value. The docs say 0.5; the code says 0.6. Decide which is co
 
 ---
 
-## BUG-021 — fireCtxAbort abort-listener never removed from host AbortSignal on non-abort completion
+## BUG-021 ✅ FIXED (duplicate) — fireCtxAbort abort-listener never removed from host AbortSignal on non-abort completion
 
 **Area:** sandbox
 **Severity:** medium
@@ -533,7 +533,7 @@ After constructing the ContextError, call Object.defineProperty(e, 'name', { val
 
 ---
 
-## BUG-026 — approved/pending states listed as resumable in comment but excluded from RESUMABLE_STATES — handlers are dead code and those states are incorrectly rejected
+## BUG-026 ✅ FIXED (duplicate) — approved/pending states listed as resumable in comment but excluded from RESUMABLE_STATES — handlers are dead code and those states are incorrectly rejected
 
 **Area:** resumeRun / ledger
 **Severity:** high
@@ -601,7 +601,7 @@ In the `!child.stdout` early-exit block, add `stderrTee.end()` (or `stderrTee.de
 
 ---
 
-## BUG-030 — SIGKILL escalation timer (killHandle) inside timeout callback has no reference and cannot be cleared if child exits from SIGTERM
+## BUG-030 ✅ FIXED (duplicate) — SIGKILL escalation timer (killHandle) inside timeout callback has no reference and cannot be cleared if child exits from SIGTERM
 
 **Area:** dispatcher
 **Severity:** low
@@ -618,7 +618,7 @@ Promote killHandle to outer scope with `let killHandle: ReturnType<typeof setTim
 
 ---
 
-## BUG-031 — phaseCursor not clamped when running agents decrease or phase completes
+## BUG-031 ✅ FIXED (duplicate) — phaseCursor not clamped when running agents decrease or phase completes
 
 **Area:** overlay / TUI
 **Severity:** medium
@@ -686,7 +686,7 @@ Add an `agentLogScrollOffset` variable (number, 0-based). In navigate-up/down wh
 
 ---
 
-## BUG-035 — F4 GC guard direction is inverted: protects restart-of-active-original, but not source-of-active-restart
+## BUG-035 ✅ FIXED (duplicate) — F4 GC guard direction is inverted: protects restart-of-active-original, but not source-of-active-restart
 
 **Area:** gcDialog
 **Severity:** medium
@@ -720,7 +720,7 @@ Before the deletion loop in applyGc, accept an optional `activeRunIds` set. For 
 
 ---
 
-## BUG-037 — CacheStore.runCompaction builds snapshot before queue drains — concurrent in-flight writes silently dropped from compacted file
+## BUG-037 ✅ FIXED (duplicate) — CacheStore.runCompaction builds snapshot before queue drains — concurrent in-flight writes silently dropped from compacted file
 
 **Area:** runtime/cache
 **Severity:** high
@@ -754,7 +754,7 @@ Introduce a per-runDir write mutex using the same acquireWriteSlot pattern from 
 
 ---
 
-## BUG-039 — writeResultFile does not fsync tmp file before rename — result.json durability gap on crash
+## BUG-039 ✅ FIXED (duplicate) — writeResultFile does not fsync tmp file before rename — result.json durability gap on crash
 
 **Area:** resultDelivery
 **Severity:** low
@@ -771,7 +771,7 @@ Open the tmp file with openSync, writeSync the body, fsyncSync, closeSync, then 
 
 ---
 
-## BUG-040 — writeResultFile tmp filename has no entropy — sub-millisecond double-invoke produces same path, races on rename
+## BUG-040 ✅ FIXED (duplicate) — writeResultFile tmp filename has no entropy — sub-millisecond double-invoke produces same path, races on rename
 
 **Area:** resultDelivery
 **Severity:** low
@@ -788,7 +788,7 @@ Append a 4-byte random hex suffix: `result.json.tmp-${process.pid}-${Date.now()}
 
 ---
 
-## BUG-041 — cancelReasonText returns 'approval denied' for decision.approved === true — misleading result card copy
+## BUG-041 ✅ FIXED (duplicate) — cancelReasonText returns 'approval denied' for decision.approved === true — misleading result card copy
 
 **Area:** resultDelivery
 **Severity:** low
@@ -805,7 +805,7 @@ Replace `if (decision.approved) return 'approval denied'` with `if (decision.app
 
 ---
 
-## BUG-042 — promptSnippet uses `ctx.pipeline()` which is undocumented in runtime-api.md, authoring.md, and SKILL.md
+## BUG-042 ✅ FIXED (duplicate) — promptSnippet uses `ctx.pipeline()` which is undocumented in runtime-api.md, authoring.md, and SKILL.md
 
 **Area:** writeWorkflowTool / docs
 **Severity:** high
@@ -822,7 +822,7 @@ Either document ctx.pipeline in runtime-api.md (signature, semantics, example) a
 
 ---
 
-## BUG-043 — promptSnippet uses `ctx.budget.spent()` which is undocumented everywhere
+## BUG-043 ✅ FIXED (duplicate) — promptSnippet uses `ctx.budget.spent()` which is undocumented everywhere
 
 **Area:** writeWorkflowTool / docs
 **Severity:** high
@@ -839,7 +839,7 @@ Either document ctx.budget in runtime-api.md (interface, methods, semantics) and
 
 ---
 
-## BUG-044 — `promptGuidelines` and promptSnippet use `ctx.phase(name, handles, { failMode })` but runtime-api.md documents no third argument
+## BUG-044 ✅ FIXED (duplicate) — `promptGuidelines` and promptSnippet use `ctx.phase(name, handles, { failMode })` but runtime-api.md documents no third argument
 
 **Area:** writeWorkflowTool / docs
 **Severity:** high
@@ -1621,7 +1621,7 @@ Add `schema?: Record<string, unknown>` to the AgentOpts table in runtime-api.md 
 
 ---
 
-## BUG-090 — Canonical examples missing required export const meta
+## BUG-090 ✅ FIXED — Canonical examples missing required export const meta
 
 **Area:** examples
 **Severity:** high
@@ -1638,7 +1638,7 @@ Add `export const meta = { name: 'codebase-audit', description: '...', version: 
 
 ---
 
-## BUG-091 — codebase-audit.js inlines large findings JSON into voter prompts — violates documented anti-pattern
+## BUG-091 ✅ FIXED — codebase-audit.js inlines large findings JSON into voter prompts — violates documented anti-pattern
 
 **Area:** examples
 **Severity:** medium
@@ -1655,7 +1655,7 @@ Cache allFindings to disk via ctx.cache.set and tell voter agents to read from t
 
 ---
 
-## BUG-092 — authoring.md section 5 cites wrong example path
+## BUG-092 ✅ FIXED — authoring.md section 5 cites wrong example path
 
 **Area:** docs
 **Severity:** low
@@ -1672,7 +1672,7 @@ Change the path reference to `examples/codebase-audit/codebase-audit.js`.
 
 ---
 
-## BUG-093 — ctx.log level silently dropped when called with opts-object form
+## BUG-093 ✅ FIXED — ctx.log level silently dropped when called with opts-object form
 
 **Area:** runtime / runCtx
 **Severity:** medium
@@ -1689,7 +1689,7 @@ Fix logFn to: `const level = (typeof levelArg === 'string' ? levelArg : (levelAr
 
 ---
 
-## BUG-094 — writeWorkflowTool promptGuidelines tells LLM 'workflow is already running' when it may not be
+## BUG-094 ✅ FIXED — writeWorkflowTool promptGuidelines tells LLM 'workflow is already running' when it may not be
 
 **Area:** runtime / writeWorkflowTool
 **Severity:** low
@@ -1706,7 +1706,7 @@ Change the promptGuideline to 'tell the user the workflow was saved and register
 
 ---
 
-## BUG-W03 — Workflow: fix agents timeout waiting for API capacity, not doing work
+## BUG-W03 ✅ FIXED (addressed) — Workflow: fix agents timeout waiting for API capacity, not doing work
 
 **Area:** dispatcher / workflow authoring  
 **Severity:** High — majority of agents silently killed before executing  
@@ -1755,7 +1755,7 @@ behaviour clearly.
 
 ---
 
-## BUG-W05 — No per-agent `timeoutMs` guidance in docs or promptSnippet
+## BUG-W05 ✅ FIXED (addressed) — No per-agent `timeoutMs` guidance in docs or promptSnippet
 
 **Area:** docs / `writeWorkflowTool.ts`  
 **Severity:** Medium — common authoring footgun with no warning  
@@ -1900,7 +1900,7 @@ Strip execution-constraint fields (timeoutMs, at minimum) from the opts object b
 
 ---
 
-## BUG-102 — ctx.consensus similarity option in runtime-api.md silently ignored — single threshold does double duty
+## BUG-102 ✅ FIXED (duplicate) — ctx.consensus similarity option in runtime-api.md silently ignored — single threshold does double duty
 
 **Area:** Runtime / stdlib / docs
 **Severity:** Medium
@@ -1917,7 +1917,7 @@ Either document that a single threshold controls both dimensions, or implement s
 
 ---
 
-## BUG-103 — schema extractJson failure logged as agent_error in ledger — misleading error attribution
+## BUG-103 ✅ FIXED (duplicate) — schema extractJson failure logged as agent_error in ledger — misleading error attribution
 
 **Area:** Runtime / runCtx / ledger
 **Severity:** Low
@@ -1934,7 +1934,7 @@ Move extractJson call to after the try/catch/finally block (or to a separate try
 
 ---
 
-## BUG-104 — retry backoffMs default mismatch between docs and implementation
+## BUG-104 ✅ FIXED (duplicate) — retry backoffMs default mismatch between docs and implementation
 
 **Area:** Runtime / stdlib / docs
 **Severity:** Low
@@ -1951,7 +1951,7 @@ Update runtime-api.md to say default 100ms, or change the implementation default
 
 ---
 
-## BUG-105 — ctx.phase failMode option entirely absent from runtime-api.md
+## BUG-105 ✅ FIXED (duplicate) — ctx.phase failMode option entirely absent from runtime-api.md
 
 **Area:** Docs
 **Severity:** Low
