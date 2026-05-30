@@ -436,26 +436,9 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     budgetReserved += 1;
     agentCount++;
 
-    const startedAt = nowIso();
     const t0 = nowMs();
-    await opts.ledger.append({
-      type: "agent_start",
-      at: startedAt,
-      phaseName: phaseName,
-      agentId: handle.id,
-      promptHash: sha256(handle.prompt),
-    });
-    try {
-      opts.emitOverlayEvent?.("pi-workflows.agent.started", {
-        runId: opts.runMeta.id,
-        phaseName,
-        agentId: handle.id,
-        startedAt,
-      });
-    } catch {
-      /* swallow */
-    }
 
+    // BUG-W04: agent_start is logged AFTER semaphore acquire (see below).
     // BUG-101: strip execution-only fields (timeoutMs) before hashing so
     // innocent timeout changes don't invalidate valid cache entries.
     const { timeoutMs: _omitTimeout, ...cacheableOpts } = handle.opts as Record<string, unknown> & { timeoutMs?: unknown };
@@ -582,6 +565,28 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       token.release();
     }
     try {
+      // BUG-W04: log agent_start AFTER semaphore acquire so the ledger
+      // accurately reflects when the agent actually started executing,
+      // not when it was submitted to the queue.
+      const startedAt = nowIso();
+      await opts.ledger.append({
+        type: "agent_start",
+        at: startedAt,
+        phaseName: phaseName,
+        agentId: handle.id,
+        promptHash: sha256(handle.prompt),
+      });
+      try {
+        opts.emitOverlayEvent?.("pi-workflows.agent.started", {
+          runId: opts.runMeta.id,
+          phaseName,
+          agentId: handle.id,
+          startedAt,
+        });
+      } catch {
+        /* swallow */
+      }
+
       // Schema injection: build the actual prompt with schema instruction.
       const effectivePrompt = schema
         ? handle.prompt + buildSchemaInstruction(schema)
