@@ -48,7 +48,7 @@ export function captureParentLiveness(
   argv: { pid?: number; hrtimeBigint?: () => bigint } = {},
 ): ParentLivenessFields {
   const parentPid = argv.pid ?? process.pid;
-  const ht = (argv.hrtimeBigint ?? process.hrtime.bigint).call(process.hrtime);
+  const ht = argv.hrtimeBigint ? argv.hrtimeBigint() : process.hrtime.bigint();
   // hrtime.bigint() is monotonic; we serialize as decimal so the
   // manifest survives JSON round-trip without precision loss.
   const parentStartTime = ht.toString();

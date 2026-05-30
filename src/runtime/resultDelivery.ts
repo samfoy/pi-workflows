@@ -314,7 +314,7 @@ export async function deliverRunResult(opts: DeliverOptions): Promise<RunResultF
     approval: opts.approval,
   });
   try {
-    opts.pi.sendMessage(card, { triggerTurn: false, deliverAs: "nextTurn" });
+    await Promise.resolve(opts.pi.sendMessage(card, { triggerTurn: false, deliverAs: "nextTurn" }));
   } catch {
     /* swallow — best-effort surface */
   }
@@ -322,14 +322,14 @@ export async function deliverRunResult(opts: DeliverOptions): Promise<RunResultF
   // 3. appendEntry pi-workflows.run.ended (PRD §6.6).
   if (typeof opts.pi.appendEntry === "function") {
     try {
-      opts.pi.appendEntry(RUN_ENDED_ENTRY, {
+      await Promise.resolve(opts.pi.appendEntry(RUN_ENDED_ENTRY, {
         runId: opts.runId,
         workflowName: opts.workflowName,
         outcome: opts.outcome,
         runDir: opts.runDirAbs,
         endedAt: opts.endedAt,
         durationMs: opts.durationMs,
-      });
+      }));
     } catch {
       /* swallow */
     }
@@ -345,14 +345,14 @@ export async function deliverRunResult(opts: DeliverOptions): Promise<RunResultF
   ) {
     if (typeof opts.pi.sendUserMessage === "function") {
       try {
-        opts.pi.sendUserMessage(opts.finishCallbackPrompt);
+        await Promise.resolve(opts.pi.sendUserMessage(opts.finishCallbackPrompt));
       } catch {
         /* swallow */
       }
     } else {
       // Fallback for older pi builds — surface as an annotation card.
       try {
-        opts.pi.sendMessage(
+        await Promise.resolve(opts.pi.sendMessage(
           {
             customType: RESULT_CUSTOM_TYPE,
             content:
@@ -366,7 +366,7 @@ export async function deliverRunResult(opts: DeliverOptions): Promise<RunResultF
             },
           },
           { triggerTurn: false, deliverAs: "nextTurn" },
-        );
+        ));
       } catch {
         /* swallow */
       }
