@@ -99,15 +99,34 @@ reduces reproducibility.
 
 ---
 
-## `ctx.phase(name, handles)` — Run agents in parallel
+## `ctx.phase(name, handles, opts?)` — Run agents in parallel
 
 **Signature:**
 ```ts
-phase(name: string, agents: ReadonlyArray<AgentHandle>): Promise<ReadonlyArray<AgentResult>>
+phase(
+  name: string,
+  agents: ReadonlyArray<AgentHandle>,
+  opts?: PhaseOpts,
+): Promise<ReadonlyArray<AgentResult | null>>
 ```
 
 Runs all handles concurrently, bounded by the run semaphore (default cap 16).
 Results are returned in the same order as `agents` (position-stable).
+
+**`PhaseOpts`:**
+```ts
+interface PhaseOpts {
+  /**
+   * How to handle agent failures.
+   * `'throw'` (default): any failure rejects with AggregateError.
+   * `'null'`: failed agents return null; the phase resolves with partial results.
+   */
+  failMode?: 'throw' | 'null';
+}
+```
+
+With `failMode: 'null'`, elements in the result array are `AgentResult | null`.
+Filter out nulls to work only with successful agents.
 
 **`AgentResult`:**
 ```ts
@@ -123,13 +142,19 @@ interface AgentResult {
 }
 ```
 
-**Example:**
+**Example — default (throw on failure):**
 ```js
 const [analysis, review] = await ctx.phase("analyse+review", [
   ctx.agent("Analyse for security issues", { id: "sec" }),
   ctx.agent("Code review this PR", { id: "review" }),
 ]);
 console.log(analysis.text, review.text);
+```
+
+**Example — `failMode: 'null'` (continue on partial failure):**
+```js
+const results = await ctx.phase("batch", handles, { failMode: 'null' });
+const succeeded = results.filter(r => r !== null);
 ```
 
 **Notes:**
@@ -272,17 +297,18 @@ similarity floor.
 **`ConsensusOpts`:**
 ```ts
 interface ConsensusOpts {
-  threshold?: number;    // fraction of pairs that must agree (default 0.5)
-  similarity?: number;   // Jaccard floor per pair (default 0.6)
+  threshold?: number; // default 0.6
 }
 ```
+
+`threshold` controls **both** the per-pair Jaccard similarity floor and the pair-fraction agreement check. A pair counts as "agreeing" if its Jaccard score ≥ `threshold`, and the overall result is `agreed: true` if the fraction of agreeing pairs ≥ `threshold`.
 
 **`ConsensusResult`:**
 ```ts
 interface ConsensusResult {
   readonly agreed: boolean;
-  readonly majorityText: string; // highest mean similarity to all others
-  readonly scores: ReadonlyArray<{ agentId: string; meanSimilarity: number }>;
+  readonly majorityText: string;          // response with highest mean similarity
+  readonly responses: ReadonlyArray<string>;
 }
 ```
 
@@ -336,8 +362,8 @@ swallowed.
 **`RetryOpts`:**
 ```ts
 interface RetryOpts {
-  maxAttempts?: number; // default 3
-  backoffMs?: number;   // initial backoff in ms (default 500)
+  attempts?: number;    // default 3
+  backoffMs?: number;   // initial backoff in ms (default 100)
   signal?: AbortSignal; // additional abort signal (also checks ctx.signal)
 }
 ```
@@ -345,7 +371,7 @@ interface RetryOpts {
 ```js
 const result = await ctx.retry(
   () => fetchSomethingUnreliable(),
-  { maxAttempts: 5, backoffMs: 1000 },
+  { attempts: 5, backoffMs: 1000 },
 );
 ```
 
