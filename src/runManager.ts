@@ -265,7 +265,12 @@ export interface RunManagerStartOptions {
   ) => void;
 }
 
-const SLICE_PROJECT_VERSION = "0.1.0";
+import { createRequire } from "node:module";
+const _require = createRequire(import.meta.url);
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const _pkg = _require("../package.json") as { version: string };
+
+const SLICE_PROJECT_VERSION = _pkg.version;
 const PI_BUILTIN_VERSION_PROBE = "unknown";
 
 /**
