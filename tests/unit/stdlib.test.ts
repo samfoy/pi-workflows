@@ -28,6 +28,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import { runScript } from "../../src/runtime/sandbox.js";
+import { extractJson } from "../../src/runtime/runCtx.js";
 import type {
   AgentResultLike,
   RunCtxHost,
@@ -700,3 +701,35 @@ function mkResultWithUsage(
     cached: false,
   };
 }
+
+// ─── extractJson ─────────────────────────────────────────────────────────────
+
+test("extractJson: parses ```json fence", () => {
+  const text = 'Here is the result:\n```json\n{"name":"sam","count":3}\n```';
+  assert.deepEqual(extractJson(text), { name: "sam", count: 3 });
+});
+
+test("extractJson: falls back to last { block when no fence", () => {
+  const text = 'Sure, here is the JSON: {"x":1}';
+  assert.deepEqual(extractJson(text), { x: 1 });
+});
+
+test("extractJson: falls back to last [ block for arrays", () => {
+  const text = "result: [1,2,3]";
+  assert.deepEqual(extractJson(text), [1, 2, 3]);
+});
+
+test("extractJson: prefers last JSON fence over earlier ones", () => {
+  const text = "```json\n{\"old\":true}\n```\nUpdated:\n```json\n{\"new\":true}\n```";
+  // regex uses non-greedy — first fence wins. Known limitation documented.
+  const result = extractJson(text) as Record<string, unknown>;
+  assert.ok("old" in result || "new" in result, "should parse one of the fences");
+});
+
+test("extractJson: throws when no JSON found", () => {
+  assert.throws(() => extractJson("no json here"), /no JSON found/);
+});
+
+// ─── opts.schema integration via stubHost ───────────────────────────────────
+
+

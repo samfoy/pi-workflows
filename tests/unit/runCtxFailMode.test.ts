@@ -156,3 +156,48 @@ test("getBudgetSpent: starts at 0, accumulates totalTokens after phase", async (
     rmSync(runDir, { recursive: true, force: true });
   }
 });
+
+// ─── opts.schema integration ─────────────────────────────────────────────────
+
+test("opts.schema: output is parsed from ```json fence in agent text", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wf-schema-"));
+  try {
+    const jsonText = '```json\n{"items":["x","y"],"count":2}\n```';
+    const dispatch = (opts: DispatcherOptions): Promise<AgentResult> =>
+      Promise.resolve({
+        ok: true,
+        agentId: opts.agentId,
+        text: jsonText,
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+        toolCalls: 0,
+        durationMs: 1,
+        transcriptPath: "",
+        exitCode: 0,
+      });
+    const { host } = await makeCtx(dir, dispatch);
+    const handleRes = host.agent("list items", { id: "lister", schema: { type: "object" } });
+    assert.ok(handleRes.ok);
+    const results = await host.phase("work", [handleRes.value]);
+    assert.ok(results.ok);
+    const r = results.value[0] as AgentResult & { output?: unknown };
+    assert.equal(r.text, jsonText);
+    assert.deepEqual(r.output, { items: ["x", "y"], count: 2 });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("opts.schema: no output field when schema absent", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wf-noschema-"));
+  try {
+    const { host } = await makeCtx(dir, successDispatch);
+    const handleRes = host.agent("do thing", { id: "worker" });
+    assert.ok(handleRes.ok);
+    const results = await host.phase("work", [handleRes.value]);
+    assert.ok(results.ok);
+    const r = results.value[0] as AgentResult & { output?: unknown };
+    assert.equal(r.output, undefined);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

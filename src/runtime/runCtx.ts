@@ -343,16 +343,22 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       }
       // Strip non-JSON fields, return plain JSON-cloneable agent results.
       const out: AgentResultLike[] = results.map(
-        (r): AgentResultLike => ({
-          agentId: r.agentId,
-          text: r.text,
-          usage: r.usage as unknown as Readonly<Record<string, number>>,
-          durationMs: r.durationMs,
-          toolCalls: r.toolCalls,
-          transcriptPath: r.transcriptPath,
-          // F6 — slice 8a derives `cached` (dispatcher doesn't).
-          cached: (r as unknown as { cached?: boolean }).cached === true,
-        }),
+        (r): AgentResultLike => {
+          const entry: AgentResultLike = {
+            agentId: r.agentId,
+            text: r.text,
+            usage: r.usage as unknown as Readonly<Record<string, number>>,
+            durationMs: r.durationMs,
+            toolCalls: r.toolCalls,
+            transcriptPath: r.transcriptPath,
+            // F6 — slice 8a derives `cached` (dispatcher doesn't).
+            cached: (r as unknown as { cached?: boolean }).cached === true,
+          };
+          // Preserve schema output if present.
+          const out = (r as unknown as { output?: unknown }).output;
+          if (out !== undefined) (entry as Record<string, unknown>).output = out;
+          return entry;
+        },
       );
       return { ok: true, value: out };
     } catch (e) {
