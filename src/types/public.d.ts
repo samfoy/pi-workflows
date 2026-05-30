@@ -304,6 +304,8 @@ export interface WorkflowContext {
    * resolves immediately using `opts.default` (default `true`).
    */
   gate(message: string, opts?: { default?: boolean }): Promise<boolean>;
+
+  /**
    * Cross-run memoization. Runs `fn()` on the first call for `key`
    * and caches the result in `~/.pi/agent/memos/<scope>/memo.jsonl`.
    * Subsequent calls within the TTL window return the cached value

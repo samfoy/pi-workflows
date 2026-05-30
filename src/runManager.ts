@@ -292,7 +292,7 @@ export interface RunManagerStartOptions {
       | "pi-workflows.meta.phases"
       | "pi-workflows.progress"
       | "pi-workflows.report"
-      | "pi-workflows.agent.log",
+      | "pi-workflows.agent.log"
       | "pi-workflows.gate.requested"
       | "pi-workflows.gate.resolved",
     data: Readonly<Record<string, unknown>>,

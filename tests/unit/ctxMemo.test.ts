@@ -42,6 +42,10 @@ function makeHost(overrides: Partial<RunCtxHost> = {}): RunCtxHost {
     finishCallback: () => ok(null),
     getBudgetSpent: () => 0,
     tokenBudget: null,
+    progress: () => ok(null),
+    checkpoint: async () => ok(false),
+    report: () => ok(null),
+    gate: async () => ok(true),
     memo_check: async () => ok({ hit: false }),
     memo_set: async () => ok(null),
   };

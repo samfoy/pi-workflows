@@ -119,7 +119,7 @@ export interface RunCtxHostOptions {
       | "pi-workflows.meta.phases"
       | "pi-workflows.progress"
       | "pi-workflows.report"
-      | "pi-workflows.agent.log",
+      | "pi-workflows.agent.log"
       | "pi-workflows.gate.requested"
       | "pi-workflows.gate.resolved",
     data: Readonly<Record<string, unknown>>,
@@ -1011,6 +1011,12 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       } catch {
         /* emission failures must not abort the run */
       }
+      return { ok: true, value: null };
+    } catch (e) {
+      return { ok: false, error: captureError(e) };
+    }
+  }
+
   // ─── ctx.memo (gap/ctx-memo) ─────────────────────────────────────────
   // memo_check: check the persistent memo store for a hit.
   // memo_set:   persist a value after a sandbox-side fn() produces it.
@@ -1139,6 +1145,8 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     } catch (e) {
       return { ok: false, error: captureError(e) };
     }
+  }
+
   function parseMemoOpts(optsArg: unknown): { scope: "global" | "project"; ttlMs: number } {
     const scope: "global" | "project" =
       optsArg !== null &&
