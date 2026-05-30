@@ -350,9 +350,7 @@ export function detectShape(source: string): {
     // This makes them plain declarations the vm can run as a script body.
     const body =
       source
-        .replace(/^(\s*)export\s+(const|let|var|async\s+function|function)\s/gm, "$1$2 ")
-        // Ensure `async function` is preserved correctly after stripping `export async function`
-        .replace(/^(\s*)export\s+(async)\s+(function)\s/gm, "$1$2 $3 ") +
+        .replace(/^(\s*)export\s+(const|let|var|async\s+function|function)\s/gm, "$1$2 ") +
       "\nreturn await main(ctx);";
     return { body, shape: "C" };
   }
@@ -919,6 +917,10 @@ function buildInitScript(nonce: string): string {
     "const __hostGlobals = __bridge.hostGlobals;",
     "const __runCtxHost = __bridge.runCtxHost;",
     "",
+    "// Capture Reflect.apply before any user code runs and before Reflect is",
+    "// frozen — all bridge wrappers use this reference (BUG-106).",
+    "const __reflect_apply = Reflect.apply;",
+    "",
     "// wrapHostMethod: builds a Context-realm function that delegates",
     "// to a host-realm method via Reflect.apply. The returned function's",
     "// .constructor is the Context's Function, so a script doing",
@@ -926,7 +928,7 @@ function buildInitScript(nonce: string): string {
     "// Context (gets the process stub) instead of the host realm.",
     "// PRD §8.3.4.",
     "function wrapHostMethod(host) {",
-    "  return function (...args) { return Reflect.apply(host, this, args); };",
+    "  return function (...args) { return __reflect_apply(host, this, args); };",
     "}",
     "",
     "// Timers — Context-realm wrappers. `cb` is a Context-realm function;",
@@ -1161,12 +1163,12 @@ function buildInitScript(nonce: string): string {
     "  // AsyncFunction (a different intrinsic) and would fail the",
     "  // wrapper-identity oracle in tests/security/host-realm-eval.",
     "  return function (...args) {",
-    "    return Promise.resolve(Reflect.apply(host, this, args)).then(__pi_unwrap);",
+    "    return Promise.resolve(__reflect_apply(host, this, args)).then(__pi_unwrap);",
     "  };",
     "}",
     "function wrapHostSync(host) {",
     "  return function (...args) {",
-    "    return __pi_unwrap(Reflect.apply(host, this, args));",
+    "    return __pi_unwrap(__reflect_apply(host, this, args));",
     "  };",
     "}",
     "",
@@ -1330,6 +1332,12 @@ function buildInitScript(nonce: string): string {
     "Object.freeze(RegExp.prototype);",
     "Object.freeze(JSON);",
     "Object.freeze(Math);",
+    "Object.freeze(Reflect);",
+    "// BUG-108: freeze AsyncFunction/GeneratorFunction prototypes so user code",
+    "// cannot add a `then` property and make stdlib async helpers thenable.",
+    "Object.freeze(Object.getPrototypeOf(async function(){}));",
+    "Object.freeze(Object.getPrototypeOf(function*(){}));",
+    "Object.freeze(Object.getPrototypeOf(async function*(){}));",
     "// Note: globalThis itself is frozen at the very end of init by",
     "// finalFreeze() — host-side, after we install console+crypto+webapis.",
   ].join("\n");
