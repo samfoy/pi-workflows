@@ -1224,6 +1224,7 @@ function buildInitScript(nonce: string): string {
     "      try { snapshot[i].call(undefined, { type: 'abort', target: signal }); } catch (_) {}",
     "    }",
     "  }",
+    "  Object.freeze(signal);",
     "  return { signal: signal, abort: abort };",
     "};",
     "",
