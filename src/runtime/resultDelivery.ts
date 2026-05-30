@@ -32,6 +32,7 @@
  * keeps the unit tests free of a `FakePi` / fs setup.
  */
 
+import { randomBytes } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 
@@ -229,7 +230,7 @@ export async function writeResultFile(
   payload: RunResultFile,
 ): Promise<void> {
   const target = join(runDirAbs, "result.json");
-  const tmp = join(runDirAbs, `result.json.tmp-${process.pid}-${Date.now()}`);
+  const tmp = join(runDirAbs, `result.json.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`);
   const body = JSON.stringify(payload, null, 2) + "\n";
   await fs.writeFile(tmp, body, "utf8");
   await fs.rename(tmp, target);
