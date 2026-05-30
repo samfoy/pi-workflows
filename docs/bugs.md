@@ -1519,7 +1519,7 @@ Iterate project rows first (seeding `merged` with project entries), then iterate
 
 ---
 
-## BUG-084 — captureParentLiveness calls process.hrtime.bigint with wrong this context
+## BUG-084 ✅ FIXED — captureParentLiveness calls process.hrtime.bigint with wrong this context
 
 **Area:** runtime / manifestWriter
 **Severity:** low
@@ -1536,7 +1536,7 @@ Change to `const ht = argv.hrtimeBigint ? argv.hrtimeBigint() : process.hrtime.b
 
 ---
 
-## BUG-085 — deliverRunResult pi API calls not awaited inside try/catch — async rejections escape unhandled
+## BUG-085 ✅ FIXED — deliverRunResult pi API calls not awaited inside try/catch — async rejections escape unhandled
 
 **Area:** runtime / resultDelivery
 **Severity:** low
