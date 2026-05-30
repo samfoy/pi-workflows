@@ -1315,7 +1315,7 @@ Add `if (prior && isTerminalState(prior.state)) return;` at the top of the `run.
 
 ---
 
-## BUG-072 — _overlayOpen flag never cleared when pi-tui calls dispose() without resolving customApi promise
+## BUG-072 ✅ FIXED — _overlayOpen flag never cleared when pi-tui calls dispose() without resolving customApi promise
 
 **Area:** overlay / TUI
 **Severity:** high
