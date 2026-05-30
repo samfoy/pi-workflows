@@ -870,9 +870,14 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       requestRender();
     },
     dispose(): void {
-      // pi-tui calls dispose() if the host tears down; delegate to the
-      // shared cleanup helper so all subscriptions and timers are released.
-      cleanup();
+      // pi-tui calls dispose() if the host tears down (forced unmount,
+      // session end). Delegate to close() — not just cleanup() — so
+      // opts.done() is also invoked and the customApi promise resolves,
+      // triggering the .finally() handler that clears _overlayOpen.
+      // Without this, _overlayOpen stays true forever and every
+      // subsequent /workflows invocation returns { mode: 'already-open' }.
+      // close() is idempotent via the `cleaned` flag in cleanup().
+      close();
     },
   };
   return component;
