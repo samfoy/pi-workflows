@@ -251,6 +251,31 @@ export interface WorkflowContext {
    * to avoid leaks.
    */
   sleep(ms: number, opts?: SleepOpts): Promise<void>;
+
+  /**
+   * Cross-run memoization. Runs `fn()` on the first call for `key`
+   * and caches the result in `~/.pi/agent/memos/<scope>/memo.jsonl`.
+   * Subsequent calls within the TTL window return the cached value
+   * without re-running `fn`. Safe to use for expensive agent
+   * operations that do not need to be repeated across workflow runs.
+   *
+   * @param key   - Human-readable string key (sha256'd internally).
+   * @param fn    - Async producer; called only on cache miss.
+   * @param opts  - TTL and scope overrides.
+   */
+  memo<T = unknown>(
+    key: string,
+    fn: () => Promise<T>,
+    opts?: {
+      /** TTL in milliseconds. Default: 24 hours. */
+      ttl?: number;
+      /**
+       * `'global'` (default) — shared across all projects.
+       * `'project'` — scoped to `ctx.run.cwd`.
+       */
+      scope?: 'global' | 'project';
+    },
+  ): Promise<T>;
 }
 
 /** Default-exported workflow function. */

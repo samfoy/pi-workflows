@@ -418,6 +418,8 @@ function hostReturning(value: unknown): RunCtxHost {
     finishCallback: () => ok(null),
     getBudgetSpent: () => 0,
     tokenBudget: null,
+    memo_check: async () => ok({ hit: false as const }),
+    memo_set: async () => ok(null),
   };
 }
 

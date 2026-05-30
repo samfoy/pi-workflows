@@ -513,6 +513,23 @@ export interface RunCtxHost {
   finishCallback(prompt: unknown): RunCtxBridgeResult<null>;
   /** Returns accumulated token spend across all agent results so far. Sync. */
   getBudgetSpent(): number;
+  /**
+   * gap/ctx-memo — check if a cross-run memo entry exists and is fresh.
+   * Returns `{ hit: true, value }` on a cache hit, or `{ hit: false }` on miss.
+   */
+  memo_check(
+    key: string,
+    opts?: unknown,
+  ): Promise<RunCtxBridgeResult<{ hit: boolean; value?: unknown }>>;
+  /**
+   * gap/ctx-memo — persist a value in the cross-run memo store.
+   * Called by the sandbox side after `fn()` resolves on a cache miss.
+   */
+  memo_set(
+    key: string,
+    value: unknown,
+    opts?: unknown,
+  ): Promise<RunCtxBridgeResult<null>>;
 }
 
 /**

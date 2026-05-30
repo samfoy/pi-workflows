@@ -477,6 +477,69 @@ await ctx.sleep(2000, { signal: ctx.signal });  // cancellable
 
 ---
 
+## `ctx.memo(key, fn, opts?)` — Cross-run memoization
+
+**Signature:**
+```ts
+memo<T = unknown>(
+  key: string,
+  fn: () => Promise<T>,
+  opts?: { ttl?: number; scope?: 'global' | 'project' }
+): Promise<T>
+```
+
+Runs `fn()` on the first call for `key` and stores the result in a
+persistent JSONL file outside the run directory. Subsequent calls within
+the TTL window return the cached value without running `fn`.
+
+Use this for expensive operations that should not repeat across workflow
+runs — codebase audits, dependency graphs, network lookups.
+
+**`opts`:**
+| Field | Default | Notes |
+|-------|---------|-------|
+| `ttl` | `86400000` (24 h) | TTL in milliseconds. |
+| `scope` | `'global'` | `'global'` — shared across all projects. `'project'` — scoped to `ctx.run.cwd`. |
+
+**Storage paths:**
+- `global` → `~/.pi/agent/memos/global/memo.jsonl`
+- `project` → `~/.pi/agent/memos/projects/<sha256(cwd)>/memo.jsonl`
+
+Format: append-only JSONL, same atomic-write + compaction semantics as
+`cache.jsonl`. Compaction fires at 500 entries and drops expired records.
+
+```js
+// Expensive codebase audit — redo at most once per day.
+const modules = await ctx.memo(
+  'codebase-modules-v1',
+  async () => {
+    const [result] = await ctx.phase('audit', [
+      ctx.agent('List all modules in this codebase', { id: 'auditor' }),
+    ]);
+    return result.text;
+  },
+  { ttl: 24 * 60 * 60 * 1000, scope: 'project' },
+);
+
+// Short-TTL cache (1 hour), global scope.
+const meta = await ctx.memo(
+  'package-meta',
+  async () => fetchPackageMeta(),
+  { ttl: 60 * 60 * 1000 },
+);
+```
+
+**Notes:**
+- `fn` runs inside the sandbox. The *result* is what's stored, not the
+  function source.
+- The value must be JSON-serializable. Non-serializable returns throw a
+  `TypeError` before writing to disk.
+- `key` is sha256'd internally — you can use any human-readable string.
+- Expired entries are evicted lazily (at read time). Compaction removes
+  them at 500 appends.
+
+---
+
 ## Security model
 
 Workflow scripts execute inside a `node:vm` Context. The sandbox:

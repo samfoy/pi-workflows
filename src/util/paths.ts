@@ -15,6 +15,7 @@
  * own the actual mkdir.
  */
 
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
@@ -111,6 +112,45 @@ export function agentTranscriptPath(runDirAbs: string, agentId: string): string 
  */
 export function agentStderrPath(runDirAbs: string, agentId: string): string {
   return join(agentsDir(runDirAbs, true), `${agentId}.stderr`);
+}
+
+// ─── Memo paths ──────────────────────────────────────────────────────────────
+
+/**
+ * `~/.pi/agent/memos/` — root for all cross-run memo stores.
+ */
+export function memosHome(): string {
+  return join(homedir(), PI_AGENT_HOME, AGENT_DIR_SEGMENT, "memos");
+}
+
+/**
+ * `<memoScopeDir>` for a scope:
+ *   - global  → `~/.pi/agent/memos/global/`
+ *   - project → `~/.pi/agent/memos/projects/<sha256(projectRoot)>/`
+ *
+ * `projectRoot` is required when scope is `'project'`; ignored otherwise.
+ */
+export function memoScopeDir(scope: 'global' | 'project', projectRoot?: string): string {
+  if (scope === 'global') {
+    return join(memosHome(), 'global');
+  }
+  if (!projectRoot) throw new Error('memoScopeDir: projectRoot required for project scope');
+  const hash = createHash('sha256').update(projectRoot).digest('hex');
+  return join(memosHome(), 'projects', hash);
+}
+
+/**
+ * `<memoScopeDir>/memo.jsonl` — the append-only memo store file.
+ */
+export function memoPath(scope: 'global' | 'project', projectRoot?: string): string {
+  return join(memoScopeDir(scope, projectRoot), 'memo.jsonl');
+}
+
+/**
+ * Tmp file used during atomic compaction of the memo store.
+ */
+export function memoPathTmp(scope: 'global' | 'project', projectRoot?: string): string {
+  return join(memoScopeDir(scope, projectRoot), 'memo.jsonl.tmp');
 }
 
 /**
