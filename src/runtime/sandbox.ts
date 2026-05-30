@@ -752,8 +752,29 @@ export class Sandbox {
     try {
       promise = script.runInContext(this.context, {
         displayErrors: true,
+        timeout: this.opts.runScriptTimeoutMs ?? 5_000,
       }) as Promise<unknown>;
     } catch (e) {
+      // vm.Script.runInContext throws when the synchronous portion
+      // exceeds `timeout`. The thrown object may have `instanceof Error`
+      // === false due to cross-realm prototype chains, so we check
+      // `name`/`message` directly.
+      const _eAny = e as Record<string, unknown> | null;
+      if (
+        _eAny != null &&
+        typeof _eAny.message === "string" &&
+        (_eAny.message.includes("Script execution timed out") ||
+          _eAny.message.includes("Execution timed out") ||
+          _eAny.message.includes("timed out"))
+      ) {
+        throw violation(
+          "sync-timeout",
+          `workflow synchronous execution exceeded ${
+            this.opts.runScriptTimeoutMs ?? 5_000
+          }ms — possible infinite loop before first await`,
+          e,
+        );
+      }
       // Synchronous error in the wrapper itself — re-throw the
       // Context-realm Error.
       throw rethrowAcrossRealm(e, this.context);

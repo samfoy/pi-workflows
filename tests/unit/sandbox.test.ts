@@ -589,3 +589,52 @@ test("BUG-001: ctx.agent() used correctly via ctx.phase() still works", async ()
   );
   assert.equal(r.returnValue, stubText, "result.text should be 'Paris'");
 });
+
+// ─── sync-timeout (runScriptTimeoutMs) ───────────────────────────────────────
+
+// Helper: check that a thrown value looks like a sync-timeout error.
+// Note: the vm timeout fires a cross-realm Error so `instanceof Error` is
+// unreliable here — we check message/violation directly.
+function isSyncTimeoutError(err: unknown): boolean {
+  if (err == null || typeof err !== "object") return false;
+  const e = err as Record<string, unknown>;
+  if (e["violation"] === "sync-timeout") return true;
+  const msg = typeof e["message"] === "string" ? (e["message"] as string).toLowerCase() : "";
+  return msg.includes("timed out") || msg.includes("timeout");
+}
+
+test("sync-timeout: tight while(true){} before first await is caught", async () => {
+  const { signal } = fresh();
+  await assert.rejects(
+    () =>
+      runScript(`while(true){}`, {
+        signal,
+        runScriptTimeoutMs: 100,
+      }),
+    (err: unknown) => {
+      assert.ok(isSyncTimeoutError(err), `expected sync-timeout, got: ${JSON.stringify(err)}`);
+      return true;
+    },
+  );
+});
+
+test("sync-timeout: normal fast script is unaffected", async () => {
+  const { signal } = fresh();
+  const r = await runScript(`return 42;`, { signal, runScriptTimeoutMs: 100 });
+  assert.equal(r.returnValue, 42);
+});
+
+test("sync-timeout: tight loop inside async main before first await is caught", async () => {
+  const { signal } = fresh();
+  await assert.rejects(
+    () =>
+      runScript(
+        `export default async function main(ctx, input) { while(true){} }`,
+        { signal, runScriptTimeoutMs: 100 },
+      ),
+    (err: unknown) => {
+      assert.ok(isSyncTimeoutError(err), `expected sync-timeout, got: ${JSON.stringify(err)}`);
+      return true;
+    },
+  );
+});

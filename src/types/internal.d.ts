@@ -355,7 +355,8 @@ export interface SandboxViolationError extends Error {
     | "timer-host-exception"
     | "init-script-failed"
     | "shape-detect-failed"
-    | "compile-failed";
+    | "compile-failed"
+    | "sync-timeout";
   /** Optional underlying cause from the host side (not surfaced to script). */
   readonly hostCause?: unknown;
 }
@@ -425,6 +426,18 @@ export interface SandboxOptions {
    * that doesn't care about the runtime.
    */
   readonly runCtxHost?: RunCtxHost;
+  /**
+   * Timeout (ms) for the synchronous portion of `runScript` — the initial
+   * `script.runInContext` call before the first `await`. Catches tight
+   * `while(true){}` loops that haven't yielded yet.
+   *
+   * Default: 5000 ms (5 s).
+   *
+   * Partial fix for the worker_threads gap (parity-gaps.md). After the
+   * first `await`, the sync timeout no longer applies; async infinite
+   * loops still wedge the process.
+   */
+  readonly runScriptTimeoutMs?: number;
 }
 
 // ─── slice 8a — runtime ctx host bridge ────────────────────────────
