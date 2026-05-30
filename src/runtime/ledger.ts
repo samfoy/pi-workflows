@@ -94,6 +94,8 @@ export const TERMINAL_STATES: ReadonlySet<RunState> = new Set<RunState>([
 export const RESUMABLE_STATES: ReadonlySet<RunState> = new Set<RunState>([
   "paused",
   "running",
+  "approved",
+  "pending",
 ]);
 
 /**
