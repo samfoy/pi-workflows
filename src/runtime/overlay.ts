@@ -344,6 +344,8 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   let openedAgentId: string | undefined;
   let agentLogTail: string[] = [];
   let agentDetailDebounceTimer: ReturnType<typeof setTimeout> | null = null;
+  // BUG-034: scroll offset for the agent-detail log view (0 = newest).
+  let agentLogScrollOffset = 0;
   // Slice 15: GC dialog state
   let gcDialogState: GcDialogState | null = null;
   let gcBusy = false;
@@ -485,9 +487,11 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           ...(transcriptPath !== undefined ? { transcriptPath } : {}),
         };
         const detailHelp = helpVisible ? helpForState("agent-detail", undefined) : [];
-        const detailOpts: { nowMs?: number; help?: typeof detailHelp; banner?: string } = {
+        const detailOpts: { nowMs?: number; help?: typeof detailHelp; banner?: string; scrollOffset?: number } = {
           nowMs: opts.nowMs(),
           help: detailHelp,
+          // BUG-034: pass current scroll offset so log view respects j/k navigation.
+          scrollOffset: agentLogScrollOffset,
         };
         if (banner !== undefined) detailOpts.banner = banner;
         const rendered = renderAgentDetail(snap, detailOpts);
@@ -542,6 +546,15 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   const handleAction = (action: HotkeyAction): void => {
     switch (action.kind) {
       case "navigate-up":
+        // BUG-034: scroll the log in agent-detail, don't mutate runs-list cursor.
+        if (view === "agent-detail") {
+          const maxOffset = Math.max(0, agentLogTail.length - 12);
+          if (agentLogScrollOffset < maxOffset) {
+            agentLogScrollOffset++;
+            requestRender();
+          }
+          return;
+        }
         if (view === "phase-view") {
           if (phaseCursor > 0) {
             phaseCursor--;
@@ -555,6 +568,14 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         }
         return;
       case "navigate-down": {
+        // BUG-034: scroll the log in agent-detail, don't mutate runs-list cursor.
+        if (view === "agent-detail") {
+          if (agentLogScrollOffset > 0) {
+            agentLogScrollOffset--;
+            requestRender();
+          }
+          return;
+        }
         if (view === "phase-view") {
           if (openedRunId !== undefined) {
             const snap = opts.phaseRegistry.getRunSnapshot(openedRunId);
@@ -589,6 +610,8 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           view = "phase-view";
           openedAgentId = undefined;
           agentLogTail = [];
+          // BUG-034: reset scroll offset when leaving agent-detail.
+          agentLogScrollOffset = 0;
           banner = undefined;
           requestRender();
           return;
@@ -753,9 +776,17 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           } else {
             gcBusy = true;
             const toDelete = [...gcDialogState.candidates];
+            // BUG-036: re-query active run IDs fresh at confirmation time
+            // so any run resumed/retried since dialog-open is protected.
+            const freshActiveIds = new Set(
+              opts.registry.listSummaries()
+                .filter((s) => s.state === "running" || s.state === "paused")
+                .map((s) => s.runId),
+            );
             applyGc(toDelete, {
               ...(opts.gcCutoffDays !== undefined ? { cutoffDays: opts.gcCutoffDays } : {}),
               ...(opts.gcRunsRootOverride !== undefined ? { runsRootOverride: opts.gcRunsRootOverride } : {}),
+              activeRunIds: freshActiveIds,
             })
               .then(({ deleted, errors }) => {
                 gcDialogState = {

@@ -65,6 +65,18 @@ export function captureParentLiveness(
 }
 
 /**
+ * BUG-038: Per-runDir write queue to serialize concurrent
+ * writeParentLivenessFields calls. Without this, two callers racing on
+ * the same runDir both read the same original manifest, both merge their
+ * own fields, and one write silently overwrites the other.
+ *
+ * Keyed by absolute runDir path. Each entry is the tail of the chain;
+ * errors are swallowed from the chain tail so a failed write doesn’t
+ * block all future writes for the same run.
+ */
+const livenessWriteQueue = new Map<string, Promise<void>>();
+
+/**
  * Write/merge the parent-liveness fields into `<runDir>/manifest.json`.
  *
  * Behavior:
@@ -75,8 +87,22 @@ export function captureParentLiveness(
  *     then we overwrite the parent-liveness keys).
  *   - Atomic via temp-file + rename. The temp file lives in the
  *     `<runDir>` itself so the rename is on the same filesystem.
+ *   - Serialized per-runDir (BUG-038): concurrent callers for the same
+ *     runDir are queued so no write is lost.
  */
-export async function writeParentLivenessFields(
+export function writeParentLivenessFields(
+  runDirAbs: string,
+  fields: ParentLivenessFields,
+): Promise<void> {
+  const pending = livenessWriteQueue.get(runDirAbs) ?? Promise.resolve();
+  const next = pending.then(() => _doWriteParentLiveness(runDirAbs, fields));
+  // Don’t let a single failure permanently block the queue for this run.
+  livenessWriteQueue.set(runDirAbs, next.catch(() => {}));
+  return next;
+}
+
+/** Inner write logic extracted for the serialization wrapper above. */
+async function _doWriteParentLiveness(
   runDirAbs: string,
   fields: ParentLivenessFields,
 ): Promise<void> {

@@ -136,6 +136,11 @@ export async function loadGcCandidates(
 
 /**
  * Run GC with apply=true. Returns deleted count.
+ *
+ * BUG-036: Re-validate candidates against a fresh active-run set at
+ * deletion time. Any candidate whose runId is in `opts.activeRunIds`
+ * is skipped (and logged as a warning) because the run may have been
+ * restarted or resumed between dialog-open and user confirmation.
  */
 export async function applyGc(
   candidates: ReadonlyArray<GcCandidate>,
@@ -146,6 +151,12 @@ export async function applyGc(
   const deleted: string[] = [];
   const errors: { runId: string; message: string }[] = [];
   for (const c of candidates) {
+    // BUG-036: skip if this runId is now active (run resumed/retried
+    // between dialog-open and confirmation).
+    if (opts.activeRunIds?.has(c.runId)) {
+      opts.log?.("warn", `gc: skipping ${c.runId} — now active (resumed or retried since dialog opened)`);
+      continue;
+    }
     try {
       rmSync(c.runDir, { recursive: true, force: true });
       deleted.push(c.runId);
