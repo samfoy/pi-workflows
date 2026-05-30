@@ -1033,7 +1033,20 @@ export type LedgerEntry =
       readonly message: string;
     }
   | { readonly type: "gate_requested"; readonly at: string; readonly message: string }
-  | { readonly type: "gate_resolved"; readonly at: string; readonly approved: boolean };
+  | { readonly type: "gate_resolved"; readonly at: string; readonly approved: boolean }
+  | {
+      /**
+       * IPC inspection surface (gap/ipc-inspection): a verbatim copy of a
+       * `pi.appendEntry` event written into the run ledger so that a
+       * supervisor process can observe all overlay events by tailing
+       * `ledger.jsonl` alone. Only events whose payload contains a `runId`
+       * field are routed here.
+       */
+      readonly type: "appendEntry";
+      readonly at: string;
+      readonly customType: string;
+      readonly data: Readonly<Record<string, unknown>>;
+    };
 
 /**
  * Reader output from `LedgerReader.read()`. Shape designed for slice 11
@@ -1301,4 +1314,17 @@ export interface ResultCardOutput {
 // export const RESULT_CUSTOM_TYPE = "pi-workflows.result"; // see resultDelivery.ts
 // export const RUN_STARTED_ENTRY = "pi-workflows.run.started"; // see resultDelivery.ts
 // export const RUN_ENDED_ENTRY = "pi-workflows.run.ended"; // see resultDelivery.ts
+
+/**
+ * IPC control command written by a supervisor to `<runDir>/ctrl.jsonl`.
+ * The run's ctrl-file watcher dispatches these to `run.pause()`,
+ * `run.resumePaused()`, or `run.stop()`.
+ */
+export interface CtrlCommand {
+  readonly type: "pause" | "resume" | "stop";
+  /** ISO-8601 timestamp set by the sender — informational only. */
+  readonly at?: string;
+  /** Optional free-text reason forwarded to the Run method. */
+  readonly reason?: string;
+}
 

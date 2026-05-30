@@ -42,6 +42,8 @@
  * Refs: PRD §10.1, §10.5, plan.md §4 Slice 13, slice_13_concerns.
  */
 
+import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeSync } from "node:fs";
+import { dirname } from "node:path";
 import type { Run } from "../runManager.js";
 import type { RunOutcome } from "../types/internal.js";
 
@@ -370,6 +372,40 @@ export class ActiveRunsRegistry {
         }
       }
     });
+  }
+
+  /**
+   * IPC inspection surface: write the active-runs index file atomically.
+   *
+   * Writes `{ runs: [...], updatedAt }` to `<path>.tmp`, fsyncs,
+   * then renames over `<path>`. Callers (index.ts subscriber) call this
+   * on every registry notification so the file stays current.
+   * Best-effort: all errors are swallowed so a filesystem hiccup never
+   * disrupts the running workflow.
+   */
+  writeActiveIndex(path: string): void {
+    const runs: string[] = [];
+    for (const [id, s] of this.#summaries) {
+      if (!isTerminalState(s.state)) runs.push(id);
+    }
+    const payload =
+      JSON.stringify({ runs, updatedAt: new Date().toISOString() }) + "\n";
+    const tmp = path + ".tmp";
+    const dir = dirname(path);
+    try {
+      // Ensure the runs dir exists (it may not on first startup).
+      mkdirSync(dir, { recursive: true });
+    } catch { /* swallow */ }
+    try {
+      const fd = openSync(tmp, "w", 0o644);
+      try {
+        writeSync(fd, payload);
+        fsyncSync(fd);
+      } finally {
+        closeSync(fd);
+      }
+      renameSync(tmp, path);
+    } catch { /* best-effort — never disrupt a running workflow */ }
   }
 
   /** Test seam: clear all state (handles + summaries + listeners). */

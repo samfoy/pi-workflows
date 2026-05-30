@@ -42,6 +42,8 @@
  * Refs: PRD §10.1, §10.5, §10.6, §10.9, plan.md §4 Slice 13.
  */
 
+import { closeSync, fsyncSync, openSync, writeSync } from "node:fs";
+import { join } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionCommandContextLike,
@@ -134,6 +136,52 @@ export interface MountResult {
 }
 
 /**
+ * IPC inspection surface: write a `pi.appendEntry` event as an
+ * `"appendEntry"` ledger entry to the run's `ledger.jsonl`.
+ *
+ * Only events whose payload contains a `runId` string are routed; all
+ * others are silently skipped (we can't know which run's ledger to
+ * target). The write is synchronous + fsynced to guarantee the entry is
+ * visible to a supervisor that polls the file immediately after.
+ *
+ * All errors are swallowed — a filesystem hiccup must never disrupt a
+ * running workflow. Called from the `bindRegistryToFeed` shim so that
+ * the registry's `applyEntry()` (which sets `runDir` on the summary)
+ * has already run before we look up the path.
+ */
+function appendEntryToLedger(
+  customType: string,
+  data: unknown,
+  registry: ActiveRunsRegistry,
+): void {
+  const d = data as Record<string, unknown> | null | undefined;
+  if (typeof d?.runId !== "string") return;
+  const runId = d.runId;
+  // Prefer the registry's runDir (set by run.started); fall back to
+  // the standard path derivation so events that arrive before the
+  // summary is populated still land in the right file.
+  const summary = registry.getSummary(runId);
+  const dir = summary?.runDir ?? null;
+  if (!dir) return; // no runDir yet — skip (run.started not seen)
+  const line =
+    JSON.stringify({
+      type: "appendEntry",
+      at: new Date().toISOString(),
+      customType,
+      data: d,
+    }) + "\n";
+  try {
+    const fd = openSync(join(dir, "ledger.jsonl"), "a", 0o644);
+    try {
+      writeSync(fd, line);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } catch { /* best-effort */ }
+}
+
+/**
  * **F3 / S8** — bind the registry to the appendEntry feed. Should be
  * called once at extension load (not per-overlay-mount). Wraps
  * `pi.appendEntry` so that emissions from this process also drive the
@@ -166,6 +214,13 @@ export function bindRegistryToFeed(
       if (entry !== null) registry.applyEntry(entry);
       const phaseEntry = narrowPhaseEntry(customType, data);
       if (phaseEntry !== null) phaseRegistry.applyEntry(phaseEntry);
+      // IPC inspection surface: also write the appendEntry event to
+      // the run's ledger.jsonl so a supervisor can observe all events
+      // by tailing a single file. Only events with a `runId` payload
+      // field are routed to a run's ledger.
+      if (customType.startsWith("pi-workflows.")) {
+        appendEntryToLedger(customType, data, registry);
+      }
     }
   };
   return () => {

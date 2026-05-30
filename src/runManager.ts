@@ -38,7 +38,7 @@
  * the integration test relies on it.
  */
 
-import { promises as fs } from "node:fs";
+import { promises as fs, watch as fsWatch, readFileSync } from "node:fs";
 import { join } from "node:path";
 
 import type {
@@ -878,6 +878,11 @@ export async function startWorkflowRun(
     activeRunsRegistry.register(runId, run, summaryPatch);
   }
 
+  // IPC inspection surface: watch <runDir>/ctrl.jsonl for commands
+  // from a supervisor process. The watcher is best-effort — if it
+  // fails to start, the run continues normally.
+  startCtrlWatcher(runDirAbs, run);
+
   return run;
 }
 
@@ -913,4 +918,71 @@ async function writeManifestPartial(
   const tmp = join(runDirAbs, `manifest.json.tmp-${process.pid}-${Date.now()}`);
   await fs.writeFile(tmp, JSON.stringify(merged, null, 2) + "\n", "utf8");
   await fs.rename(tmp, target);
+}
+
+// ─── IPC ctrl-file watcher ─────────────────────────────────────────────────
+
+/**
+ * Watch `<runDir>/ctrl.jsonl` for control commands emitted by a
+ * supervisor process. New lines are parsed as `CtrlCommand` objects
+ * and dispatched to the appropriate `Run` method:
+ *
+ *   `{ type: "pause" }`  → `run.pause(reason ?? "ctrl-ipc")`
+ *   `{ type: "resume" }` → `run.resumePaused(reason ?? "ctrl-ipc")`
+ *   `{ type: "stop" }`   → `run.stop(reason ?? "ctrl-ipc")`
+ *
+ * The watcher is mounted on the run **directory** (not the file) so
+ * it fires even when `ctrl.jsonl` is created for the first time by a
+ * supervisor. `fs.watch()` on a non-existent file throws; watching the
+ * directory avoids that while staying event-driven.
+ *
+ * The watcher is torn down when `run.terminated` resolves. All errors
+ * are swallowed — a watcher failure must never affect the run itself.
+ */
+function startCtrlWatcher(runDirAbs: string, run: Run): void {
+  const ctrlFile = join(runDirAbs, "ctrl.jsonl");
+  let bytesRead = 0;
+
+  function processNewLines(): void {
+    try {
+      const buf = readFileSync(ctrlFile);
+      if (buf.length <= bytesRead) return;
+      const newData = buf.slice(bytesRead).toString("utf8");
+      bytesRead = buf.length;
+      for (const rawLine of newData.split("\n")) {
+        const line = rawLine.trim();
+        if (!line) continue;
+        let cmd: { type: string; reason?: string } | null = null;
+        try {
+          cmd = JSON.parse(line) as { type: string; reason?: string };
+        } catch { /* malformed JSON — skip */ }
+        if (!cmd || typeof cmd.type !== "string") continue;
+        const reason = typeof cmd.reason === "string" ? cmd.reason : "ctrl-ipc";
+        if (cmd.type === "pause") {
+          void run.pause(reason).catch(() => undefined);
+        } else if (cmd.type === "resume") {
+          void run.resumePaused(reason).catch(() => undefined);
+        } else if (cmd.type === "stop") {
+          try { run.stop(reason); } catch { /* idempotent */ }
+        }
+      }
+    } catch { /* ENOENT or other — file not yet created */ }
+  }
+
+  let watcher: ReturnType<typeof fsWatch> | null = null;
+  try {
+    watcher = fsWatch(runDirAbs, (_event, filename) => {
+      if (filename === "ctrl.jsonl") processNewLines();
+    });
+    // Unref so the watcher doesn't keep the process alive after the
+    // session ends (matches the pattern used by fs.watch in slice 16).
+    watcher.unref();
+  } catch {
+    /* best-effort — watch not available on all platforms */
+  }
+
+  // Tear down on run termination.
+  run.terminated.then(() => {
+    try { watcher?.close(); } catch { /* already closed */ }
+  }).catch(() => undefined);
 }

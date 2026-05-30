@@ -40,7 +40,7 @@ import { createHotReloadWatcher } from "./runtime/hotReload.js";
 import { getActiveRuns } from "./runtime/activeRuns.js";
 import { registerWriteWorkflowTool } from "./runtime/writeWorkflowTool.js";
 import { startWorkflowRun } from "./runManager.js";
-import { projectWorkflowsDir, workflowsHome } from "./util/paths.js";
+import { activeIndexPath, projectWorkflowsDir, workflowsHome } from "./util/paths.js";
 import type {
   ExtensionAPI,
   ExtensionContextLike,
@@ -79,7 +79,18 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
   // tolerated (the wrap returns a no-op disposer).
   bindRegistryToFeed(pi);
 
-  // write_workflow tool: register once at extension load (not session-locked).
+  // IPC inspection surface: keep the active-runs index file current.
+  // A supervisor process reads ~/.pi/agent/workflows/runs/.active to
+  // discover which runs are currently in-flight without needing to
+  // scan the full runs directory.
+  const activeReg = getActiveRuns();
+  const activeIdxFile = activeIndexPath();
+  // Write immediately so the file exists even before any run starts.
+  activeReg.writeActiveIndex(activeIdxFile);
+  // Re-write on every registry notification (state changes, new runs, etc.).
+  activeReg.subscribe(() => {
+    activeReg.writeActiveIndex(activeIdxFile);
+  });
   // Hot-reload watcher (slice 16) picks up the saved file automatically.
   // In recursive sessions we still register the tool but restrict the save
   // path to project scope only (same as command registration policy).
@@ -320,3 +331,8 @@ function isConductorInstalled(cwd: string): boolean {
   }
   return false;
 }
+
+// IPC inspection surface: export WorkflowClient so supervisor agents can
+// import it directly without digging into runtime internals.
+export { WorkflowClient } from "./client.js";
+export type { WorkflowClientOptions, ActiveRunsIndex, RunStateSummary } from "./client.js";
