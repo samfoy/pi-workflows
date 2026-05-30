@@ -1043,7 +1043,7 @@ Track budgetSpent as an atomic accumulation — increment an optimistic counter 
 
 ---
 
-## BUG-056 — failMode invalid values silently coerced to 'throw' — typos undetectable
+## BUG-056 ✅ FIXED — failMode invalid values silently coerced to 'throw' — typos undetectable
 
 **Area:** runtime / runCtx
 **Severity:** low
@@ -1060,7 +1060,7 @@ After parsing failMode, validate that when `optsArg.failMode` is present it must
 
 ---
 
-## BUG-057 — phase() failMode='null' path casts Array<AgentResultLike | null> to readonly AgentResultLike[] — drops | null from bridge type
+## BUG-057 ✅ FIXED — phase() failMode='null' path casts Array<AgentResultLike | null> to readonly AgentResultLike[] — drops | null from bridge type
 
 **Area:** runtime / runCtx
 **Severity:** medium
