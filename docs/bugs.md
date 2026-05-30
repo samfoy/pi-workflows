@@ -401,7 +401,7 @@ Split into two variables. Read 'opts.similarity' (default 0.6) for the Jaccard f
 
 ---
 
-## BUG-018 — failMode parsing in phase() is outside the try/catch block — adversarial opts can escape the RunCtxBridgeResult envelope
+## BUG-018 ✅ FIXED — failMode parsing in phase() is outside the try/catch block — adversarial opts can escape the RunCtxBridgeResult envelope
 
 **Area:** runtime/runCtx
 **Severity:** low
@@ -503,7 +503,7 @@ Wrap all helper functions in an IIFE at the top of the init script: (function(){
 
 ---
 
-## BUG-024 — logSink accumulates across multiple runScript() calls on the same Sandbox instance
+## BUG-024 ✅ FIXED — logSink accumulates across multiple runScript() calls on the same Sandbox instance
 
 **Area:** sandbox
 **Severity:** low
@@ -520,7 +520,7 @@ At the start of runScript(), record const logStart = this.logSink.length and ret
 
 ---
 
-## BUG-025 — Pre-run abort guard creates Error without name='AbortError', inconsistent with raceWithAbort
+## BUG-025 ✅ FIXED — Pre-run abort guard creates Error without name='AbortError', inconsistent with raceWithAbort
 
 **Area:** sandbox
 **Severity:** low
@@ -588,7 +588,7 @@ Move acquireResumeLock to after the approval gate resolves with `approved: true`
 
 ---
 
-## BUG-029 — stderrTee WriteStream not closed on !child.stdout early-exit path in dispatchAgent
+## BUG-029 ✅ FIXED — stderrTee WriteStream not closed on !child.stdout early-exit path in dispatchAgent
 
 **Area:** dispatcher
 **Severity:** low
