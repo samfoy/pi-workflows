@@ -1145,7 +1145,7 @@ Wrap the `raceWithAbort` call in a try/finally and unconditionally call `hostSig
 
 ---
 
-## BUG-062 — `RunCtxHostInternal` missing `tokenBudget` field — `ctx.budget.total` always `undefined`, `budget.remaining()` returns `NaN`
+## BUG-062 ✅ FIXED — `RunCtxHostInternal` missing `tokenBudget` field — `ctx.budget.total` always `undefined`, `budget.remaining()` returns `NaN`
 
 **Area:** runtime / sandbox
 **Severity:** medium
