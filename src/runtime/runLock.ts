@@ -112,6 +112,10 @@ export function acquireResumeLock(opts: {
   if (opened === null) {
     // Lock exists — inspect the holder.
     let body: Partial<ResumeLockBody> = {};
+    // emptyBody means the file exists but has no content yet: this is the
+    // TOCTOU window between openSync(O_EXCL) and writeSync in the winner.
+    // Treat it as a live (held) lock — do NOT delete it.
+    let emptyBody = false;
     try {
       const raw = readFileSync(lockPath, "utf-8");
       if (raw.trim().length > 0) {
@@ -119,6 +123,8 @@ export function acquireResumeLock(opts: {
         if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
           body = parsed as Partial<ResumeLockBody>;
         }
+      } else {
+        emptyBody = true;
       }
     } catch {
       // Unreadable lock — treat as stale.
@@ -127,8 +133,7 @@ export function acquireResumeLock(opts: {
     const holderPid = typeof body.pid === "number" ? body.pid : 0;
     const holderBootId = typeof body.bootId === "string" ? body.bootId : "";
     const isStale =
-      holderPid === 0 ||
-      !liveness(holderPid, holderBootId);
+      !emptyBody && (holderPid === 0 || !liveness(holderPid, holderBootId));
     if (!isStale) {
       throw new ResumeLockedError({
         runId: opts.runId,
