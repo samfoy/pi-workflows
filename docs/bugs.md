@@ -1128,7 +1128,7 @@ Rename `maxAttempts` to `attempts` in the docs (matching public.d.ts and stdlib 
 
 ---
 
-## BUG-061 — `fireCtxAbort` abort listener never removed from `hostSignal` after normal script completion
+## BUG-061 ✅ FIXED — `fireCtxAbort` abort listener never removed from `hostSignal` after normal script completion
 
 **Area:** runtime / sandbox
 **Severity:** medium
