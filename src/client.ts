@@ -45,6 +45,11 @@ import { closeSync, fsyncSync, openSync, promises as fsp, readFileSync, writeSyn
 import { join } from "node:path";
 
 import { LedgerReader, replayState } from "./runtime/ledger.js";
+import {
+  forkFromCheckpoint,
+  type ForkFromCheckpointOptions,
+} from "./runtime/forkRun.js";
+import type { Run } from "./runManager.js";
 import { activeIndexPath, runDir as runDirFor } from "./util/paths.js";
 import type { CtrlCommand, LedgerEntry, RunState } from "./types/internal.js";
 
@@ -353,6 +358,8 @@ export class WorkflowClient {
         type: cmd.type,
         at: new Date().toISOString(),
         ...(cmd.reason !== undefined ? { reason: cmd.reason } : {}),
+        ...(cmd.value !== undefined ? { value: cmd.value } : {}),
+        ...(cmd.key !== undefined ? { key: cmd.key } : {}),
       } satisfies CtrlCommand) + "\n";
     const ctrlFile = join(dir, "ctrl.jsonl");
     const fd = openSync(ctrlFile, "a", 0o644);
@@ -362,6 +369,93 @@ export class WorkflowClient {
     } finally {
       closeSync(fd);
     }
+  }
+
+  /**
+   * ZONE_HITL: deliver an answer to a pending `ctx.interrupt(...)`
+   * call running in the target workflow. Equivalent to
+   * `sendControl(runId, { type: "resume-interrupt", value, key })`
+   * but with a friendlier signature.
+   *
+   * `value` must be JSON-cloneable — it is serialised verbatim into
+   * `<runDir>/ctrl.jsonl` and rehydrated on the run side.
+   *
+   * `opts.key` is optional; when omitted the run resolves its
+   * FIFO-oldest pending interrupt (the typical "answer the current
+   * question" workflow). Pass an explicit key when targeting a
+   * specific call site (e.g. multiple concurrent interrupts).
+   *
+   * The write is synchronous + fsynced so the answer is durable
+   * before this method resolves.
+   *
+   * @throws if the run directory doesn't exist or the write fails.
+   */
+  async resume(
+    runId: string,
+    value: unknown,
+    opts?: { readonly key?: string },
+  ): Promise<void> {
+    // JSON-clone defense — catches cycles/realm-leaks at the supervisor
+    // boundary so the failure surfaces here, not on the run side.
+    try {
+      JSON.stringify(value === undefined ? null : value);
+    } catch (cycErr) {
+      throw new TypeError(
+        `WorkflowClient.resume: value is not JSON-serializable (${(cycErr as Error).message})`,
+      );
+    }
+    const cmd: Pick<CtrlCommand, "type"> & Partial<CtrlCommand> = {
+      type: "resume-interrupt",
+      value: value === undefined ? null : value,
+    };
+    if (opts?.key !== undefined) (cmd as { key?: string }).key = opts.key;
+    await this.sendControl(runId, cmd);
+  }
+
+  // ──────────────────────────────────────────────────────────────────
+  //  5. Time travel — fork-from-checkpoint (ZONE_TIMETRAVEL)
+  // ──────────────────────────────────────────────────────────────────
+
+  /**
+   * Fork a new workflow run from `parentRunId` at the named phase.
+   *
+   * The new run inherits the parent's ledger + cache state up to (but
+   * not including) the `phase_start` for `opts.atPhase`. Phase-1
+   * agents replay from cache; phases at or after the fork point are
+   * re-dispatched, optionally with `opts.overrides` exposed via
+   * `await ctx.cache.get('__fork_overrides__')`.
+   *
+   * The parent run is left intact — its ledger / cache / manifest are
+   * not touched. The new run's manifest carries `parentRunId` +
+   * `forkAtPhase` for lineage.
+   *
+   * Note: `WorkflowClient` is otherwise pure file-IO; this method is
+   * the one exception — it spawns a real run via the runtime
+   * substrate (sandbox, dispatcher, ledger). Callers that don't need
+   * to actually start a run should call the lower-level
+   * `forkFromCheckpoint` runtime export and inspect the seeded
+   * runDir directly.
+   *
+   * @example
+   * ```ts
+   * const client = new WorkflowClient();
+   * const fork = await client.forkFromCheckpoint("wf-abc123", {
+   *   atPhase: "plan",
+   *   overrides: { strategy: "alt-B" },
+   *   preApproved: true,
+   * });
+   * await fork.terminated;
+   * ```
+   */
+  async forkFromCheckpoint(
+    parentRunId: string,
+    opts: ForkFromCheckpointOptions,
+  ): Promise<Run> {
+    const merged: ForkFromCheckpointOptions =
+      this.#runsHomeOverride !== undefined && opts.resolveRunDir === undefined
+        ? { ...opts, resolveRunDir: (id: string) => join(this.#runsHomeOverride!, id) }
+        : opts;
+    return forkFromCheckpoint(parentRunId, merged);
   }
 
   // ──────────────────────────────────────────────────────────────────

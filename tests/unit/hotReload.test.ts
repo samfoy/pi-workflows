@@ -391,6 +391,115 @@ test("dispose is idempotent: double-dispose does not throw", async () => {
   await assert.doesNotReject(() => handle.dispose(), "double dispose should not throw");
 });
 
+test("add: invokes injected registerCommand callback with WorkflowFile (real-registration path)", async () => {
+  const { pi, registered } = makeFakePi();
+  const registry = makeRegistry();
+  const watcher = new FakeWatcher();
+  const calls: WorkflowFile[] = [];
+
+  const handle = await createHotReloadWatcher({
+    projectDir: "/tmp/proj/.pi/workflows",
+    personalDir: "/tmp/home/.pi/agent/workflows",
+    registry,
+    pi,
+    activeRuns: new ActiveRunsRegistry(),
+    recursive: false,
+    debounceMs: 50,
+    watcherFactory: () => watcher,
+    registerCommand: (file) => {
+      calls.push(file);
+      // Mimic what registerSingleWorkflowCommand does: register a real
+      // (non-stub) handler so `registered.has(...)` reflects production.
+      pi.registerCommand(file.name, {
+        description: `Workflow: ${file.name}`,
+        handler: async () => { /* real handler stand-in */ },
+      });
+    },
+  });
+
+  watcher.emit("add", "/tmp/proj/.pi/workflows/runtime-added.js");
+  await flushTimers(100);
+
+  assert.equal(calls.length, 1, "registerCommand should be invoked exactly once");
+  assert.equal(calls[0]!.name, "runtime-added");
+  assert.equal(calls[0]!.absPath, "/tmp/proj/.pi/workflows/runtime-added.js");
+  assert.equal(calls[0]!.scope, "project");
+  assert.ok(registered.has("runtime-added"), "command should be registered via callback");
+  assert.ok(registry.has("runtime-added"), "registry should have entry");
+
+  await handle.dispose();
+});
+
+test("add: when registerCommand is provided, no stub-handler log is emitted", async () => {
+  const { pi } = makeFakePi();
+  const registry = makeRegistry();
+  const watcher = new FakeWatcher();
+  const logLines: string[] = [];
+
+  const handle = await createHotReloadWatcher({
+    projectDir: "/tmp/proj/.pi/workflows",
+    personalDir: "/tmp/home/.pi/agent/workflows",
+    registry,
+    pi,
+    activeRuns: new ActiveRunsRegistry(),
+    recursive: false,
+    debounceMs: 50,
+    watcherFactory: () => watcher,
+    log: (level, msg) => logLines.push(`${level}: ${msg}`),
+    registerCommand: (file) => {
+      // Real handler stand-in — does NOT emit the stub log line.
+      pi.registerCommand(file.name, {
+        description: `Workflow: ${file.name}`,
+        handler: async () => { /* real handler */ },
+      });
+    },
+  });
+
+  watcher.emit("add", "/tmp/proj/.pi/workflows/real-handler.js");
+  await flushTimers(100);
+
+  // The legacy stub fallback inside hotReload would have emitted
+  // "invoked stub handler" if it had run. Its absence proves the
+  // injected callback path was taken.
+  assert.ok(
+    !logLines.some((l) => l.includes("invoked stub handler")),
+    "stub-handler log line must not appear when registerCommand is provided",
+  );
+
+  await handle.dispose();
+});
+
+test("change: invokes registerCommand callback for re-registration", async () => {
+  const absPath = "/tmp/proj/.pi/workflows/changing.js";
+  const { pi } = makeFakePi();
+  const registry = makeRegistry([
+    { name: "changing", absPath, scope: "project" },
+  ]);
+  const watcher = new FakeWatcher();
+  const calls: WorkflowFile[] = [];
+
+  const handle = await createHotReloadWatcher({
+    projectDir: "/tmp/proj/.pi/workflows",
+    personalDir: "/tmp/home/.pi/agent/workflows",
+    registry,
+    pi,
+    activeRuns: new ActiveRunsRegistry(),
+    recursive: false,
+    debounceMs: 50,
+    watcherFactory: () => watcher,
+    registerCommand: (file) => calls.push(file),
+  });
+
+  watcher.emit("change", absPath);
+  await flushTimers(100);
+
+  assert.equal(calls.length, 1, "registerCommand should be invoked on change");
+  assert.equal(calls[0]!.name, "changing");
+  assert.equal(calls[0]!.scope, "project");
+
+  await handle.dispose();
+});
+
 test("hidden file: silently ignored (no warning)", async () => {
   const { pi, registered } = makeFakePi();
   const registry = makeRegistry();

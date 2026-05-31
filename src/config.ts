@@ -26,6 +26,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { resolveOtelEndpoint } from "./runtime/otelExporter.js";
 import type { Config } from "./types/internal.js";
 
 const ENV_DISABLE = "PI_DISABLE_WORKFLOWS";
@@ -51,6 +52,7 @@ export function loadConfig(opts: LoadConfigOpts = {}): Config {
       recursive: truthy(env[ENV_RECURSIVE]),
       disabledBy: "env",
       autoResumeCrashedWorkflows: false,
+      otelTracesEndpoint: null,
     };
   }
 
@@ -69,6 +71,7 @@ export function loadConfig(opts: LoadConfigOpts = {}): Config {
       recursive: truthy(env[ENV_RECURSIVE]),
       disabledBy: "setting",
       autoResumeCrashedWorkflows: false,
+      otelTracesEndpoint: null,
     };
   }
 
@@ -82,6 +85,7 @@ export function loadConfig(opts: LoadConfigOpts = {}): Config {
     recursive: truthy(env[ENV_RECURSIVE]),
     disabledBy: null,
     autoResumeCrashedWorkflows,
+    otelTracesEndpoint: resolveOtelEndpoint(env),
   };
 }
 

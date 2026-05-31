@@ -65,6 +65,8 @@ import { runApprovalGate } from "./approval.js";
 import { acquireResumeLock, ResumeLockedError } from "./runLock.js";
 import { sha256 } from "../util/hash.js";
 import { runDir as runDirFor } from "../util/paths.js";
+import { crossCheckAgentMemoryDirs } from "./agentMemory.js";
+import { log as ledgerLog } from "./ledger.js";
 import {
   Run,
   RunCancelledError,
@@ -383,6 +385,38 @@ export async function resumeRun(
     // 7. Append a `resume` ledger entry.
     await ledger.append({ type: "resume", at: resumedAt });
 
+    // ZONE_MEMORY follow-up #3 — resume cross-check.
+    // The manifest may carry `agentMemoryDirs` from the original
+    // run. If the cwd or $HOME has shifted between runs the recorded
+    // dir may no longer match what `resolveMemoryDir` would produce
+    // today. Surface that as a `log` warning so the operator sees
+    // "memory persona X moved from A to B" before the sub-agent
+    // dispatches against a now-empty new dir.
+    const recordedMemoryDirs = (manifest as { agentMemoryDirs?: unknown })
+      .agentMemoryDirs;
+    if (
+      recordedMemoryDirs !== undefined &&
+      recordedMemoryDirs !== null &&
+      typeof recordedMemoryDirs === "object" &&
+      !Array.isArray(recordedMemoryDirs)
+    ) {
+      const mismatches = crossCheckAgentMemoryDirs({
+        recorded: recordedMemoryDirs as Record<string, string>,
+        cwd,
+        runDirAbs,
+      });
+      for (const m of mismatches) {
+        const liveSummary = m.liveCandidates
+          .map((c) => `${c.scope}=${c.dir}`)
+          .join(", ");
+        await ledgerLog(
+          ledger,
+          "warn",
+          `agent-memory: dir for "${m.name}" moved between runs (recorded: ${m.recordedDir}; live: ${liveSummary})`,
+        );
+      }
+    }
+
     // 8. State-machine reset for sweep-rollback. If we were `failed:
     //    parent-crash`, append an explicit transition to `running`
     //    with reason="resume-rollback". This is technically illegal
@@ -473,6 +507,71 @@ export async function resumeRun(
         };
       });
 
+    // ZONE_HITL: pending-interrupt registry mirrored from
+    // startWorkflowRun. Resumed runs install the same FIFO queue so
+    // ctrl.jsonl `resume-interrupt` commands and TUI follow-ups land
+    // identically on a resumed run.
+    interface PendingInterrupt {
+      readonly key: string;
+      readonly resolve: (value: unknown) => void;
+      readonly reject: (reason: unknown) => void;
+    }
+    const pendingInterrupts: PendingInterrupt[] = [];
+    const waitForInterrupt = (
+      key: string,
+      signal: AbortSignal,
+    ): Promise<unknown> =>
+      new Promise<unknown>((resolve, reject) => {
+        if (signal.aborted) {
+          reject(signal.reason ?? new Error("aborted"));
+          return;
+        }
+        let settled = false;
+        const removeFromQueue = (): void => {
+          const idx = pendingInterrupts.findIndex((p) => p === entry);
+          if (idx >= 0) pendingInterrupts.splice(idx, 1);
+        };
+        const onAbort = (): void => {
+          if (!settled) {
+            settled = true;
+            removeFromQueue();
+            reject(signal.reason ?? new Error("aborted"));
+          }
+        };
+        signal.addEventListener("abort", onAbort, { once: true });
+        const entry: PendingInterrupt = {
+          key,
+          resolve: (value: unknown) => {
+            if (!settled) {
+              settled = true;
+              signal.removeEventListener("abort", onAbort);
+              removeFromQueue();
+              resolve(value);
+            }
+          },
+          reject: (reason: unknown) => {
+            if (!settled) {
+              settled = true;
+              signal.removeEventListener("abort", onAbort);
+              removeFromQueue();
+              reject(reason);
+            }
+          },
+        };
+        pendingInterrupts.push(entry);
+      });
+
+    // ZONE_HITL: replay-perfect HITL. Walk the prior ledger and seed
+    // a Map<key, value> from `interrupt_resolved` entries. ctx.interrupt
+    // short-circuits when its sequence-derived key is in this map —
+    // restoring the previous answer without re-prompting the supervisor.
+    const replayResolvedInterrupts = new Map<string, unknown>();
+    for (const e of entries) {
+      if (e.type === "interrupt_resolved") {
+        replayResolvedInterrupts.set(e.key, e.value);
+      }
+    }
+
     let controlChain: Promise<unknown> = Promise.resolve();
     function withControlLock<T>(fn: () => Promise<T>): Promise<T> {
       const next = controlChain.then(fn, fn);
@@ -505,6 +604,8 @@ export async function resumeRun(
       ...(opts.nowIso ? { nowIso: opts.nowIso } : {}),
       ...(opts.nowMs ? { nowMs: opts.nowMs } : {}),
       waitForGate,
+      waitForInterrupt,
+      replayResolvedInterrupts,
     });
 
     const sandbox = new Sandbox({
@@ -703,6 +804,20 @@ export async function resumeRun(
       respondGate: (approved: boolean) => {
         if (pendingGate !== null) pendingGate.resolve(approved);
       },
+      respondInterrupt: (value: unknown, key?: string): boolean => {
+        let entry: PendingInterrupt | undefined;
+        if (key !== undefined) {
+          const idx = pendingInterrupts.findIndex((p) => p.key === key);
+          if (idx >= 0) entry = pendingInterrupts[idx];
+        } else {
+          entry = pendingInterrupts[0];
+        }
+        if (entry === undefined) return false;
+        entry.resolve(value);
+        return true;
+      },
+      stopAgent: (agentId: string) => ctxHost.stopAgent(agentId),
+      restartAgent: (agentId: string) => ctxHost.restartAgent(agentId),
     };
 
     // Slice 13/F3: register the resumed run in the active-runs

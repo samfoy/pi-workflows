@@ -21,6 +21,7 @@ import {
   RECURSION_GUARD_ENV,
   extractAssistantText,
   recoverFromTranscript,
+  TRANSCRIPT_RECOVERY_MAX_BYTES,
 } from "../../src/runtime/dispatcher.js";
 import { extractMetaAcceptEdits } from "../../src/runManager.js";
 import {
@@ -28,6 +29,12 @@ import {
   MalformedAgentOutputError,
   MockFixtureMissingError,
 } from "../../src/runtime/errors.js";
+import {
+  agentStderrPath,
+  agentTranscriptPath,
+  assertSafeAgentId,
+  InvalidAgentIdError,
+} from "../../src/util/paths.js";
 import { makeFakeSpawn } from "../helpers/fakeChild.js";
 import { realPiStream } from "../helpers/realPiStream.js";
 
@@ -699,3 +706,310 @@ test("extractMetaAcceptEdits: returns false for acceptEdits: false", () => {
   const src = `export const meta = { name: "test", description: "x", acceptEdits: false };`;
   assert.equal(extractMetaAcceptEdits(src), false);
 });
+
+// ─── agentId path-traversal sanitization (recon: ZONE_DISPATCHER) ───
+//
+// `agentTranscriptPath` and `agentStderrPath` feed agentId into
+// `path.join` to derive `<runDir>/agents/<id>.{jsonl,stderr}`. An
+// attacker-controlled id like `../../etc/passwd` would write outside
+// the per-run dir; `/` and `\\` are path separators on POSIX/Windows;
+// `\\0` truncates paths in some FS APIs; a leading `.` produces hidden
+// files that `ls` / backup tools skip. All must be rejected.
+
+test("assertSafeAgentId: accepts plain alphanumeric / dash / underscore", () => {
+  for (const id of ["a", "agent1", "writer-2", "main_agent", "a.b", "agent.v2"]) {
+    assert.doesNotThrow(() => assertSafeAgentId(id), `should accept ${id}`);
+  }
+});
+
+test("assertSafeAgentId: rejects empty / non-string", () => {
+  for (const bad of ["", 0 as unknown, null as unknown, undefined as unknown, {} as unknown]) {
+    assert.throws(() => assertSafeAgentId(bad), InvalidAgentIdError);
+  }
+});
+
+test("assertSafeAgentId: rejects path traversal '..'", () => {
+  for (const id of ["..", "../foo", "a/../b", "a..b", "....", "foo/.."]) {
+    assert.throws(
+      () => assertSafeAgentId(id),
+      (err: unknown) =>
+        err instanceof InvalidAgentIdError &&
+        (err.reason.includes("traversal") || err.reason.includes("separator")),
+      `should reject ${JSON.stringify(id)}`,
+    );
+  }
+});
+
+test("assertSafeAgentId: rejects POSIX path separator '/'", () => {
+  assert.throws(
+    () => assertSafeAgentId("a/b"),
+    (err: unknown) =>
+      err instanceof InvalidAgentIdError && err.reason.includes("separator"),
+  );
+  assert.throws(
+    () => assertSafeAgentId("/etc/passwd"),
+    (err: unknown) =>
+      err instanceof InvalidAgentIdError && err.reason.includes("separator"),
+  );
+});
+
+test("assertSafeAgentId: rejects Windows path separator backslash", () => {
+  assert.throws(
+    () => assertSafeAgentId("a\\b"),
+    (err: unknown) =>
+      err instanceof InvalidAgentIdError && err.reason.includes("separator"),
+  );
+  assert.throws(
+    () => assertSafeAgentId("\\windows\\system32"),
+    (err: unknown) =>
+      err instanceof InvalidAgentIdError && err.reason.includes("separator"),
+  );
+});
+
+test("assertSafeAgentId: rejects NUL byte", () => {
+  assert.throws(
+    () => assertSafeAgentId("agent\0name"),
+    (err: unknown) =>
+      err instanceof InvalidAgentIdError && err.reason.includes("NUL"),
+  );
+  assert.throws(
+    () => assertSafeAgentId("a\0"),
+    (err: unknown) =>
+      err instanceof InvalidAgentIdError && err.reason.includes("NUL"),
+  );
+});
+
+test("assertSafeAgentId: rejects leading dot (hidden file)", () => {
+  for (const id of [".hidden", ".foo", ".", ".bashrc"]) {
+    assert.throws(
+      () => assertSafeAgentId(id),
+      (err: unknown) =>
+        err instanceof InvalidAgentIdError &&
+        (err.reason.includes("hidden") || err.reason.includes("traversal")),
+      `should reject ${JSON.stringify(id)}`,
+    );
+  }
+});
+
+test("agentTranscriptPath: rejects malicious agentId at path-derivation time", () => {
+  assert.throws(
+    () => agentTranscriptPath("/tmp/run", "../../etc/passwd"),
+    InvalidAgentIdError,
+  );
+  assert.throws(
+    () => agentTranscriptPath("/tmp/run", "a/b"),
+    InvalidAgentIdError,
+  );
+  assert.throws(
+    () => agentTranscriptPath("/tmp/run", "\0"),
+    InvalidAgentIdError,
+  );
+});
+
+test("agentStderrPath: rejects malicious agentId at path-derivation time", () => {
+  assert.throws(
+    () => agentStderrPath("/tmp/run", "../escape"),
+    InvalidAgentIdError,
+  );
+  assert.throws(
+    () => agentStderrPath("/tmp/run", "sub\\path"),
+    InvalidAgentIdError,
+  );
+});
+
+test("dispatchAgent: rejects path-traversal agentId before any spawn", { timeout: 5000 }, async () => {
+  const runDir = tmpRunDir();
+  const fake = makeFakeSpawn([{ stdout: [], exitCode: 0 }]);
+  await assert.rejects(
+    () =>
+      dispatchAgent({
+        runDir,
+        agentId: "../../etc/passwd",
+        prompt: "p",
+        promptHash: "h",
+        cwd: runDir,
+        spawn: fake.spawn,
+        skipParentDeathGuard: true,
+        timeoutMs: 1500,
+      }),
+    InvalidAgentIdError,
+  );
+  // Must reject BEFORE spawning a subprocess.
+  assert.equal(fake.calls.length, 0, "spawn must not be invoked for malicious agentId");
+});
+
+// ─── SIGTERM → SIGKILL escalation on abort path (recon: ZONE_DISPATCHER) ───
+//
+// Run.stop() flows: runManager.stop → ctrl.abort → dispatcher onAbort.
+// The timeout path already escalated; the abort path used to send only
+// SIGTERM, leaving cooperative-stop hung if the agent ignored it.
+// Both paths now route through `escalateKill` which arms a SIGKILL
+// timer after `killGraceMs`.
+
+test("abort path: escalates SIGTERM\u2192SIGKILL when child ignores SIGTERM", { timeout: 5000 }, async () => {
+  const runDir = tmpRunDir();
+  const fake = makeFakeSpawn([
+    {
+      stdout: ['{"type":"session"}\n', '{"type":"agent_start"}\n'],
+      // Long delay so the only way the child exits is via the
+      // dispatcher's escalation.
+      exitDelayMs: 60_000,
+      ignoresSigterm: true, // SIGTERM is recorded but doesn't fire exit
+      ignoresSigkill: false, // SIGKILL is what finally exits the child
+    },
+  ]);
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(), 20);
+  await assert.rejects(
+    () =>
+      dispatchAgent({
+        runDir,
+        agentId: "abort-escalate",
+        prompt: "p",
+        promptHash: "h",
+        cwd: runDir,
+        spawn: fake.spawn,
+        signal: ctrl.signal,
+        skipParentDeathGuard: true,
+        timeoutMs: 60_000,
+        killGraceMs: 50, // tight grace so the test runs fast
+      }),
+  );
+  // Must have sent BOTH signals (SIGTERM first, then SIGKILL).
+  assert.deepEqual(
+    fake.calls[0]!.signalsSent,
+    ["SIGTERM", "SIGKILL"],
+    `expected SIGTERM\u2192SIGKILL escalation; got ${JSON.stringify(fake.calls[0]!.signalsSent)}`,
+  );
+});
+
+test("abort path: SIGTERM alone is sufficient when child cooperates (no SIGKILL fired)", { timeout: 5000 }, async () => {
+  const runDir = tmpRunDir();
+  const fake = makeFakeSpawn([
+    {
+      stdout: ['{"type":"session"}\n'],
+      exitDelayMs: 60_000,
+      // Default: child cooperates, SIGTERM fires exit — no SIGKILL needed.
+    },
+  ]);
+  const ctrl = new AbortController();
+  setTimeout(() => ctrl.abort(), 20);
+  await assert.rejects(
+    () =>
+      dispatchAgent({
+        runDir,
+        agentId: "abort-cooperative",
+        prompt: "p",
+        promptHash: "h",
+        cwd: runDir,
+        spawn: fake.spawn,
+        signal: ctrl.signal,
+        skipParentDeathGuard: true,
+        timeoutMs: 60_000,
+        killGraceMs: 200, // generous grace; cooperative child should exit first
+      }),
+  );
+  // Cooperative child: SIGTERM only, SIGKILL timer canceled by exit.
+  assert.equal(fake.calls[0]!.signalsSent[0], "SIGTERM");
+  assert.ok(
+    !fake.calls[0]!.signalsSent.includes("SIGKILL"),
+    `cooperative child should not see SIGKILL; got ${JSON.stringify(fake.calls[0]!.signalsSent)}`,
+  );
+});
+
+test("timeout path: escalates SIGTERM\u2192SIGKILL when child ignores SIGTERM", { timeout: 5000 }, async () => {
+  const runDir = tmpRunDir();
+  const fake = makeFakeSpawn([
+    {
+      stdout: ['{"type":"session"}\n'],
+      // stdoutNeverEnds: keeps the parser's for-await loop alive past
+      // the timeoutMs deadline. Without this, the stream ends
+      // naturally before the timeout fires and the dispatcher clears
+      // the timeout, so escalation never happens (test was hanging).
+      stdoutNeverEnds: true,
+      exitDelayMs: 60_000,
+      ignoresSigterm: true,
+    },
+  ]);
+  await assert.rejects(
+    () =>
+      dispatchAgent({
+        runDir,
+        agentId: "timeout-escalate",
+        prompt: "p",
+        promptHash: "h",
+        cwd: runDir,
+        spawn: fake.spawn,
+        skipParentDeathGuard: true,
+        timeoutMs: 30, // fire timeout almost immediately
+        killGraceMs: 50,
+      }),
+  );
+  assert.deepEqual(
+    fake.calls[0]!.signalsSent,
+    ["SIGTERM", "SIGKILL"],
+  );
+});
+
+// ─── recoverFromTranscript size cap (recon: ZONE_DISPATCHER) ───
+//
+// Pathological agent transcripts can grow into the GBs; the recovery
+// path used to readFile() the whole thing, OOMing the host. Now we
+// cap at TRANSCRIPT_RECOVERY_MAX_BYTES (64 MiB) and parse only the
+// tail. Real agent_end is the LAST event pi emits, so the tail almost
+// always retains it.
+
+test("recoverFromTranscript: cap constant is 64 MiB", () => {
+  assert.equal(TRANSCRIPT_RECOVERY_MAX_BYTES, 64 * 1024 * 1024);
+});
+
+test("recoverFromTranscript: small file with leading noise still recovers agent_end", { timeout: 15_000 }, async () => {
+  // Sanity that the parse loop tolerates a long prefix of unrelated
+  // events before the real agent_end. The tail-cap path uses the same
+  // parsing logic, so this exercises the post-cap recovery shape.
+  const { promises: fs } = await import("node:fs");
+  const runDir = tmpRunDir();
+  const agentsDir = join(runDir, "agents");
+  await fs.mkdir(agentsDir, { recursive: true });
+  const transcriptPath = join(agentsDir, "chatty.jsonl");
+
+  const padding = "x".repeat(1024); // 1 KiB junk per line
+  const noisePrefix = Array.from({ length: 100 }, (_, i) =>
+    JSON.stringify({ type: "noise", i, padding }),
+  ).join("\n") + "\n";
+  const tail = realPiStream({ text: "recovered-after-noise" });
+  await fs.writeFile(transcriptPath, noisePrefix + tail);
+
+  const result = await recoverFromTranscript(transcriptPath, "chatty");
+  assert.notEqual(result, null);
+  assert.equal(result!.text, "recovered-after-noise");
+});
+
+test("recoverFromTranscript: sub-cap file does not log cap warning", { timeout: 15_000 }, async () => {
+  // Boundary check: the cap branch is `> MAX`. A normal-sized file
+  // must NOT take the warning path.
+  const { promises: fs } = await import("node:fs");
+  const runDir = tmpRunDir();
+  const agentsDir = join(runDir, "agents");
+  await fs.mkdir(agentsDir, { recursive: true });
+  const transcriptPath = join(agentsDir, "normal.jsonl");
+  await fs.writeFile(transcriptPath, realPiStream({ text: "ok" }));
+
+  const origWarn = console.warn;
+  const warnings: string[] = [];
+  console.warn = (...args: unknown[]) => {
+    warnings.push(args.map(String).join(" "));
+  };
+  try {
+    const result = await recoverFromTranscript(transcriptPath, "normal");
+    assert.notEqual(result, null);
+    assert.equal(result!.text, "ok");
+    assert.ok(
+      !warnings.some((w) => w.includes("exceeds recovery cap")),
+      `unexpected cap warning for sub-cap file: ${warnings.join(" | ")}`,
+    );
+  } finally {
+    console.warn = origWarn;
+  }
+});
+

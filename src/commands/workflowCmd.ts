@@ -56,6 +56,17 @@ import { runGc } from "../runtime/gc.js";
 import { LedgerReader } from "../runtime/ledger.js";
 import { getActiveRuns } from "../runtime/activeRuns.js";
 import { mountOverlay, runKill } from "../runtime/overlay.js";
+import { restartTerminalRun } from "../runtime/restart.js";
+import {
+  defaultSaveScriptIO,
+  runSaveScript,
+  type SaveScriptUI,
+} from "../runtime/saveScript.js";
+import {
+  copyToClipboard,
+  openTranscriptInEditor,
+} from "../runtime/transcriptOpen.js";
+import { writeMermaidToTmp } from "../runtime/visualize.js";
 import { runDir as runDirFor, runsHome } from "../util/paths.js";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -92,26 +103,26 @@ function buildApprovalBlock(
 }
 
 /**
- * Register `/<name>` for every workflow in the registry. Returns the
- * count of commands registered for logging purposes.
+ * Register a `/<name>` slash-command for a single workflow file.
  *
- * `recursive=true` short-circuits — used by the dispatcher's
- * sub-agent children (PRD §13.7). Caller should still register
- * `/workflows` separately so the "disabled in nested pi sessions"
- * error message is reachable.
+ * Extracted from `registerWorkflowCommands` so the slice-16 hot-reload
+ * watcher (`src/runtime/hotReload.ts`) can register commands for files
+ * added at runtime using the SAME real handler — no stubs, no
+ * `[runtime-init failed]` placeholder. Calling this twice with the
+ * same name is the documented re-registration path: pi's
+ * `registerCommand` overwrites the existing entry, which is exactly
+ * what hot-reload's `change` event needs.
+ *
+ * Behavior is identical to the body of the original
+ * `registerWorkflowCommands` for-loop iteration; do not diverge them.
  */
-export function registerWorkflowCommands(
+export function registerSingleWorkflowCommand(
   pi: ExtensionAPI,
-  registry: WorkflowRegistry,
-  opts: { recursive?: boolean } = {},
-): number {
-  if (opts.recursive) return 0;
-
-  let count = 0;
-  for (const file of registry.values()) {
-    pi.registerCommand(file.name, {
-      description: stubDescription(file),
-      handler: async (args, ctx) => {
+  file: WorkflowFile,
+): void {
+  pi.registerCommand(file.name, {
+    description: stubDescription(file),
+    handler: async (args, ctx) => {
         // Slice 9: real approval gate. preApproved is gone from the
         // production path. Bypass-permissions / pi-p / SDK / mock-agents
         // are detected inside `runApprovalGate`; everything else gets
@@ -242,6 +253,27 @@ export function registerWorkflowCommands(
         }
       },
     });
+}
+
+/**
+ * Register `/<name>` for every workflow in the registry. Returns the
+ * count of commands registered for logging purposes.
+ *
+ * `recursive=true` short-circuits — used by the dispatcher's
+ * sub-agent children (PRD §13.7). Caller should still register
+ * `/workflows` separately so the "disabled in nested pi sessions"
+ * error message is reachable.
+ */
+export function registerWorkflowCommands(
+  pi: ExtensionAPI,
+  registry: WorkflowRegistry,
+  opts: { recursive?: boolean } = {},
+): number {
+  if (opts.recursive) return 0;
+
+  let count = 0;
+  for (const file of registry.values()) {
+    registerSingleWorkflowCommand(pi, file);
     count++;
   }
   return count;
@@ -299,6 +331,7 @@ export function registerWorkflowsCommand(
         // falls back to printing the runs list to chat per PRD
         // §10.9. Either way, we ALSO surface a workflow-discovery
         // listing so scripts that grep for it keep working.
+        const callbacks = buildOverlayCallbacks(pi, registry, ctx);
         const result = await mountOverlay({
           pi,
           ctx,
@@ -310,6 +343,11 @@ export function registerWorkflowsCommand(
             const run = getActiveRuns().getRun(runId);
             run?.restartAgent(agentId);
           },
+          onRestartRequested: callbacks.onRestartRequested,
+          onSaveScriptRequested: callbacks.onSaveScriptRequested,
+          onVisualizeRequested: callbacks.onVisualizeRequested,
+          onOpenTranscript: callbacks.onOpenTranscript,
+          onCopyPrompt: callbacks.onCopyPrompt,
         });
         if (result.mode === "already-open") {
           ctx.ui.notify("workflows overlay already open", "info");
@@ -863,5 +901,307 @@ function handleKill(
     },
     { triggerTurn: false, deliverAs: "nextTurn" },
   );
+}
+
+// ─── overlay hotkey callbacks (r/s/t/c) ─────────────────────────────
+
+interface OverlayCallbacks {
+  onRestartRequested: (runId: string) => Promise<void>;
+  onSaveScriptRequested: (runId: string) => Promise<void>;
+  onVisualizeRequested: (runId: string) => Promise<string | undefined>;
+  onOpenTranscript: (transcriptPath: string) => string;
+  onCopyPrompt: (text: string) => string;
+}
+
+/**
+ * Build the overlay hotkey callbacks (`r`/`s`/`t`/`c`/`v`). Each
+ * callback wraps a real implementation module:
+ *
+ *   - `r` (restart)         → {@link restartTerminalRun} from `runtime/restart.ts`
+ *   - `s` (save script)     → {@link runSaveScript}        from `runtime/saveScript.ts`
+ *   - `t` (open transcript) → {@link openTranscriptInEditor} from `runtime/transcriptOpen.ts`
+ *   - `c` (copy prompt)     → {@link copyToClipboard}       from `runtime/transcriptOpen.ts`
+ *   - `v` (viz)             → {@link writeMermaidToTmp}      from `runtime/visualize.ts`
+ *
+ * Failures are surfaced via `pi.sendMessage` (cards) and via banner
+ * strings returned to the overlay.
+ */
+function buildOverlayCallbacks(
+  pi: ExtensionAPI,
+  registry: WorkflowRegistry,
+  ctx: ExtensionCommandContextLike,
+): OverlayCallbacks {
+  return {
+    onRestartRequested: async (runId: string) => {
+      const summary = getActiveRuns().getSummary(runId);
+      if (summary === undefined || summary.runDir === undefined) {
+        pi.sendMessage(
+          {
+            customType: STUB_CUSTOM_TYPE,
+            content: `restart failed: no run summary for ${runId}`,
+            display: true,
+            details: { kind: "restart-error", runId, reason: "missing-summary" },
+          },
+          { triggerTurn: false, deliverAs: "nextTurn" },
+        );
+        return;
+      }
+      // Recover the original input + workflow path from manifest.json.
+      const manifestAbs = join(summary.runDir, "manifest.json");
+      let manifest: { input?: string; workflowAbsPath?: string; workflowName?: string } = {};
+      try {
+        manifest = JSON.parse(readFileSync(manifestAbs, "utf8"));
+      } catch (err) {
+        pi.sendMessage(
+          {
+            customType: STUB_CUSTOM_TYPE,
+            content: `restart failed: cannot read manifest at ${manifestAbs} — ${(err as Error).message}`,
+            display: true,
+            details: { kind: "restart-error", runId, reason: "missing-manifest" },
+          },
+          { triggerTurn: false, deliverAs: "nextTurn" },
+        );
+        return;
+      }
+      // Look up the WorkflowFile in the live registry by name. If it's
+      // gone (file deleted or unloaded) we can't restart; surface a
+      // clear error rather than guess.
+      const workflowName = manifest.workflowName ?? summary.workflowName;
+      const workflow = registry.get(workflowName);
+      if (workflow === undefined) {
+        pi.sendMessage(
+          {
+            customType: STUB_CUSTOM_TYPE,
+            content:
+              `restart failed: workflow "${workflowName}" is no longer registered. ` +
+              `Re-add the script and try again.`,
+            display: true,
+            details: { kind: "restart-error", runId, workflowName, reason: "workflow-unregistered" },
+          },
+          { triggerTurn: false, deliverAs: "nextTurn" },
+        );
+        return;
+      }
+      const approval = buildApprovalBlock(ctx);
+      try {
+        const outcome = await restartTerminalRun({
+          source: summary,
+          input: manifest.input ?? "",
+          workflow,
+          start: startWorkflowRun,
+          startOptions: {
+            approval,
+            enableGlobalCache: true,
+            activeRuns: getActiveRuns(),
+            emitOverlayEvent: (customType, data) => {
+              if (typeof pi.appendEntry !== "function") return;
+              try {
+                pi.appendEntry(customType, data);
+              } catch {
+                /* swallow */
+              }
+            },
+          },
+        });
+        if (outcome.kind === "started") {
+          // Wire the new run through the same delivery + appendEntry
+          // hooks the per-workflow command uses.
+          if (typeof pi.appendEntry === "function") {
+            try {
+              pi.appendEntry(RUN_STARTED_ENTRY, {
+                runId: outcome.run.runId,
+                workflowName: workflow.name,
+                runDir: outcome.run.runDirAbs,
+                approval: outcome.run.approvalDecision,
+                restartedFrom: outcome.restartedFrom,
+              });
+            } catch {
+              /* swallow */
+            }
+          }
+          void wireRunDelivery(pi, outcome.run);
+        } else {
+          pi.sendMessage(
+            {
+              customType: STUB_CUSTOM_TYPE,
+              content: `restart blocked: ${outcome.reason.kind}`,
+              display: true,
+              details: { kind: "restart-blocked", runId, reason: outcome.reason },
+            },
+            { triggerTurn: false, deliverAs: "nextTurn" },
+          );
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        pi.sendMessage(
+          {
+            customType: STUB_CUSTOM_TYPE,
+            content: `restart failed: ${msg}`,
+            display: true,
+            details: { kind: "restart-error", runId, error: msg },
+          },
+          { triggerTurn: false, deliverAs: "nextTurn" },
+        );
+      }
+    },
+
+    onSaveScriptRequested: async (runId: string) => {
+      const summary = getActiveRuns().getSummary(runId);
+      if (summary === undefined || summary.runDir === undefined) {
+        pi.sendMessage(
+          {
+            customType: STUB_CUSTOM_TYPE,
+            content: `save-script failed: no run summary for ${runId}`,
+            display: true,
+            details: { kind: "save-error", runId, reason: "missing-summary" },
+          },
+          { triggerTurn: false, deliverAs: "nextTurn" },
+        );
+        return;
+      }
+      const manifestAbs = join(summary.runDir, "manifest.json");
+      let manifest: { workflowAbsPath?: string; workflowName?: string; cwd?: string } = {};
+      try {
+        manifest = JSON.parse(readFileSync(manifestAbs, "utf8"));
+      } catch (err) {
+        pi.sendMessage(
+          {
+            customType: STUB_CUSTOM_TYPE,
+            content: `save-script failed: cannot read manifest — ${(err as Error).message}`,
+            display: true,
+            details: { kind: "save-error", runId, reason: "missing-manifest" },
+          },
+          { triggerTurn: false, deliverAs: "nextTurn" },
+        );
+        return;
+      }
+      const workflowSourceAbsPath =
+        manifest.workflowAbsPath ?? registry.get(summary.workflowName)?.absPath ?? "";
+      // Non-blocking UI: collisions resolve by rename, git-add is
+      // skipped. The overlay can't drive the multi-choice TUI prompt
+      // synchronously — a manual `git add` after the save is fine.
+      const ui: SaveScriptUI = {
+        async prompt(_msg, choices) {
+          if (choices.includes("rename")) return "rename";
+          if (choices.includes("n")) return "n";
+          // Fallback: pick the first choice (the documented default).
+          return choices[0] ?? "";
+        },
+      };
+      try {
+        const outcome = await runSaveScript({
+          runDirAbs: summary.runDir,
+          workflowName: summary.workflowName,
+          workflowSourceAbsPath,
+          cwd: ctx.cwd,
+          io: defaultSaveScriptIO,
+          ui,
+          notify: (msg, level) => ctx.ui.notify(msg, level ?? "info"),
+        });
+        const card = (content: string, details: Record<string, unknown>) => {
+          pi.sendMessage(
+            {
+              customType: STUB_CUSTOM_TYPE,
+              content,
+              display: true,
+              details: { kind: "save-script", runId, ...details },
+            },
+            { triggerTurn: false, deliverAs: "nextTurn" },
+          );
+        };
+        switch (outcome.kind) {
+          case "saved":
+            card(`✓ saved to ${outcome.targetAbs}`, { outcome: outcome.kind, target: outcome.targetAbs });
+            break;
+          case "saved-renamed":
+            card(`✓ saved (renamed) to ${outcome.targetAbs}`, { outcome: outcome.kind, target: outcome.targetAbs });
+            break;
+          case "no-op-already-in-project":
+            card(`script already lives at ${outcome.targetAbs}`, { outcome: outcome.kind });
+            break;
+          case "cancelled-by-user":
+            card(`save-script cancelled (${outcome.reason})`, { outcome: outcome.kind });
+            break;
+          case "error":
+            card(`save-script error: ${outcome.message}`, { outcome: outcome.kind, reason: outcome.reason });
+            break;
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        pi.sendMessage(
+          {
+            customType: STUB_CUSTOM_TYPE,
+            content: `save-script failed: ${msg}`,
+            display: true,
+            details: { kind: "save-error", runId, error: msg },
+          },
+          { triggerTurn: false, deliverAs: "nextTurn" },
+        );
+      }
+    },
+
+    onVisualizeRequested: async (runId: string): Promise<string | undefined> => {
+      const summary = getActiveRuns().getSummary(runId);
+      if (summary === undefined || summary.runDir === undefined) {
+        pi.sendMessage(
+          {
+            customType: STUB_CUSTOM_TYPE,
+            content: `viz failed: no run summary for ${runId}`,
+            display: true,
+            details: { kind: "viz-error", runId, reason: "missing-summary" },
+          },
+          { triggerTurn: false, deliverAs: "nextTurn" },
+        );
+        return undefined;
+      }
+      try {
+        const target = await writeMermaidToTmp(summary.runDir);
+        pi.sendMessage(
+          {
+            customType: STUB_CUSTOM_TYPE,
+            content: `✓ DAG written to ${target}`,
+            display: true,
+            details: { kind: "viz", runId, target },
+          },
+          { triggerTurn: false, deliverAs: "nextTurn" },
+        );
+        return target;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        pi.sendMessage(
+          {
+            customType: STUB_CUSTOM_TYPE,
+            content: `viz failed: ${msg}`,
+            display: true,
+            details: { kind: "viz-error", runId, error: msg },
+          },
+          { triggerTurn: false, deliverAs: "nextTurn" },
+        );
+        return undefined;
+      }
+    },
+
+    onOpenTranscript: (transcriptPath: string): string => {
+      const r = openTranscriptInEditor({ transcriptPath });
+      switch (r.kind) {
+        case "opened-editor":
+          return `opened ${r.editor} on ${transcriptPath}`;
+        case "no-editor":
+          return r.reason === "EDITOR-unset"
+            ? `transcript: ${transcriptPath} (set $EDITOR to open)`
+            : `transcript not found: ${transcriptPath}`;
+        case "error":
+          return `transcript open error: ${r.message}`;
+      }
+    },
+
+    onCopyPrompt: (text: string): string => {
+      const r = copyToClipboard({ text });
+      if (r.kind === "copied") {
+        return `copied to clipboard via ${r.tool} (${text.length} chars)`;
+      }
+      return `clipboard unavailable — ${r.reason.split(".")[0]}`;
+    },
+  };
 }
 

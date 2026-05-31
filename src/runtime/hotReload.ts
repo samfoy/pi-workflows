@@ -94,6 +94,19 @@ export interface HotReloadOpts {
     msg: string,
     details?: Readonly<Record<string, unknown>>,
   ) => void;
+
+  /**
+   * Real per-workflow command registration callback. When provided,
+   * `handleAdd` and `handleChange` invoke this with the constructed
+   * `WorkflowFile` instead of registering a description-only stub
+   * handler against `pi`.
+   *
+   * Production callers MUST supply this — without it, freshly added
+   * workflows would only get a no-op stub registered (the original
+   * BUG that this opt closes). Tests that don't care about the
+   * handler shape can omit it; we fall back to the legacy stub.
+   */
+  readonly registerCommand?: (file: WorkflowFile) => void;
 }
 
 /** Returns a disposer that closes the watcher. */
@@ -120,6 +133,7 @@ export async function createHotReloadWatcher(
   const { projectDir, personalDir, registry, pi, activeRuns, recursive } = opts;
   const debounceMs = opts.debounceMs ?? 100;
   const log = opts.log ?? (() => {});
+  const registerCommand = opts.registerCommand;
 
   // Ensure both dirs exist so chokidar doesn't throw on missing paths.
   for (const dir of [projectDir, personalDir]) {
@@ -215,17 +229,28 @@ export async function createHotReloadWatcher(
     }
 
     if (!recursive) {
-      pi.registerCommand(name, {
-        description: `Workflow: ${name}`,
-        handler: async (_args, ctx) => {
-          // Minimal handler stub — the real workflowCmd handler
-          // wraps this; in practice registerWorkflowCommands from
-          // workflowCmd.ts should be called. For hot-reload we just
-          // emit a notice that the command is available.
-          void ctx;
-          log("info", `hot-reload: invoked stub handler for ${name}`);
-        },
-      });
+      const wf: WorkflowFile = {
+        name,
+        absPath,
+        scope: detectScope(absPath, personalDir),
+      };
+      if (registerCommand) {
+        // Real registration via injected callback (production path):
+        // wires the same handler `registerWorkflowCommands` builds for
+        // discovery-time files. Closes the BUG where newly added
+        // workflows had a no-op stub instead of a working handler.
+        registerCommand(wf);
+      } else {
+        // Legacy fallback for tests that don't provide a callback.
+        // Logs a stub trace if invoked so it's diagnosable.
+        pi.registerCommand(name, {
+          description: `Workflow: ${name}`,
+          handler: async (_args, ctx) => {
+            void ctx;
+            log("info", `hot-reload: invoked stub handler for ${name}`);
+          },
+        });
+      }
     }
 
     registry.set(name, {
@@ -280,16 +305,26 @@ export async function createHotReloadWatcher(
     });
 
     if (!recursive) {
-      // Re-register updates the command description; the actual
-      // script is read at invocation time from disk, so re-registration
-      // is enough to pick up changes.
-      pi.registerCommand(name, {
-        description: `Workflow: ${name}`,
-        handler: async (_args, ctx) => {
-          void ctx;
-          log("info", `hot-reload: invoked stub handler for ${name}`);
-        },
-      });
+      const wf: WorkflowFile = {
+        name,
+        absPath,
+        scope: detectScope(absPath, personalDir),
+      };
+      if (registerCommand) {
+        // Real re-registration via injected callback (production
+        // path). pi.registerCommand semantics: re-register overwrites
+        // the existing entry, so subsequent `/${name}` invocations
+        // pick up the new file content (read at invocation time).
+        registerCommand(wf);
+      } else {
+        pi.registerCommand(name, {
+          description: `Workflow: ${name}`,
+          handler: async (_args, ctx) => {
+            void ctx;
+            log("info", `hot-reload: invoked stub handler for ${name}`);
+          },
+        });
+      }
     }
 
     log("info", `hot-reload: re-registered /${name}`, { absPath });

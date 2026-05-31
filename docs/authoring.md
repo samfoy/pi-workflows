@@ -183,10 +183,29 @@ with a few v1 limitations. See [`docs/parity-gaps.md`](./parity-gaps.md).
 
 The key practical differences:
 
-- Use `/workflow-name` not a `workflow` keyword
-- No `/effort ultracode` modifier (v2)
+- `/effort ultracode` modifier not yet wired (v2)
 - `crypto.subtle` not available (v2)
 - Synchronous infinite loops wedge the event loop (no worker-thread interrupt)
+
+### Workflow keyword trigger
+
+Like Claude Code, pi-workflows watches your prompts for the word `workflow`
+(case-insensitive, word-bounded — singular and plural both fire; compound
+words like `subworkflow` don't). When detected, the next agent turn gets a
+short system-prompt directive telling Claude to call `write_workflow`
+instead of working through the task turn-by-turn.
+
+- Toggle the trigger with `/workflows keyword [on|off]` (default: on).
+- Press `Alt+W` after typing to suppress the trigger for just that prompt.
+- Skipped automatically for slash commands and for events emitted by other
+  extensions (loop guard).
+
+Implementation note: pi's extension SDK exposes no `session_primer` hook,
+so the trigger is wired as the pair `pi.on("input", …)` (arms the flag,
+emits a one-line `ctx.ui.notify`) + `pi.on("before_agent_start", …)`
+(consumes the flag, appends the directive to `event.systemPrompt` for that
+turn only). See `src/runtime/keywordTrigger.ts` for the regex + directive
+text.
 
 ---
 

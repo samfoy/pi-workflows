@@ -27,14 +27,26 @@ escalation** — a workflow calling `process.exit`, spawning subshells via
 
 ## Sandbox construction (PRD §8.2, §8.3)
 
-Each workflow run gets a fresh `node:vm` Context:
+Each workflow run gets a fresh `node:vm` Context inside a worker thread:
 
 ```ts
 const ctx = vm.createContext({}, { codeGeneration: { strings: false, wasm: false } });
 ```
 
-`allowCodeGeneration.strings: false` blocks `eval(str)`, `new Function(str)`,
-`setTimeout(str)`, and `setInterval(str)`. Wasm is also disabled.
+`allowCodeGeneration.strings: false` is the default — it blocks `eval(str)`,
+`new Function(str)`, `setTimeout(str)`, and `setInterval(str)` inside the
+Context. Wasm is also disabled.
+
+Authors who legitimately need `eval` / `new Function(string)` (rare) can
+opt back in by passing `allowCodegen: true` to `SandboxOptions`. The
+opt-in is safe-by-construction because curated globals are wrapped in
+Context-realm closures whose `.constructor` resolves to the **Context's**
+`Function` (PRD §8.3.4). A `Function('return process')()` constructed
+inside the Context evaluates inside the Context and returns the
+frozen `process` stub — it cannot reach the host realm. The default of
+`false` is defense in depth: it removes the entire class of
+codegen-from-string vectors before the wrapper-identity check has to
+catch them.
 
 ### Allowed globals (PRD §4.3)
 
@@ -74,15 +86,23 @@ Object.freeze(Array.prototype);
 
 **Vector:** `({}).constructor.constructor("return process")()`
 
-**Mitigation:** `allowCodeGeneration.strings: false`. The `Function`
-constructor raises `EvalError` before executing the string. Verified by
+**Mitigation (layer 1):** `allowCodeGeneration.strings: false` (the default).
+The `Function` constructor raises `EvalError` before executing the string.
+
+**Mitigation (layer 2 — active even when authors opt in via
+`allowCodegen: true`):** every curated global is a Context-realm closure
+whose `.constructor === Function` (the **Context's** `Function`). The
+string is evaluated inside the Context, returning the Context's frozen
+`process` stub instead of the host's. Verified by
 `tests/security/fixtures/function-constructor.workflow.js`.
 
 ### 2. `eval` / `setTimeout(string)` escape
 
 **Vector:** `eval("require('fs')")` or `setTimeout("require('fs')", 0)`
 
-**Mitigation:** same as above — `allowCodeGeneration.strings: false`.
+**Mitigation:** same as above — `allowCodeGeneration.strings: false` is the
+default, and the wrapper-identity defense contains the escape if an
+author opts in to codegen.
 
 ### 3. Dynamic `import()` escape
 
@@ -153,8 +173,8 @@ is absent. Verified by `tests/security/fixtures/require-resolve.workflow.js`.
 **Vector:** `({}).constructor.constructor.toString()` to extract source,
 then eval in host realm.
 
-**Mitigation:** `allowCodeGeneration.strings: false` blocks the eval step.
-The `toString` itself is harmless.
+**Mitigation:** `allowCodeGeneration.strings: false` (the default) blocks
+the eval step. The `toString` itself is harmless.
 
 ---
 

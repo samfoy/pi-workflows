@@ -81,6 +81,13 @@ export interface Config {
    * Controlled by the `pi-workflows.autoResumeCrashedWorkflows` setting.
    */
   readonly autoResumeCrashedWorkflows: boolean;
+  /**
+   * OTLP/HTTP endpoint for the OpenTelemetry trace exporter
+   * (ZONE_OTEL). Resolved from `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`
+   * (preferred) or the catch-all `OTEL_EXPORTER_OTLP_ENDPOINT`. When
+   * `null`, the exporter is a strict no-op — no SDK is loaded.
+   */
+  readonly otelTracesEndpoint: string | null;
 }
 
 /**
@@ -159,6 +166,11 @@ export interface ExtensionAPI {
       details?: Record<string, unknown>;
     }>;
   }): void;
+  /** Register a keyboard shortcut (e.g. "alt+w"). */
+  registerShortcut?(shortcut: string, options: {
+    description?: string;
+    handler(ctx: ExtensionContextLike): void | Promise<void>;
+  }): void;
 }
 
 /** Subset of `ExtensionContext` needed by slice-1 code. */
@@ -185,7 +197,22 @@ export interface ExtensionContextLike {
     ): Promise<T>;
     /** Slice 13 — pi-coding-agent's `ctx.ui.confirm` (used by approval). */
     confirm?(message: string): Promise<boolean>;
+    /**
+     * Set a named status indicator in the TUI footer.
+     * Pass `undefined` as the second arg to clear.
+     * Safe to call from outside event handlers (fire-and-forget).
+     */
+    setStatus?(key: string, text: string | undefined): void;
   };
+}
+
+/** Subset of `ExtensionAPI` needed to register shortcuts. */
+export interface ExtensionShortcutAPI {
+  /** Register a keyboard shortcut (e.g. "alt+w"). */
+  registerShortcut?(shortcut: string, options: {
+    description?: string;
+    handler(ctx: ExtensionContextLike): void | Promise<void>;
+  }): void;
 }
 
 /** Subset of `ExtensionCommandContext` needed by the slice-1 stub handler. */
@@ -285,6 +312,43 @@ export interface RunManifest {
    * `restartFromRunDir`; not set on fresh-start runs.
    */
   readonly restartedFrom?: string;
+
+  // ─── ZONE_MEMORY ──────────────────────────────────────
+  /**
+   * Resolved agent-memory directory per persona name, populated
+   * lazily on first dispatch that uses `opts.memory`. Survives
+   * resume so a re-mounted agent reads the same MEMORY.md it was
+   * reading before the parent crashed. Empty / absent when no
+   * agent in the run opted into memory.
+   */
+  readonly agentMemoryDirs?: Readonly<Record<string, string>>;
+
+  // ─── ZONE_WORKTREE ─────────────────────────────
+  /**
+   * Resolved per-agent git-worktree path, populated lazily on first
+   * dispatch that uses `opts.isolation === 'worktree'`. Keys are
+   * agent ids (validated via `assertSafeAgentId`); values are
+   * absolute paths under `<runDir>/worktrees/<agentId>/`. Survives
+   * resume so a re-mounted agent re-attaches the same checkout
+   * after a parent crash. Empty / absent when no agent opted in.
+   */
+  readonly agentWorktrees?: Readonly<Record<string, string>>;
+
+  // ─── ZONE_TIMETRAVEL ───────────────────────────
+  /**
+   * If this run was created by `forkFromCheckpoint(parentRunId, ...)`,
+   * this is the parent's runId. Lets audit + GC walk the lineage
+   * across forks. Set by `forkFromCheckpoint`; absent on fresh-start
+   * runs and on `restartedFrom` runs (those use `restartedFrom`).
+   */
+  readonly parentRunId?: string;
+  /**
+   * If this run was created by `forkFromCheckpoint`, this is the
+   * `phaseName` the fork branched at — the new run replays the
+   * parent's ledger / cache up to (but not including) this phase's
+   * `phase_start`. Set together with `parentRunId`.
+   */
+  readonly forkAtPhase?: string;
 }
 
 /**
@@ -562,7 +626,7 @@ export interface RunCtxHost {
    * Improvement 7: append a structured report event to the ledger
    * and emit to the overlay. Sync (ledger write is fire-and-forget).
    */
-  report(eventType: unknown, data?: unknown): RunCtxBridgeResult<null>;
+  report(eventType: unknown, data?: unknown): RunCtxBridgeResult<null | string>;
   /**
    * Human-in-the-loop suspend/confirm primitive (ctx.gate). Suspends
    * execution until the user responds (approved or denied), or the run
@@ -570,6 +634,20 @@ export interface RunCtxHost {
    * `{ ok: false, error }` on abort or error.
    */
   gate(message: unknown, opts?: unknown): Promise<RunCtxBridgeResult<boolean>>;
+  /**
+   * ZONE_HITL — mid-phase human-in-the-loop suspend/route primitive.
+   * Writes an `interrupt_requested` ledger entry with a deterministic
+   * sequence-derived `key` and blocks until a matching `resume-interrupt`
+   * control command arrives via `ctrl.jsonl` (or until the run is
+   * aborted). On resume from disk, prior `interrupt_resolved` entries
+   * are replayed first so this call returns immediately with the
+   * stored value (replay-perfect HITL).
+   *
+   * `opts` shape: `{ question: string, choices?: string[], default?: unknown }`.
+   * Returns `{ ok: true, value }` where `value` is the JSON-cloneable
+   * answer; `{ ok: false, error }` on abort or invalid args.
+   */
+  interrupt(opts: unknown): Promise<RunCtxBridgeResult<unknown>>;
   /**
    * gap/ctx-memo — check if a cross-run memo entry exists and is fresh.
    * Returns `{ hit: true, value }` on a cache hit, or `{ hit: false }` on miss.
@@ -587,6 +665,48 @@ export interface RunCtxHost {
     value: unknown,
     opts?: unknown,
   ): Promise<RunCtxBridgeResult<null>>;
+  /**
+   * ZONE_MEMORY follow-up #6 — stdlib bridge.
+   * Reads MEMORY.md for `(scope, name)` capped at 25 KiB. Returns
+   * `null` for missing/empty. See `agentMemory.ts::readMemoryFile`.
+   *
+   * Optional in this interface so test-side partial mocks of
+   * `RunCtxHost` don't have to stub it. The real `createRunCtxHost`
+   * always provides this method; the sandbox bridge wires it through
+   * unconditionally.
+   */
+  memory_read?(
+    name: unknown,
+    scope: unknown,
+  ): Promise<RunCtxBridgeResult<string | null>>;
+  /**
+   * ZONE_MEMORY follow-up #6 — stdlib bridge.
+   * Appends `text` to MEMORY.md for `(scope, name)`. Creates the
+   * scope dir lazily. See `agentMemory.ts::appendMemoryUpdate`.
+   * Optional — see `memory_read`.
+   */
+  memory_append?(
+    name: unknown,
+    scope: unknown,
+    text: unknown,
+  ): Promise<RunCtxBridgeResult<null>>;
+  /**
+   * ZONE_MEMORY follow-up #1 — compaction primitive.
+   * Spawns a one-shot summarizer agent and atomically rewrites
+   * MEMORY.md. Returns size deltas; throws `CompactionError`
+   * (delivered as `{ok:false}`) on any failure, leaving the
+   * original file intact. Optional — see `memory_read`.
+   */
+  memory_compact?(
+    name: unknown,
+    scope: unknown,
+  ): Promise<
+    RunCtxBridgeResult<{
+      beforeBytes: number;
+      afterBytes: number;
+      ratio: number;
+    }>
+  >;
 }
 
 /**
@@ -801,6 +921,12 @@ export interface DispatcherOptions {
   readonly thinking?: string;
   /** Subprocess wall-clock timeout. Default 600_000 ms (10 min). */
   readonly timeoutMs?: number;
+  /**
+   * Grace period between SIGTERM and SIGKILL when the dispatcher
+   * escalates a kill (timeout-path or abort-path). Default 5_000 ms.
+   * Test seam — production callers should not override.
+   */
+  readonly killGraceMs?: number;
   /** Caller-controlled abort. Cleanly SIGTERMs the child. */
   readonly signal?: AbortSignal;
   /**
@@ -822,6 +948,17 @@ export interface DispatcherOptions {
    * `WorkflowMeta.acceptEdits`.
    */
   readonly acceptEdits?: boolean;
+  /**
+   * ZONE_MEMORY: when set, the dispatcher observes
+   * `{ type: 'memory_update', text: string }` events on the
+   * agent's JSON stream and appends each `text` to
+   * `<memoryDir>/MEMORY.md` after the stream settles.
+   *
+   * The directory is created lazily on first append. Failures are
+   * captured into `memoryWriteErrors` on the result so callers can
+   * surface them without aborting the agent run.
+   */
+  readonly memoryDir?: string;
 }
 
 /** Minimal ChildProcess shape the dispatcher needs. */
@@ -1064,6 +1201,38 @@ export type LedgerEntry =
   | { readonly type: "gate_resolved"; readonly at: string; readonly approved: boolean }
   | {
       /**
+       * ZONE_HITL — `ctx.interrupt(...)` request. Written when a workflow
+       * suspends mid-phase asking a supervisor for an answer. `key` is a
+       * deterministic, run-scoped sequence id (`int-0`, `int-1`, ...) so
+       * a resumed run can match prior `interrupt_resolved` entries to
+       * the same call site (replay-perfect HITL).
+       */
+      readonly type: "interrupt_requested";
+      readonly at: string;
+      readonly key: string;
+      readonly question: string;
+      readonly choices?: ReadonlyArray<string>;
+      readonly default?: unknown;
+    }
+  | {
+      /**
+       * ZONE_HITL — supervisor answered (or default applied). `value`
+       * is the JSON-cloneable answer returned to the workflow. `source`
+       * distinguishes how the answer was produced — useful for the TUI
+       * and for diagnosing replays:
+       *   - `"ipc"`     — supervisor injected via `ctrl.jsonl`.
+       *   - `"default"` — no supervisor wired; `opts.default` was used.
+       *   - `"replay"`  — resumed run found a prior `interrupt_resolved`
+       *                   for this `key` and skipped the prompt.
+       */
+      readonly type: "interrupt_resolved";
+      readonly at: string;
+      readonly key: string;
+      readonly value: unknown;
+      readonly source: "ipc" | "default" | "replay";
+    }
+  | {
+      /**
        * IPC inspection surface (gap/ipc-inspection): a verbatim copy of a
        * `pi.appendEntry` event written into the run ledger so that a
        * supervisor process can observe all overlay events by tailing
@@ -1178,6 +1347,8 @@ export interface ApprovalDialogPrompt {
   readonly sha256: string;
   /** Set when `absPath` had prior trust rows but none matched `sha256`. */
   readonly mismatchWarning?: string;
+  /** Declared phases from `meta.phases` — shown in approval caution. */
+  readonly phases?: ReadonlyArray<{ title: string }>;
 }
 
 export type ApprovalDialog = (
@@ -1234,6 +1405,8 @@ export interface ApprovalGateOptions {
   /** `--mock-agents` runtime flag forwarded to bypass detector. */
   readonly mockAgents?: boolean;
   readonly env?: NodeJS.ProcessEnv;
+  /** Declared phases from `meta.phases` — forwarded to the dialog prompt. */
+  readonly phases?: ReadonlyArray<{ title: string }>;
 
   /** Test seam: bypass disk read of trustStore. */
   readonly trustOverride?: TrustStore;
@@ -1349,10 +1522,22 @@ export interface ResultCardOutput {
  * `run.resumePaused()`, or `run.stop()`.
  */
 export interface CtrlCommand {
-  readonly type: "pause" | "resume" | "stop";
+  readonly type: "pause" | "resume" | "stop" | "resume-interrupt";
   /** ISO-8601 timestamp set by the sender — informational only. */
   readonly at?: string;
   /** Optional free-text reason forwarded to the Run method. */
   readonly reason?: string;
+  /**
+   * ZONE_HITL — payload for `resume-interrupt`. The JSON-cloneable
+   * value to deliver to a pending `ctx.interrupt(...)` call. Ignored
+   * for `pause`/`resume`/`stop`.
+   */
+  readonly value?: unknown;
+  /**
+   * ZONE_HITL — optional key for `resume-interrupt`. When omitted the
+   * oldest pending interrupt is resolved (FIFO). When set the matching
+   * `key` is targeted; mismatches are silently dropped.
+   */
+  readonly key?: string;
 }
 

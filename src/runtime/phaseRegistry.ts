@@ -28,6 +28,14 @@ export interface AgentSnapshot {
   readonly cached?: boolean;
   /** Optional one-line prompt summary surfaced via runCtx. */
   readonly summary?: string;
+  /** Token usage recorded when the agent ended. */
+  readonly usage?: {
+    readonly input: number;
+    readonly output: number;
+    readonly cacheRead: number;
+    readonly cacheWrite: number;
+    readonly totalTokens: number;
+  };
 }
 
 export interface PhaseSnapshot {
@@ -38,6 +46,10 @@ export interface PhaseSnapshot {
   readonly endedAt?: string;
   readonly durationMs?: number;
   readonly agents: ReadonlyArray<AgentSnapshot>;
+  /** Aggregate token total across all agents in this phase. */
+  readonly totalTokens: number;
+  /** Tokens from cache-hit agents (subset of totalTokens). */
+  readonly cachedTokens: number;
 }
 
 export interface RunPhaseSnapshot {
@@ -48,6 +60,9 @@ export interface RunPhaseSnapshot {
   readonly runningAgents: number;
   readonly completedAgents: number;
   readonly queuedAgents: number;
+  /** Aggregate token totals across all phases. */
+  readonly totalTokens: number;
+  readonly cachedTokens: number;
   /** Last 50 log entries (`pi-workflows.run.log`). */
   readonly logTail: ReadonlyArray<{ readonly at: string; readonly message: string }>;
 }
@@ -98,6 +113,13 @@ export type PhaseFeedEntry =
         readonly endedAt?: string;
         readonly durationMs?: number;
         readonly cached?: boolean;
+        readonly usage?: {
+          readonly input: number;
+          readonly output: number;
+          readonly cacheRead: number;
+          readonly cacheWrite: number;
+          readonly totalTokens: number;
+        };
       };
     }
   | {
@@ -119,6 +141,8 @@ interface MutablePhase {
   endedAt?: string;
   durationMs?: number;
   agents: Map<string, AgentSnapshot>;
+  totalTokens: number;
+  cachedTokens: number;
 }
 
 interface MutableRun {
@@ -151,6 +175,8 @@ export class PhaseRegistry {
               status: "pending",
               agentCount: 0,
               agents: new Map(),
+              totalTokens: 0,
+              cachedTokens: 0,
             });
           }
         }
@@ -164,6 +190,8 @@ export class PhaseRegistry {
           status: "running",
           agentCount: d.agentCount,
           agents: new Map(),
+          totalTokens: 0,
+          cachedTokens: 0,
         };
         phase.status = "running";
         phase.agentCount = d.agentCount;
@@ -195,6 +223,8 @@ export class PhaseRegistry {
           status: "running" as const,
           agentCount: 1,
           agents: new Map<string, AgentSnapshot>(),
+          totalTokens: 0,
+          cachedTokens: 0,
         };
         const prior = phase.agents.get(d.agentId);
         const agent: AgentSnapshot = {
@@ -212,6 +242,11 @@ export class PhaseRegistry {
         const phase = run.phases.get(d.phaseName);
         if (phase === undefined) return;
         const prior = phase.agents.get(d.agentId);
+        // Subtract prior agent's contribution before overwriting (idempotent re-apply).
+        if (prior?.usage !== undefined) {
+          phase.totalTokens -= prior.usage.totalTokens;
+          if (prior.cached === true) phase.cachedTokens -= prior.usage.totalTokens;
+        }
         const next: AgentSnapshot = {
           agentId: d.agentId,
           state: "done",
@@ -220,8 +255,14 @@ export class PhaseRegistry {
           ...(d.durationMs !== undefined ? { durationMs: d.durationMs } : {}),
           ...(d.cached !== undefined ? { cached: d.cached } : {}),
           ...(prior?.summary !== undefined ? { summary: prior.summary } : {}),
+          ...(d.usage !== undefined ? { usage: d.usage } : {}),
         };
         phase.agents.set(d.agentId, next);
+        // Add this agent's token contribution to the phase totals.
+        if (d.usage !== undefined) {
+          phase.totalTokens += d.usage.totalTokens;
+          if (d.cached === true) phase.cachedTokens += d.usage.totalTokens;
+        }
         break;
       }
       case "pi-workflows.run.log": {
@@ -297,6 +338,8 @@ export class PhaseRegistry {
     let runningAgents = 0;
     let completedAgents = 0;
     let queuedAgents = 0;
+    let totalTokens = 0;
+    let cachedTokens = 0;
     for (const phase of run.phases.values()) {
       const agentArr: AgentSnapshot[] = Array.from(phase.agents.values());
       // Stable sort by agentId for determinism.
@@ -307,6 +350,8 @@ export class PhaseRegistry {
         else if (a.state === "done") completedAgents++;
         else queuedAgents++;
       }
+      totalTokens += phase.totalTokens;
+      cachedTokens += phase.cachedTokens;
       phases.push({
         phaseName: phase.phaseName,
         status: phase.status,
@@ -315,6 +360,8 @@ export class PhaseRegistry {
         ...(phase.endedAt !== undefined ? { endedAt: phase.endedAt } : {}),
         ...(phase.durationMs !== undefined ? { durationMs: phase.durationMs } : {}),
         agents: agentArr,
+        totalTokens: phase.totalTokens,
+        cachedTokens: phase.cachedTokens,
       });
     }
     return {
@@ -324,6 +371,8 @@ export class PhaseRegistry {
       runningAgents,
       completedAgents,
       queuedAgents,
+      totalTokens,
+      cachedTokens,
       logTail: run.log.slice(-MAX_LOG_LINES),
     };
   }

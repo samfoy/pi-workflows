@@ -367,3 +367,103 @@ test("r on local terminal run still fires restart-requested (not noop)", () => {
   });
   assert.equal(action.kind, "restart-requested");
 });
+
+// ─── Per-agent stop / restart ─────────────────────────────────────
+
+test("x on phase-view with running agent selected → stop-agent", () => {
+  const action = dispatchHotkey({
+    key: "x",
+    view: "phase-view",
+    runState: "running",
+    runId: "wf-test01",
+    agentId: "agent-abc123",
+    agentState: "running",
+  });
+  assert.equal(action.kind, "stop-agent");
+  assert.equal(action.runId, "wf-test01");
+  assert.equal(action.agentId, "agent-abc123");
+});
+
+test("r on phase-view with running agent selected → restart-agent", () => {
+  const action = dispatchHotkey({
+    key: "r",
+    view: "phase-view",
+    runState: "running",
+    runId: "wf-test01",
+    agentId: "agent-abc123",
+    agentState: "running",
+  });
+  assert.equal(action.kind, "restart-agent");
+  assert.equal(action.runId, "wf-test01");
+  assert.equal(action.agentId, "agent-abc123");
+});
+
+test("x on phase-view without agent cursor falls through to run-level stop", () => {
+  const action = dispatchHotkey({
+    key: "x",
+    view: "phase-view",
+    runState: "running",
+    runId: "wf-test01",
+    // no agentId
+  });
+  assert.equal(action.kind, "stop");
+  assert.equal(action.runId, "wf-test01");
+});
+
+test("r on phase-view without agent cursor falls through to run-level resume/restart", () => {
+  // paused run without agent cursor → resume (not restart-agent)
+  const paused = dispatchHotkey({
+    key: "r",
+    view: "phase-view",
+    runState: "paused",
+    runId: "wf-test01",
+  });
+  assert.equal(paused.kind, "resume");
+
+  // terminal run without agent cursor → restart-requested (not restart-agent)
+  const terminal = dispatchHotkey({
+    key: "r",
+    view: "phase-view",
+    runState: "done",
+    runId: "wf-test01",
+  });
+  assert.equal(terminal.kind, "restart-requested");
+});
+
+test("x on phase-view with queued agent (not running) falls through to run-level stop", () => {
+  const action = dispatchHotkey({
+    key: "x",
+    view: "phase-view",
+    runState: "running",
+    runId: "wf-test01",
+    agentId: "agent-abc123",
+    agentState: "queued",
+  });
+  assert.equal(action.kind, "stop"); // run-level, not agent-level
+});
+
+test("isHotkeyEnabled: x in phase-view with running agent is enabled", () => {
+  assert.equal(
+    isHotkeyEnabled({
+      key: "x",
+      view: "phase-view",
+      runState: "running",
+      agentId: "agent-abc",
+      agentState: "running",
+    }),
+    true,
+  );
+});
+
+test("isHotkeyEnabled: r in phase-view with running agent is enabled", () => {
+  assert.equal(
+    isHotkeyEnabled({
+      key: "r",
+      view: "phase-view",
+      runState: "running",
+      agentId: "agent-abc",
+      agentState: "running",
+    }),
+    true,
+  );
+});

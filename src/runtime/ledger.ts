@@ -526,6 +526,8 @@ export class LedgerReader {
       case "error":
       case "gate_requested":
       case "gate_resolved":
+      case "interrupt_requested":
+      case "interrupt_resolved":
       case "appendEntry":
         // Trust upstream — fields are emitted by writer in this
         // package; downstream readers shouldn't refuse a record

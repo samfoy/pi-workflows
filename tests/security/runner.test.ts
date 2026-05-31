@@ -34,6 +34,14 @@ interface Vector {
   readonly fixture: string;
   readonly description: string;
   readonly input?: unknown;
+  /**
+   * Opt-in to `eval` / `new Function(string)` for fixtures that probe
+   * the wrapper-identity defense. The sandbox default is `false`
+   * (matches docs/threat-model.md §Sandbox construction); set this
+   * to `true` when the fixture needs codegen to even reach the
+   * exploit it's testing.
+   */
+  readonly allowCodegen?: boolean;
   /** Validates the fixture's returned value. Throws via assert.* on fail. */
   readonly assertReturn: (value: unknown) => void;
 }
@@ -55,6 +63,10 @@ const VECTORS: readonly Vector[] = [
   {
     fixture: "function-constructor.workflow.js",
     description: "PRD §8.3.1 — Function('return globalThis')() stays in Context",
+    // Need codegen on so the fixture's `new F('return globalThis')` even runs;
+    // the wrapper-identity defense is the contract under test, not the
+    // allowCodeGeneration.strings flag.
+    allowCodegen: true,
     assertReturn: (v: unknown) => {
       const r = v as {
         sameGlobal: boolean;
@@ -71,6 +83,9 @@ const VECTORS: readonly Vector[] = [
   {
     fixture: "async-function-constructor.workflow.js",
     description: "PRD §8.3.3 — AsyncFunction stays in Context",
+    // See note on function-constructor.workflow.js above — codegen must be
+    // enabled to reach the exploit the wrapper-identity defense contains.
+    allowCodegen: true,
     assertReturn: (v: unknown) => {
       const r = v as {
         sameAsCtxGlobal: boolean;
@@ -264,6 +279,10 @@ const VECTORS: readonly Vector[] = [
       assert.equal(stdlibIdent.parallelCtorIsContextFn,  true, "ctx.parallel.constructor must be Context Function");
       assert.equal(stdlibIdent.retryCtorIsContextFn,     true, "ctx.retry.constructor must be Context Function");
       assert.equal(stdlibIdent.sleepCtorIsContextFn,     true, "ctx.sleep.constructor must be Context Function");
+      // gap-fix stdlib additions: extractJSON / aggregate / critique.
+      assert.equal(stdlibIdent.aggregateCtorIsContextFn,   true, "ctx.aggregate.constructor must be Context Function");
+      assert.equal(stdlibIdent.extractJSONCtorIsContextFn, true, "ctx.extractJSON.constructor must be Context Function");
+      assert.equal(stdlibIdent.critiqueCtorIsContextFn,    true, "ctx.critique.constructor must be Context Function");
       // Slice 9: ctx.signal wrapper-identity. The runner doesn't supply
       // a runCtxHost, but the signal IS bound at runScript time — it's
       // a Context-realm AbortSignal-like polyfill regardless. So the
@@ -284,6 +303,27 @@ const VECTORS: readonly Vector[] = [
         sigIdent.protoIsCtxObjProto,
         true,
         "ctx.signal must be a Context-realm object literal (proto === Context Object.prototype)",
+      );
+      // gap-fix: throwIfAborted/dispatchEvent additions on the signal polyfill.
+      assert.equal(
+        sigIdent.throwIfAbortedCtorIsContextFn,
+        true,
+        "ctx.signal.throwIfAborted.constructor must be Context Function",
+      );
+      assert.equal(
+        sigIdent.dispatchEventCtorIsContextFn,
+        true,
+        "ctx.signal.dispatchEvent.constructor must be Context Function",
+      );
+      assert.equal(
+        sigIdent.abortSignalTimeoutCtorIsContextFn,
+        true,
+        "AbortSignal.timeout.constructor must be Context Function",
+      );
+      assert.equal(
+        sigIdent.abortSignalAnyCtorIsContextFn,
+        true,
+        "AbortSignal.any.constructor must be Context Function",
       );
       // Slice 8b: __pi_install_stdlib must be deleted post-init.
       const stdlibHidden = r["stdlib-factory-hidden"] as Record<string, unknown>;
@@ -329,6 +369,7 @@ for (const v of VECTORS) {
     const result = await runScript(source, {
       signal: ctrl.signal,
       input: v.input,
+      ...(v.allowCodegen === undefined ? {} : { allowCodegen: v.allowCodegen }),
     });
 
     // Validate the fixture's claims.

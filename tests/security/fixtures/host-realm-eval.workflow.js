@@ -79,6 +79,10 @@ probe("ctx-consensus", () => ctx.consensus.constructor);
 probe("ctx-parallel",  () => ctx.parallel.constructor);
 probe("ctx-retry",     () => ctx.retry.constructor);
 probe("ctx-sleep",     () => ctx.sleep.constructor);
+// gap-fix stdlib additions: extractJSON, aggregate, critique.
+probe("ctx-aggregate",   () => ctx.aggregate.constructor);
+probe("ctx-extractJSON", () => ctx.extractJSON.constructor);
+probe("ctx-critique",    () => ctx.critique.constructor);
 
 // Wrapper-identity invariant — these must equal the Context's Function.
 tests["wrapper-identity"] = {
@@ -112,6 +116,10 @@ tests["wrapper-identity-stdlib"] = {
   parallelCtorIsContextFn:  ctx.parallel.constructor === Function,
   retryCtorIsContextFn:     ctx.retry.constructor === Function,
   sleepCtorIsContextFn:     ctx.sleep.constructor === Function,
+  // gap-fix stdlib additions:
+  aggregateCtorIsContextFn:   ctx.aggregate.constructor === Function,
+  extractJSONCtorIsContextFn: ctx.extractJSON.constructor === Function,
+  critiqueCtorIsContextFn:    ctx.critique.constructor === Function,
 };
 
 // Slice 9: ctx.signal wrapper-identity oracle.
@@ -128,8 +136,18 @@ tests["wrapper-identity-signal"] =
           ctx.signal.addEventListener.constructor === Function,
         removeEventListenerCtorIsContextFn:
           ctx.signal.removeEventListener.constructor === Function,
+        // gap-fix: throwIfAborted + dispatchEvent additions to the polyfill.
+        throwIfAbortedCtorIsContextFn:
+          ctx.signal.throwIfAborted.constructor === Function,
+        dispatchEventCtorIsContextFn:
+          ctx.signal.dispatchEvent.constructor === Function,
         protoIsCtxObjProto:
           Object.getPrototypeOf(ctx.signal) === Object.prototype,
+        // gap-fix: AbortSignal namespace exists with timeout/any.
+        abortSignalTimeoutCtorIsContextFn:
+          AbortSignal.timeout.constructor === Function,
+        abortSignalAnyCtorIsContextFn:
+          AbortSignal.any.constructor === Function,
       };
 
 // Slice 8b: __pi_install_stdlib must be hidden after init (deleted

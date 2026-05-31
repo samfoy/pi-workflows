@@ -10,12 +10,16 @@
  *                           this is unique-per-pi-process across PID
  *                           recycling.
  *   - `parentBootId`      — Linux: `/proc/sys/kernel/random/boot_id`,
- *                           strip trailing newline; macOS: empty
- *                           string (sysctl `kern.boottime` would be
- *                           the natural source but we don't shell out
- *                           in v0.1; documented in parity-gaps).
- *                           Together with `parentStartTime` this is
- *                           sufficient for the slice-5.8.2 sweep.
+ *                           strip trailing newline; macOS:
+ *                           `darwin-<sec>` from `sysctl kern.boottime`
+ *                           (closes the macOS PID-recycle gap — a
+ *                           manifest written by a previous boot is
+ *                           detectable as stale even though PIDs may
+ *                           have recycled into the same numeric
+ *                           range). Empty string on unsupported
+ *                           platforms / containers / sysctl failures;
+ *                           the sweep falls back to pid-only liveness
+ *                           in that case.
  *
  * Per oracle's plan revision (Fix 2 Option A): slice 6 writes a
  * **partial** manifest. Slice 8a will read whatever's there and merge
@@ -28,7 +32,7 @@
  * merging the existing fields under our owned set.
  */
 
-import { closeSync, fsyncSync, openSync, promises as fs, existsSync, readFileSync } from "node:fs";
+import { closeSync, fsyncSync, openSync, promises as fs } from "node:fs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 
@@ -37,6 +41,7 @@ import type {
   RunManifest,
 } from "../types/internal.js";
 import { manifestPath } from "../util/paths.js";
+import { currentBootId } from "./crashSweep.js";
 
 /**
  * Capture parent-liveness fields once at run-start. Pure (well, reads
@@ -51,16 +56,11 @@ export function captureParentLiveness(
   // hrtime.bigint() is monotonic; we serialize as decimal so the
   // manifest survives JSON round-trip without precision loss.
   const parentStartTime = ht.toString();
-  let parentBootId = "";
-  // Linux: cat /proc/sys/kernel/random/boot_id, strip trailing
-  // whitespace. Defensive — in containers / chroot this may not exist.
-  try {
-    if (process.platform === "linux" && existsSync("/proc/sys/kernel/random/boot_id")) {
-      parentBootId = readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
-    }
-  } catch {
-    // ignore — empty string is the documented "unavailable" sentinel.
-  }
+  // Boot id resolution lives in `crashSweep.currentBootId()` so the
+  // sweep reader and the manifest writer agree on the same identity.
+  // Linux: UUID from /proc; darwin: `darwin-<sec>` from sysctl;
+  // anything else: empty sentinel.
+  const parentBootId = currentBootId();
   return { parentPid, parentStartTime, parentBootId };
 }
 
@@ -150,6 +150,150 @@ async function _doWriteParentLiveness(
 /** `<runDir>/manifest.json` from an absolute run-dir path. */
 function manifestPath_byDir(runDirAbs: string): string {
   return join(runDirAbs, "manifest.json");
+}
+
+// ─── ZONE_MEMORY: per-(runDir, name) agent-memory dir record ────────
+//
+// Reuses the same per-runDir queue + atomic merge pattern as
+// `writeParentLivenessFields` so that concurrent first-dispatches in
+// `ctx.phase` cannot interleave and clobber each other's recorded
+// dirs. The on-disk shape is `agentMemoryDirs: { <name>: <dir> }`.
+
+/**
+ * Record the resolved agent-memory directory for `name` into
+ * `<runDir>/manifest.json`. Idempotent — re-recording the same
+ * (name, dir) pair is a no-op merge. Different dirs for the same
+ * name overwrite (last-write-wins) which can only happen if a
+ * caller mixes scopes for the same persona within a single run;
+ * that's a workflow-author bug we surface via overwrite, not error.
+ */
+export function recordAgentMemoryDir(
+  runDirAbs: string,
+  name: string,
+  dir: string,
+): Promise<void> {
+  const pending = livenessWriteQueue.get(runDirAbs) ?? Promise.resolve();
+  const next = pending.then(() =>
+    _doRecordAgentMemoryDir(runDirAbs, name, dir),
+  );
+  livenessWriteQueue.set(runDirAbs, next.catch(() => {}));
+  return next;
+}
+
+async function _doRecordAgentMemoryDir(
+  runDirAbs: string,
+  name: string,
+  dir: string,
+): Promise<void> {
+  await fs.mkdir(runDirAbs, { recursive: true });
+  const target = manifestPath_byDir(runDirAbs);
+  let existing: Partial<RunManifest> & {
+    agentMemoryDirs?: Record<string, string>;
+  } = {};
+  try {
+    const buf = await fs.readFile(target, "utf8");
+    if (buf.trim().length > 0) {
+      const parsed = JSON.parse(buf) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        existing = parsed as Partial<RunManifest> & {
+          agentMemoryDirs?: Record<string, string>;
+        };
+      }
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT") {
+      // Corrupt manifest — overwrite with our fields only.
+    }
+  }
+  const priorDirs =
+    existing.agentMemoryDirs && typeof existing.agentMemoryDirs === "object"
+      ? existing.agentMemoryDirs
+      : {};
+  if (priorDirs[name] === dir) return; // already recorded — short-circuit
+  const merged = {
+    ...existing,
+    agentMemoryDirs: { ...priorDirs, [name]: dir },
+  };
+  const tmpName = join(
+    runDirAbs,
+    `manifest.json.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`,
+  );
+  const json = JSON.stringify(merged, null, 2) + "\n";
+  await fs.writeFile(tmpName, json, "utf8");
+  const fd = openSync(tmpName, "r+");
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+  await fs.rename(tmpName, target);
+}
+
+// ─── ZONE_WORKTREE: per-(runDir, agentId) worktree path record ──────
+//
+// Mirrors `recordAgentMemoryDir` exactly — same per-runDir queue,
+// same atomic merge, different field name. On-disk shape is
+// `agentWorktrees: { <agentId>: <absPath> }`.
+
+/**
+ * Record the resolved git-worktree directory for `agentId` into
+ * `<runDir>/manifest.json`. Idempotent — re-recording the same
+ * (agentId, dir) pair short-circuits without rewriting the file.
+ */
+export function recordAgentWorktreePath(
+  runDirAbs: string,
+  agentId: string,
+  dir: string,
+): Promise<void> {
+  const pending = livenessWriteQueue.get(runDirAbs) ?? Promise.resolve();
+  const next = pending.then(() =>
+    _doRecordAgentWorktreePath(runDirAbs, agentId, dir),
+  );
+  livenessWriteQueue.set(runDirAbs, next.catch(() => {}));
+  return next;
+}
+
+async function _doRecordAgentWorktreePath(
+  runDirAbs: string,
+  agentId: string,
+  dir: string,
+): Promise<void> {
+  await fs.mkdir(runDirAbs, { recursive: true });
+  const target = manifestPath_byDir(runDirAbs);
+  let existing: Partial<RunManifest> & {
+    agentWorktrees?: Record<string, string>;
+  } = {};
+  try {
+    const buf = await fs.readFile(target, "utf8");
+    if (buf.trim().length > 0) {
+      const parsed = JSON.parse(buf) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        existing = parsed as Partial<RunManifest> & {
+          agentWorktrees?: Record<string, string>;
+        };
+      }
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT") {
+      // Corrupt manifest — overwrite with our fields only.
+    }
+  }
+  const priorTrees =
+    existing.agentWorktrees && typeof existing.agentWorktrees === "object"
+      ? existing.agentWorktrees
+      : {};
+  if (priorTrees[agentId] === dir) return; // already recorded — short-circuit
+  const merged = {
+    ...existing,
+    agentWorktrees: { ...priorTrees, [agentId]: dir },
+  };
+  const tmpName = join(
+    runDirAbs,
+    `manifest.json.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`,
+  );
+  const json = JSON.stringify(merged, null, 2) + "\n";
+  await fs.writeFile(tmpName, json, "utf8");
+  const fd = openSync(tmpName, "r+");
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+  await fs.rename(tmpName, target);
 }
 
 // Re-export the by-runId path helper for symmetry with other slices'

@@ -66,6 +66,7 @@ import {
   captureParentLiveness,
   writeParentLivenessFields,
 } from "./manifestWriter.js";
+import { appendMemoryUpdate } from "./agentMemory.js";
 import {
   removeParentDeathWrapper,
   writeParentDeathWrapper,
@@ -196,6 +197,8 @@ interface Aggregator {
   toolCalls: number;
   usage: AgentUsage;
   agentEnd: Record<string, unknown> | null;
+  /** ZONE_MEMORY: collected `memory_update.text` payloads in order. */
+  memoryUpdates: string[];
 }
 
 function newAggregator(): Aggregator {
@@ -209,6 +212,7 @@ function newAggregator(): Aggregator {
       totalTokens: 0,
     },
     agentEnd: null,
+    memoryUpdates: [],
   };
 }
 
@@ -216,6 +220,16 @@ function ingest(agg: Aggregator, ev: Record<string, unknown>): void {
   const type = ev.type;
   if (type === "tool_call") {
     agg.toolCalls += 1;
+    return;
+  }
+  if (type === "memory_update") {
+    // ZONE_MEMORY: collect the payload here; flushing to disk happens
+    // after the stream settles so a torn-tail or schema-violation
+    // crash doesn't leave a half-written MEMORY.md update.
+    const t = ev.text;
+    if (typeof t === "string" && t.length > 0) {
+      agg.memoryUpdates.push(t);
+    }
     return;
   }
   if (type === "turn_end" || type === "message_end") {
@@ -245,6 +259,16 @@ function pickInt(obj: Record<string, unknown>, key: string): number {
 }
 
 /**
+ * Maximum bytes `recoverFromTranscript` will read from disk. Real
+ * agent transcripts are typically a few hundred KB; pathological
+ * runs (a chatty agent + parent crash) could leave a multi-GB file.
+ * Reading the whole thing into memory would OOM the host. We cap at
+ * 64 MiB and, on overflow, parse only the tail. `agent_end` is the
+ * very last event pi emits, so the tail almost always retains it.
+ */
+export const TRANSCRIPT_RECOVERY_MAX_BYTES = 64 * 1024 * 1024;
+
+/**
  * Attempt to synthesize an `AgentResult` from an existing on-disk
  * transcript file written by a prior `dispatchAgent` call.
  *
@@ -270,6 +294,13 @@ function pickInt(obj: Record<string, unknown>, key: string): number {
  * `agent_end` event is emitted by pi before any post-event I/O, so it
  * will always appear before any torn tail in a successfully-completed
  * transcript.
+ *
+ * **Size cap:** files larger than `TRANSCRIPT_RECOVERY_MAX_BYTES`
+ * (64 MiB) are NOT loaded whole — we read only the trailing 64 MiB
+ * and emit a warning to the host log. `agent_end` is pi's last event,
+ * so the tail is overwhelmingly likely to contain it; pathological
+ * runs whose `agent_end` falls beyond the tail will return `null` and
+ * trigger a normal re-dispatch (correctness over recovery).
  */
 export async function recoverFromTranscript(
   transcriptPath: string,
@@ -277,7 +308,32 @@ export async function recoverFromTranscript(
 ): Promise<AgentResult | null> {
   let content: string;
   try {
-    content = await fs.readFile(transcriptPath, "utf8");
+    const stat = await fs.stat(transcriptPath);
+    if (stat.size > TRANSCRIPT_RECOVERY_MAX_BYTES) {
+      // Oversized transcript — read only the tail to avoid OOM. We
+      // discard the leading partial line that the offset-read almost
+      // always slices through.
+      // eslint-disable-next-line no-console
+      console.warn(
+        `[pi-workflows] transcript ${transcriptPath} exceeds recovery cap` +
+          ` (${stat.size} > ${TRANSCRIPT_RECOVERY_MAX_BYTES}); parsing tail only`,
+      );
+      const fh = await fs.open(transcriptPath, "r");
+      try {
+        const buf = Buffer.alloc(TRANSCRIPT_RECOVERY_MAX_BYTES);
+        const start = stat.size - TRANSCRIPT_RECOVERY_MAX_BYTES;
+        await fh.read(buf, 0, TRANSCRIPT_RECOVERY_MAX_BYTES, start);
+        let tail = buf.toString("utf8");
+        // Drop the (almost certainly partial) first line.
+        const firstNl = tail.indexOf("\n");
+        if (firstNl !== -1) tail = tail.slice(firstNl + 1);
+        content = tail;
+      } finally {
+        await fh.close();
+      }
+    } else {
+      content = await fs.readFile(transcriptPath, "utf8");
+    }
   } catch {
     // File absent or unreadable — no recovery possible.
     return null;
@@ -434,13 +490,51 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
     stderrTee.end();
   }
 
-  // Honor caller AbortSignal.
-  const onAbort = (): void => {
+  // Subprocess timeout + escalation state. These are declared
+  // BEFORE the abort handler registration so a pre-aborted signal
+  // (synchronous `onAbort()` call below) doesn't TDZ on
+  // `killTimeoutHandle`.
+  const timeoutMs = opts.timeoutMs ?? 600_000;
+  // BUG-068: hoist killTimeoutHandle so every cleanup path can cancel it.
+  let killTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+
+  /**
+   * SIGTERM the child, then escalate to SIGKILL after a 5s grace if
+   * the child is still alive. Idempotent — second call is a no-op so
+   * the abort path and timeout path can both invoke it without
+   * double-arming the kill timer.
+   *
+   * Recon-map note: the timeout path used to inline this; the abort
+   * path used to send only SIGTERM. Both now share this helper so
+   * `Run.stop()` gets the same escalation guarantee as the timeout.
+   */
+  function escalateKill(): void {
     try {
       child.kill("SIGTERM");
     } catch {
       // ignore
     }
+    if (killTimeoutHandle !== null) return; // already escalating
+    const graceMs = opts.killGraceMs ?? 5_000;
+    killTimeoutHandle = setTimeout(() => {
+      try {
+        child.kill("SIGKILL");
+      } catch {
+        // ignore
+      }
+    }, graceMs);
+    if (typeof (killTimeoutHandle as { unref?: () => void }).unref === "function") {
+      (killTimeoutHandle as unknown as { unref: () => void }).unref();
+    }
+  }
+
+  // Honor caller AbortSignal. On abort we escalate SIGTERM → SIGKILL
+  // through the same `escalateKill` helper as the timeout path so
+  // cooperative `Run.stop()` (runManager.ts) can guarantee a child
+  // dies even if it ignores SIGTERM (e.g. blocked in an uninterruptible
+  // syscall, or a script handler swallowed the signal).
+  const onAbort = (): void => {
+    escalateKill();
   };
   if (opts.signal) {
     if (opts.signal.aborted) {
@@ -450,27 +544,8 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
     }
   }
 
-  // Subprocess timeout.
-  const timeoutMs = opts.timeoutMs ?? 600_000;
-  // BUG-068: hoist killTimeoutHandle so every cleanup path can cancel it.
-  let killTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
   const timeoutHandle = setTimeout(() => {
-    try {
-      child.kill("SIGTERM");
-    } catch {
-      // ignore
-    }
-    // Escalate to SIGKILL after a 5 s grace period if SIGTERM is ignored.
-    killTimeoutHandle = setTimeout(() => {
-      try {
-        child.kill("SIGKILL");
-      } catch {
-        // ignore
-      }
-    }, 5_000);
-    if (typeof (killTimeoutHandle as { unref?: () => void }).unref === "function") {
-      (killTimeoutHandle as unknown as { unref: () => void }).unref();
-    }
+    escalateKill();
   }, timeoutMs);
   if (typeof (timeoutHandle as { unref?: () => void }).unref === "function") {
     (timeoutHandle as unknown as { unref: () => void }).unref();
@@ -649,6 +724,29 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
       lineNumber: null,
       reason,
     });
+  }
+
+  // ZONE_MEMORY: flush any `memory_update` events the agent emitted
+  // during streaming. Done AFTER agent_end is observed so a crashing
+  // sub-agent (no agent_end) doesn't leave partial memory updates on
+  // disk. Failures are best-effort — we surface them via stderr but
+  // never fail the agent run for a memory-write hiccup.
+  if (opts.memoryDir !== undefined && agg.memoryUpdates.length > 0) {
+    for (const update of agg.memoryUpdates) {
+      try {
+        await appendMemoryUpdate(opts.memoryDir, update);
+      } catch (e) {
+        try {
+          await fs.appendFile(
+            stderrPath,
+            `[pi-workflows] memory_update append failed: ${(e as Error).message}\n`,
+            "utf8",
+          );
+        } catch {
+          /* ignore */
+        }
+      }
+    }
   }
 
   return {

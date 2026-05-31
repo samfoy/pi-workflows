@@ -28,6 +28,16 @@ import { isTerminalState } from "./activeRuns.js";
 import type { PhaseSnapshot, RunPhaseSnapshot } from "./phaseRegistry.js";
 import { fmtDuration, fmtRelative } from "./runsList.js";
 
+/**
+ * Format a token count for display.
+ * < 1000 → `N tok`, ≥ 1000 → `X.Xk tok`, ≥ 1000000 → `X.XM tok`
+ */
+export function fmtTokens(n: number): string {
+  if (n < 1000) return `${n} tok`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k tok`;
+  return `${(n / 1_000_000).toFixed(1)}M tok`;
+}
+
 export interface PhaseViewRender {
   readonly lines: string[];
   /** Rendered agent rows with their (phaseName, agentId) for cursor mapping. */
@@ -109,6 +119,14 @@ export function renderPhaseView(
     lines.push("");
     lines.push(opts.banner);
   }
+  // Run-level token totals in an info line (only when data is present).
+  if (snapshot !== undefined && snapshot.totalTokens > 0) {
+    const tokLine =
+      snapshot.cachedTokens > 0
+        ? `Total: ${fmtTokens(snapshot.totalTokens)} · ${fmtTokens(snapshot.cachedTokens)} cached`
+        : `Total: ${fmtTokens(snapshot.totalTokens)}`;
+    lines.push(tokLine);
+  }
   lines.push("");
   lines.push("Phases");
 
@@ -132,13 +150,16 @@ export function renderPhaseView(
       if (phase.status === "pending") {
         summaryStr = "pending";
       } else if (phase.status === "done") {
-        const tokenSegment = `${phase.agentCount} agent${phase.agentCount === 1 ? "" : "s"}`;
-        summaryStr = `${tokenSegment}   ${phaseElapsed}`;
+        const agentSegment = `${phase.agentCount} agent${phase.agentCount === 1 ? "" : "s"}`;
+        const tokStr = phase.totalTokens > 0 ? `  \u00b7  ${fmtTokens(phase.totalTokens)}` : "";
+        const cachedStr = phase.cachedTokens > 0 ? ` (${fmtTokens(phase.cachedTokens)} cached)` : "";
+        summaryStr = `${agentSegment}${tokStr}${cachedStr}   ${phaseElapsed}`;
       } else {
         // running
         summaryStr = `${completed}/${phase.agentCount} agents done`;
         if (running > 0) summaryStr += `, ${running} running`;
         if (queued > 0) summaryStr += `, ${queued} queued`;
+        if (phase.totalTokens > 0) summaryStr += `  \u00b7  ${fmtTokens(phase.totalTokens)}`;
         summaryStr += `   ${phaseElapsed} elapsed`;
       }
       lines.push(`${glyph} ${phase.phaseName.padEnd(14)} ${summaryStr}`);

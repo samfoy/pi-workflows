@@ -145,6 +145,7 @@ export async function runApprovalGate(
       absPath: opts.absPath,
       sha256: opts.sha256,
       ...(mismatchWarning !== null ? { mismatchWarning } : {}),
+      ...(opts.phases !== undefined && opts.phases.length > 0 ? { phases: opts.phases } : {}),
     });
     if (outcome === "view") {
       try {
@@ -225,6 +226,11 @@ export function makeConfirmDialog(opts: {
   ) => Promise<boolean>;
 }): ApprovalDialog {
   return async (prompt: ApprovalDialogPrompt) => {
+    const phaseCount = prompt.phases?.length ?? 0;
+    const phaseCaution =
+      phaseCount > 0
+        ? `\u26a0 This workflow declares ${phaseCount} phase${phaseCount === 1 ? "" : "s"}. Large runs can use significant tokens.\n`
+        : "";
     const intro =
       `Workflow "${prompt.workflowName}" wants to run.\n` +
       `Path: ${prompt.absPath}\n` +
@@ -232,6 +238,7 @@ export function makeConfirmDialog(opts: {
       (prompt.mismatchWarning !== undefined
         ? `\u26a0 ${prompt.mismatchWarning}\n`
         : "") +
+      phaseCaution +
       `Approve once?`;
     const yes = await opts.confirm(intro);
     if (!yes) {

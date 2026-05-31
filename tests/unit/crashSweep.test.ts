@@ -27,6 +27,8 @@ import {
   sweepCrashedRuns,
   isParentAlive,
   currentBootId,
+  parseDarwinBootTime,
+  _resetBootIdCacheForTests,
 } from "../../src/runtime/crashSweep.ts";
 import { LedgerWriter } from "../../src/runtime/ledger.ts";
 
@@ -130,6 +132,46 @@ const RESOLVERS = (runsRoot: string) => ({
 });
 
 // ─── liveness primitives ─────────────────────────────────────────────
+
+test("parseDarwinBootTime: full sysctl struct → namespaced id", () => {
+  const out = "{ sec = 1748714712, usec = 123456 } Mon May 31 12:34:56 2025\n";
+  assert.equal(parseDarwinBootTime(out), "darwin-1748714712");
+});
+
+test("parseDarwinBootTime: extra whitespace tolerated", () => {
+  assert.equal(
+    parseDarwinBootTime("  { sec  =  9999, usec = 0 } whatever"),
+    "darwin-9999",
+  );
+});
+
+test("parseDarwinBootTime: bare-integer fallback", () => {
+  // Some sysctl variants print just the seconds with `-n`.
+  assert.equal(parseDarwinBootTime("1717154712\n"), "darwin-1717154712");
+});
+
+test("parseDarwinBootTime: garbage → empty string", () => {
+  assert.equal(parseDarwinBootTime("this is not boottime output"), "");
+  assert.equal(parseDarwinBootTime(""), "");
+});
+
+test("currentBootId: nonempty + stable across calls (linux + darwin)", () => {
+  if (process.platform !== "linux" && process.platform !== "darwin") {
+    return; // platform without a known boot-id source — empty by design
+  }
+  _resetBootIdCacheForTests();
+  const first = currentBootId();
+  const second = currentBootId();
+  assert.notEqual(first, "", "currentBootId must be nonempty on linux/darwin");
+  assert.equal(first, second, "currentBootId must be stable across calls");
+  if (process.platform === "darwin") {
+    assert.match(
+      first,
+      /^darwin-\d+$/,
+      `darwin boot id must be 'darwin-<sec>', got ${first}`,
+    );
+  }
+});
 
 test("isParentAlive: own pid + matching bootId → alive", () => {
   const alive = isParentAlive({

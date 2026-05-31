@@ -102,9 +102,11 @@ interface RunCtxHostInternal {
   progress(pct: unknown, message?: unknown): RunCtxBridgeResult<null>;
   /** Improvement 6: idempotent checkpoint. */
   checkpoint(label: unknown, data?: unknown): Promise<RunCtxBridgeResult<boolean>>;
-  /** Improvement 7: structured report event. */
-  report(eventType: unknown, data?: unknown): RunCtxBridgeResult<null>;
+  /** Improvement 7: structured report event. With `{format:'mermaid'}` returns a Mermaid DAG. */
+  report(eventType: unknown, data?: unknown): RunCtxBridgeResult<null | string>;
   gate(message: unknown, opts?: unknown): Promise<RunCtxBridgeResult<boolean>>;
+  /** ZONE_HITL: mid-phase pause-and-route primitive. */
+  interrupt(opts: unknown): Promise<RunCtxBridgeResult<unknown>>;
   memo_check(
     key: string,
     opts?: unknown,
@@ -114,6 +116,26 @@ interface RunCtxHostInternal {
     value: unknown,
     opts?: unknown,
   ): Promise<RunCtxBridgeResult<null>>;
+  /** ZONE_MEMORY follow-up: stdlib helpers. Optional — see RunCtxHost. */
+  memory_read?(
+    name: unknown,
+    scope: unknown,
+  ): Promise<RunCtxBridgeResult<string | null>>;
+  memory_append?(
+    name: unknown,
+    scope: unknown,
+    text: unknown,
+  ): Promise<RunCtxBridgeResult<null>>;
+  memory_compact?(
+    name: unknown,
+    scope: unknown,
+  ): Promise<
+    RunCtxBridgeResult<{
+      beforeBytes: number;
+      afterBytes: number;
+      ratio: number;
+    }>
+  >;
 }
 
 /**
@@ -483,9 +505,15 @@ export class Sandbox {
       name: opts.debugName ?? DEFAULT_DEBUG_NAME,
       codeGeneration: {
         // PRD §4.3 ⚠ row: eval / Function are AVAILABLE but useless
-        // (they evaluate inside the same Context). Default true to
-        // match. Tests pass false to make the absence provable.
-        strings: opts.allowCodegen ?? true,
+        // (they evaluate inside the same Context). Default to `false`
+        // to match docs/threat-model.md §Sandbox construction; authors
+        // who need `eval(string)` / `new Function(string)` opt in via
+        // SandboxOptions.allowCodegen=true. The wrapper-identity
+        // defense (PRD §8.3.4) makes opt-in safe-by-construction —
+        // Function constructed inside the Context still resolves to
+        // the Context's frozen globals — but defense in depth is worth
+        // the extra keystroke.
+        strings: opts.allowCodegen ?? false,
         wasm: false,
       },
     });
@@ -585,16 +613,9 @@ export class Sandbox {
     }
 
     // installConsole / installCrypto / installBuffer / installWebApis
-    // are no longer needed — the init script wraps everything itself
-    // from the bridge payload (PRD §8.3.4 host-realm-eval defense).
-    // The legacy helpers below remain only for back-compat with any
-    // out-of-tree caller that constructed a Sandbox without going
-    // through the bridge path. They're unreachable from the
-    // constructor.
-    void installConsole;
-    void installCrypto;
-    void installBuffer;
-    void installWebApis;
+    // were pre-bridge legacy helpers — now removed. The init script
+    // wraps everything itself from the bridge payload (PRD §8.3.4
+    // host-realm-eval defense).
 
     // NOTE: we intentionally do NOT call `Object.freeze(globalThis)`. In
     // a `vm.Context`, `globalThis` is a Proxy over the sandbox object
@@ -910,34 +931,6 @@ function slice2StubRunMeta(): RunMetaData {
     cwd: ".",
     resumed: false,
   };
-}
-
-/**
- * Minimal `ctx` literal kept for backward compatibility with any
- * out-of-tree caller that constructed a Sandbox before slice 8a's
- * factory pattern. Unreachable from the slice-8a constructor (the
- * factory `__pi_build_ctx` is what runs).
- *
- * Kept as a no-op stub. Per critic concern slice_8a_concerns#2: the
- * old body referenced the deleted `__pi_console_log__` global — calling
- * it would TypeError. The new body throws explicitly with a message
- * pointing at slice-8a's bind path.
- */
-function minimalCtxLiteral(): string {
-  return [
-    "Object.freeze({",
-    "  log:    function () { throw new Error('ctx.log: legacy minimalCtxLiteral path \u2014 use SandboxOptions.runCtxHost (slice 8a)'); },",
-    "  agent:  function () { throw new Error('ctx.agent: legacy minimalCtxLiteral path'); },",
-    "  phase:  function () { throw new Error('ctx.phase: legacy minimalCtxLiteral path'); },",
-    "  cache:  Object.freeze({",
-    "    get:    function () { throw new Error('ctx.cache: legacy minimalCtxLiteral path'); },",
-    "    set:    function () { throw new Error('ctx.cache: legacy minimalCtxLiteral path'); },",
-    "    has:    function () { throw new Error('ctx.cache: legacy minimalCtxLiteral path'); },",
-    "    delete: function () { throw new Error('ctx.cache: legacy minimalCtxLiteral path'); },",
-    "  }),",
-    "  run: Object.freeze({ id: 'wf-stub', workflowName: 'stub', startedAt: '1970-01-01T00:00:00Z', cwd: '.', resumed: false }),",
-    "})",
-  ].join("\n");
 }
 
 /**
@@ -1281,22 +1274,48 @@ function buildInitScript(nonce: string): string {
     "      const idx = listeners.indexOf(fn);",
     "      if (idx >= 0) listeners.splice(idx, 1);",
     "    },",
-    "    dispatchEvent: function () { return true; },",
+    "    // gap-fix: real dispatchEvent — invokes listeners for the named",
+    "    // event so author code that re-broadcasts via dispatchEvent works.",
+    "    // Returns false iff a listener called event.preventDefault() (we",
+    "    // don't model preventDefault here — always returns true).",
+    "    dispatchEvent: function (event) {",
+    "      if (!event || typeof event !== 'object' || event.type !== 'abort') return true;",
+    "      const snapshot = listeners.slice();",
+    "      for (let i = 0; i < snapshot.length; i++) {",
+    "        try { snapshot[i].call(undefined, event); } catch (_) {}",
+    "      }",
+    "      return true;",
+    "    },",
+    "    // gap-fix: web AbortSignal.throwIfAborted() — synchronous guard",
+    "    // authors use to bail out of long sync work.",
+    "    throwIfAborted: function () {",
+    "      if (aborted) {",
+    "        throw reason !== undefined ? reason : new Error('aborted');",
+    "      }",
+    "    },",
     "  };",
     "  function abort(rawReason) {",
     "    if (aborted) return;",
     "    aborted = true;",
-    "    let msg;",
-    "    if (rawReason && typeof rawReason === 'object' && typeof rawReason.message === 'string') {",
-    "      msg = rawReason.message;",
-    "    } else if (rawReason === undefined || rawReason === null) {",
-    "      msg = 'aborted';",
+    "    // gap-fix: if the rawReason is already an Error (e.g. TimeoutError",
+    "    // from AbortSignal.timeout), preserve it as-is so its name flows",
+    "    // to throwIfAborted/listener callbacks unchanged. Only synthesize",
+    "    // a fresh AbortError when the caller passed nothing or a non-Error.",
+    "    if (rawReason && typeof rawReason === 'object' && typeof rawReason.message === 'string' && typeof rawReason.name === 'string') {",
+    "      reason = rawReason;",
     "    } else {",
-    "      msg = String(rawReason);",
+    "      let msg;",
+    "      if (rawReason && typeof rawReason === 'object' && typeof rawReason.message === 'string') {",
+    "        msg = rawReason.message;",
+    "      } else if (rawReason === undefined || rawReason === null) {",
+    "        msg = 'aborted';",
+    "      } else {",
+    "        msg = String(rawReason);",
+    "      }",
+    "      const err = new Error(msg);",
+    "      Object.defineProperty(err, 'name', { value: 'AbortError', configurable: true, writable: true, enumerable: false });",
+    "      reason = err;",
     "    }",
-    "    const err = new Error(msg);",
-    "    Object.defineProperty(err, 'name', { value: 'AbortError', configurable: true, writable: true, enumerable: false });",
-    "    reason = err;",
     "    const snapshot = listeners.slice();",
     "    listeners.length = 0;",
     "    for (let i = 0; i < snapshot.length; i++) {",
@@ -1306,6 +1325,65 @@ function buildInitScript(nonce: string): string {
     "  Object.freeze(signal);",
     "  return { signal: signal, abort: abort };",
     "};",
+    "",
+    "// gap-fix: capture __pi_make_signal into the IIFE closure so the",
+    "// AbortSignal namespace below can mint signals after the cleanup",
+    "// step deletes globalThis.__pi_make_signal at end of init (BUG-022).",
+    "const __pi_make_signal_fn = globalThis.__pi_make_signal;",
+    "",
+    "// gap-fix: globalThis.AbortSignal stand-in. The sandbox doesn't expose a",
+    "// real AbortSignal *class* (the run-level signal is a plain object), so we",
+    "// shim a namespace with the two static factories that web AbortSignal",
+    "// ships: AbortSignal.timeout(ms) and AbortSignal.any(signals). Each",
+    "// returns a fresh ctx-shaped signal (same shape as ctx.signal) so all",
+    "// stdlib helpers and author code consume them uniformly.",
+    "globalThis.AbortSignal = Object.freeze({",
+    "  timeout: function (ms) {",
+    "    const n = +ms;",
+    "    if (!Number.isFinite(n) || n < 0) {",
+    "      throw new TypeError('AbortSignal.timeout: ms must be a non-negative finite number');",
+    "    }",
+    "    const pair = __pi_make_signal_fn();",
+    "    const t = __h.scheduleTimeout(function () {",
+    "      const e = new Error('signal timed out');",
+    "      Object.defineProperty(e, 'name', { value: 'TimeoutError', configurable: true, writable: true, enumerable: false });",
+    "      pair.abort(e);",
+    "    }, n);",
+    "    void t;",
+    "    return pair.signal;",
+    "  },",
+    "  any: function (signals) {",
+    "    if (!Array.isArray(signals)) {",
+    "      throw new TypeError('AbortSignal.any: signals must be an array');",
+    "    }",
+    "    const pair = __pi_make_signal_fn();",
+    "    // If any input is already aborted, abort synchronously.",
+    "    for (let i = 0; i < signals.length; i++) {",
+    "      const s = signals[i];",
+    "      if (s && s.aborted === true) {",
+    "        pair.abort(s.reason);",
+    "        return pair.signal;",
+    "      }",
+    "    }",
+    "    // Otherwise, listen on each.",
+    "    function onAbort() {",
+    "      for (let i = 0; i < signals.length; i++) {",
+    "        const s = signals[i];",
+    "        if (s && s.aborted === true) {",
+    "          pair.abort(s.reason);",
+    "          return;",
+    "        }",
+    "      }",
+    "    }",
+    "    for (let i = 0; i < signals.length; i++) {",
+    "      const s = signals[i];",
+    "      if (s && typeof s.addEventListener === 'function') {",
+    "        s.addEventListener('abort', onAbort, { once: true });",
+    "      }",
+    "    }",
+    "    return pair.signal;",
+    "  },",
+    "});",
     "",
     "globalThis.__pi_build_ctx = function (runMeta, input, signal) {",
     "  // ctxRef is the late-bound back-reference the stdlib helpers close",
@@ -1331,6 +1409,7 @@ function buildInitScript(nonce: string): string {
     "      }),",
     "      finishCallback: function () { throw new Error('ctx.finishCallback: no runtime (slice-2 stub)'); },",
     "      gate:           function () { throw new Error('ctx.gate: no runtime (slice-2 stub)'); },",
+    "      interrupt:      function () { throw new Error('ctx.interrupt: no runtime (slice-2 stub)'); },",
     "      memo:           function () { throw new Error('ctx.memo: no runtime (slice-2 stub)'); },",
     "      budget: Object.freeze({ total: null, spent: function() { return 0; }, remaining: function() { return Infinity; } }),",
     "      run: Object.freeze({ id: 'wf-stub', workflowName: 'stub', startedAt: '1970-01-01T00:00:00Z', cwd: '.', resumed: false }),",
@@ -1351,6 +1430,7 @@ function buildInitScript(nonce: string): string {
     "      cache:          cache,",
     "      finishCallback: wrapHostSync(__runCtxHost.finishCallback),",
     "      gate:           wrapHostAsync(__runCtxHost.gate),",
+    "      interrupt:      wrapHostAsync(__runCtxHost.interrupt),",
     "      memo:           async function(key, fn, opts) {",
     "        if (typeof key !== 'string') throw new TypeError('ctx.memo: key must be a string');",
     "        if (typeof fn !== 'function') throw new TypeError('ctx.memo: fn must be a function');",
@@ -1396,15 +1476,30 @@ function buildInitScript(nonce: string): string {
     "  __base.pipeline  = __helpers.pipeline;",
     "  __base.retry     = __helpers.retry;",
     "  __base.sleep     = __helpers.sleep;",
+    "  // gap-fix stdlib additions:",
+    "  __base.aggregate   = __helpers.aggregate;",
+    "  __base.extractJSON = __helpers.extractJSON;",
+    "  __base.critique    = __helpers.critique;",
     "  // Improvements 5-7: progress, checkpoint, report bindings.",
     "  if (__runCtxHost) {",
     "    __base.progress    = wrapHostSync(__runCtxHost.progress);",
     "    __base.checkpoint  = wrapHostAsync(__runCtxHost.checkpoint);",
     "    __base.report      = wrapHostSync(__runCtxHost.report);",
+    "    // ZONE_MEMORY follow-up #6: stdlib helpers ctx.memory.*",
+    "    __base.memory      = Object.freeze({",
+    "      read:    wrapHostAsync(__runCtxHost.memory_read),",
+    "      append:  wrapHostAsync(__runCtxHost.memory_append),",
+    "      compact: wrapHostAsync(__runCtxHost.memory_compact),",
+    "    });",
     "  } else {",
     "    __base.progress   = function() { throw new Error('ctx.progress: no runtime (slice-2 stub)'); };",
     "    __base.checkpoint = function() { throw new Error('ctx.checkpoint: no runtime (slice-2 stub)'); };",
     "    __base.report     = function() { throw new Error('ctx.report: no runtime (slice-2 stub)'); };",
+    "    __base.memory     = Object.freeze({",
+    "      read:    function() { throw new Error('ctx.memory.read: no runtime (slice-2 stub)'); },",
+    "      append:  function() { throw new Error('ctx.memory.append: no runtime (slice-2 stub)'); },",
+    "      compact: function() { throw new Error('ctx.memory.compact: no runtime (slice-2 stub)'); },",
+    "    });",
     "  }",
     "  const ctx = Object.freeze(__base);",
     "  __ctxRef.current = ctx;",
@@ -1446,122 +1541,3 @@ function buildInitScript(nonce: string): string {
   ].join("\n");
 }
 
-/**
- * Install host-realm `__pi_console_log__(level, args)` on the Context.
- * The init script's console object delegates to this.
- *
- * Args are stringified host-side via `safeStringifyThrown` (it's
- * total). We don't keep the raw values — they may carry Context-realm
- * prototypes that surprise downstream readers.
- */
-function installConsole(
-  context: vm.Context,
-  logFn: (entry: SandboxLogEntry) => void,
-): void {
-  const handler = (level: string, args: unknown[]): void => {
-    const stringArgs = (Array.isArray(args) ? args : []).map((a) =>
-      safeStringifyThrown(a),
-    );
-    const lvl: SandboxLogEntry["level"] =
-      level === "log" ||
-      level === "info" ||
-      level === "warn" ||
-      level === "error" ||
-      level === "debug"
-        ? level
-        : "log";
-    logFn({
-      t: new Date().toISOString(),
-      level: lvl,
-      args: stringArgs,
-    });
-  };
-  // Stick `__pi_console_log__` on the Context's globalThis. The init
-  // script's console.log forwards to it. Note: this IS a host-realm
-  // function, so script code doing `console.log.constructor` could
-  // reach Function from the host realm. PRD §8.1 trust model accepts
-  // this for ergonomics; lock-down would require wrapping each console
-  // method as a Context-realm closure that buffers + bulk-flushes.
-  // Slice 7 may revisit when wiring to the ledger.
-  Object.defineProperty(getSandboxObject(context), "__pi_console_log__", {
-    value: handler,
-    writable: false,
-    configurable: false,
-    enumerable: false,
-  });
-}
-
-/**
- * Install crypto.{subtle, randomUUID, getRandomValues} — pulled
- * from host's `globalThis.crypto`. Per PRD §4.3 ⚠ row: available
- * but breaks cache reproducibility.
- *
- * We expose the host's `crypto` object directly. This means
- * `crypto.constructor === <host Crypto>`. Per §8.1 trust model we
- * accept this — these methods are pure (no state), the data leak is
- * the constructor itself which doesn't grant additional capability.
- */
-function installCrypto(context: vm.Context): void {
-  const hostCrypto = (globalThis as { crypto?: unknown }).crypto;
-  if (hostCrypto === undefined) return;
-  // Cannot freeze the host's crypto object (it's not ours), but we
-  // can expose it on the Context's globalThis as non-writable.
-  Object.defineProperty(getSandboxObject(context), "crypto", {
-    value: hostCrypto,
-    writable: false,
-    configurable: false,
-    enumerable: false,
-  });
-}
-
-/**
- * Install `Buffer` (PRD §4.3 ⚠ row). Pulled from the host. Realm-leak
- * via `Buffer.constructor` accepted per §8.1.
- */
-function installBuffer(context: vm.Context): void {
-  const HostBuffer = (globalThis as { Buffer?: unknown }).Buffer;
-  if (HostBuffer === undefined) return;
-  Object.defineProperty(getSandboxObject(context), "Buffer", {
-    value: HostBuffer,
-    writable: false,
-    configurable: false,
-    enumerable: false,
-  });
-}
-
-/**
- * Install web APIs (URL, URLSearchParams, TextEncoder, TextDecoder,
- * atob, btoa) by reference from the host. Realm-leak caveat applies.
- */
-function installWebApis(
-  context: vm.Context,
-  names: readonly string[],
-): void {
-  const sandbox = getSandboxObject(context);
-  for (const n of names) {
-    const v = (globalThis as Record<string, unknown>)[n];
-    if (v === undefined) continue;
-    Object.defineProperty(sandbox, n, {
-      value: v,
-      writable: false,
-      configurable: false,
-      enumerable: false,
-    });
-  }
-}
-
-/**
- * The sandbox object passed to `vm.createContext`. We need this for
- * `Object.defineProperty(sandbox, ...)` — the sandbox object IS the
- * Context's globalThis under the hood.
- */
-function getSandboxObject(context: vm.Context): object {
-  // `vm.createContext({ ... })` returns a contextified version of the
-  // input object. We need the input object itself. Easiest: the
-  // Context's globalThis-as-host-object IS the sandbox. But we don't
-  // hold a reference here. Use a one-shot vm.runInContext to get it.
-  // Note: `globalThis` from inside the Context evaluated and returned
-  // is the SAME object as the sandbox we passed in (Node guarantees
-  // this).
-  return vm.runInContext("globalThis", context) as object;
-}

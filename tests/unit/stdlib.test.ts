@@ -119,6 +119,7 @@ function stubHost(opts: {
     checkpoint: async () => ok(false),
     report: () => ok(null),
     gate: async () => ok(true),
+    interrupt: async () => ok(null),
     memo_check: async () => ok({ hit: false as const }),
     memo_set: async () => ok(null),
   };

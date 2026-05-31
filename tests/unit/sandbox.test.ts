@@ -176,6 +176,9 @@ test("§4.3 Buffer is present (PRD critic guard)", async () => {
 
 test("eval / Function are present (PRD ⚠ row) — but escape only into the Context", async () => {
   const { signal } = fresh();
+  // Codegen defaults to false (matches docs/threat-model.md §Sandbox
+  // construction); opt in to verify the wrapper-identity defense still
+  // contains the escape when an author chooses to enable it.
   const r = await runScript(
     `
       const evalOk  = typeof eval === 'function';
@@ -184,7 +187,7 @@ test("eval / Function are present (PRD ⚠ row) — but escape only into the Con
       const escapeReq = (Function('try { return require } catch (e) { return undefined; }'))();
       return { evalOk, funcOk, escapeType: typeof escape, escapeReqType: typeof escapeReq };
     `,
-    { signal },
+    { signal, allowCodegen: true },
   );
   // process is a stub (object), not the host's. require is undefined.
   const v = r.returnValue as {
@@ -383,6 +386,9 @@ test("§8.3.1 Function-constructor escape returns Context's globalThis only", as
   // globalThis. Verify by checking that `process.env` (the Context's
   // stub) is reached, not the host's env.
   const { signal } = fresh();
+  // Codegen defaults to false; opt in so the Function-constructor call
+  // doesn't trip allowCodeGeneration.strings before the wrapper-identity
+  // defense gets a chance to contain it.
   const r = await runScript(
     `
       const F = (() => {}).constructor;
@@ -392,7 +398,7 @@ test("§8.3.1 Function-constructor escape returns Context's globalThis only", as
       // Verify by looking at process.env (sandbox's stub is empty).
       return Object.keys(escapedGlobal.process.env).length;
     `,
-    { signal },
+    { signal, allowCodegen: true },
   );
   assert.equal(r.returnValue, 0, "escape resolved to Context's stubbed env");
 });
@@ -422,6 +428,7 @@ function hostReturning(value: unknown): RunCtxHost {
     checkpoint: async () => ok(false),
     report: () => ok(null),
     gate: async () => ok(true),
+    interrupt: async () => ok(null),
     memo_check: async () => ok({ hit: false as const }),
     memo_set: async () => ok(null),
   };

@@ -78,6 +78,13 @@ import { agentTranscriptPath } from "./transcriptOpen.js";
 /** Module-level flag enforcing PRD §10.1's "second invocation is no-op". */
 let _overlayOpen = false;
 
+/**
+ * Default banner TTL — 4s feels long enough to read a one-line toast
+ * but short enough that a stale banner doesn't read as a stuck UI.
+ * Per gap analysis 2026-05-31 ("Banner state has no TTL").
+ */
+const DEFAULT_BANNER_TTL_MS = 4000;
+
 /** Test-only seam — reset the open flag between tests. */
 export function __resetOverlayOpenForTest(): void {
   _overlayOpen = false;
@@ -114,6 +121,40 @@ export interface MountOverlayOpts {
    * overlay doesn't own the file ops — it just signals intent.
    */
   readonly onSaveScriptRequested?: (runId: string) => void | Promise<void>;
+  /**
+   * gap/viz — callback fired when the user hits `v` (visualize) on a
+   * selected run. Receives the runId; the host wires this to
+   * `runtime/visualize.ts::writeMermaidToTmp` and surfaces the
+   * resulting `.mmd` path back to the user via a card / banner.
+   * The overlay just signals intent.
+   */
+  readonly onVisualizeRequested?: (runId: string) => Promise<string | undefined> | string | undefined;
+  /**
+   * Per-agent stop: called when the user hits `x` on a selected running
+   * agent in phase-view. The overlay doesn't own abort logic — it just
+   * signals intent to the Run handle.
+   */
+  readonly onStopAgent?: (runId: string, agentId: string) => void;
+  /**
+   * Per-agent restart: called when the user hits `r` on a selected running
+   * agent in phase-view. The overlay doesn't own dispatch logic — it just
+   * signals intent to the Run handle.
+   */
+  readonly onRestartAgent?: (runId: string, agentId: string) => void;
+  /**
+   * Hotkey `t` (open transcript) on agent-detail. Receives the absolute
+   * transcript path; returns the banner text to display (e.g. "opened in
+   * vim" or an error message). Production wiring: workflowCmd.ts wraps
+   * with `openTranscriptInEditor` from `runtime/transcriptOpen.ts`.
+   */
+  readonly onOpenTranscript?: (transcriptPath: string) => string | undefined;
+  /**
+   * Hotkey `c` (copy prompt) on agent-detail. Receives the prompt text
+   * the overlay extracted; returns the banner text to display (e.g.
+   * "copied via pbcopy" or fallback). Production wiring: workflowCmd.ts
+   * wraps with `copyToClipboard` from `runtime/transcriptOpen.ts`.
+   */
+  readonly onCopyPrompt?: (text: string) => string | undefined;
   /**
    * Slice 15 — GC options forwarded to loadGcCandidates / applyGc.
    * Defaults to system GC settings.
@@ -356,6 +397,11 @@ export async function mountOverlay(
     onMounted: opts.onMounted,
     onRestartRequested: opts.onRestartRequested,
     onSaveScriptRequested: opts.onSaveScriptRequested,
+    onVisualizeRequested: opts.onVisualizeRequested,
+    onStopAgent: opts.onStopAgent,
+    onRestartAgent: opts.onRestartAgent,
+    onOpenTranscript: opts.onOpenTranscript,
+    onCopyPrompt: opts.onCopyPrompt,
     ...(opts.gcCutoffDays !== undefined ? { gcCutoffDays: opts.gcCutoffDays } : {}),
     ...(opts.gcRunsRootOverride !== undefined ? { gcRunsRootOverride: opts.gcRunsRootOverride } : {}),
   }) as unknown as TuiComponentLike;
@@ -386,6 +432,13 @@ interface OverlayComponentOpts {
   readonly onSaveScriptRequested?:
     | ((runId: string) => void | Promise<void>)
     | undefined;
+  readonly onVisualizeRequested?:
+    | ((runId: string) => Promise<string | undefined> | string | undefined)
+    | undefined;
+  readonly onStopAgent?: ((runId: string, agentId: string) => void) | undefined;
+  readonly onRestartAgent?: ((runId: string, agentId: string) => void) | undefined;
+  readonly onOpenTranscript?: ((transcriptPath: string) => string | undefined) | undefined;
+  readonly onCopyPrompt?: ((text: string) => string | undefined) | undefined;
   readonly gcCutoffDays?: number;
   readonly gcRunsRootOverride?: string;
 }
@@ -405,7 +458,33 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   let gcDialogState: GcDialogState | null = null;
   let gcBusy = false;
   let helpVisible = true;
-  let banner: string | undefined;
+  /**
+   * Banner state — ephemeral one-line message rendered under the
+   * subtitle. `expiresAtMs` is wall-clock per `opts.nowMs()`. The
+   * render path drops the banner when `nowMs() >= expiresAtMs`, and a
+   * `setTimeout(_, ttl)` schedules a redraw at expiry so the banner
+   * disappears even when no other event triggers a render.
+   */
+  type BannerState = { text: string; expiresAtMs: number };
+  let banner: BannerState | undefined;
+  let bannerTimer: ReturnType<typeof setTimeout> | null = null;
+  const setBanner = (text: string, ttlMs: number = DEFAULT_BANNER_TTL_MS): void => {
+    banner = { text, expiresAtMs: opts.nowMs() + ttlMs };
+    if (bannerTimer !== null) clearTimeout(bannerTimer);
+    // +5ms slack so a render that runs at exactly expiresAtMs sees an
+    // expired banner rather than a freshly-set one.
+    bannerTimer = setTimeout(() => {
+      bannerTimer = null;
+      requestRender();
+    }, ttlMs + 5);
+  };
+  /** Returns the banner text iff still live; clears expired state. */
+  const liveBanner = (): string | undefined => {
+    if (banner === undefined) return undefined;
+    if (opts.nowMs() < banner.expiresAtMs) return banner.text;
+    banner = undefined;
+    return undefined;
+  };
   let lastSnapshot: ReadonlyArray<RunSummary> = opts.registry.listSummaries();
   // gap/ctx-gate: pending gate prompt state.
   let gatePromptState: { runId: string; message: string; defaultAnswer: boolean } | null = null;
@@ -512,6 +591,10 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       clearTimeout(agentDetailDebounceTimer);
       agentDetailDebounceTimer = null;
     }
+    if (bannerTimer !== null) {
+      clearTimeout(bannerTimer);
+      bannerTimer = null;
+    }
     // Restore the original appendEntry shim (slice 15 agent.log intercept).
     if (typeof originalAppendEntry === "function") {
       // @ts-ignore -- restoring original
@@ -552,6 +635,10 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       };
     }
 
+    // Compute the live banner text once per render so an expired
+    // banner is dropped (and cleared from `banner`) atomically.
+    const liveBannerText = liveBanner();
+
     // Slice 15: agent detail view.
     if (view === "agent-detail" && openedRunId !== undefined && openedAgentId !== undefined) {
       const summary = opts.registry.getSummary(openedRunId);
@@ -583,7 +670,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           // BUG-034: pass current scroll offset so log view respects j/k navigation.
           scrollOffset: agentLogScrollOffset,
         };
-        if (banner !== undefined) detailOpts.banner = banner;
+        if (liveBannerText !== undefined) detailOpts.banner = liveBannerText;
         const rendered = renderAgentDetail(snap, detailOpts);
         return { lines: rendered.lines };
       }
@@ -596,14 +683,19 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       const summary = opts.registry.getSummary(openedRunId);
       if (summary !== undefined) {
         const phaseSnap = opts.phaseRegistry.getRunSnapshot(openedRunId);
+        // Determine selected agent's state for context-sensitive help.
+        const runningAgentsForHelp = phaseSnap?.phases
+          .filter((p) => p.status === "running")
+          .flatMap((p) => p.agents) ?? [];
+        const selectedAgentState = runningAgentsForHelp[phaseCursor]?.state;
         const help = helpVisible
-          ? helpForState("phase-view", summary.state)
+          ? helpForState("phase-view", summary.state, selectedAgentState)
           : [];
         const opts2: Parameters<typeof renderPhaseView>[2] = {
           nowMs: opts.nowMs(),
           help,
         };
-        if (banner !== undefined) (opts2 as { banner?: string }).banner = banner;
+        if (liveBannerText !== undefined) (opts2 as { banner?: string }).banner = liveBannerText;
         if (
           phaseSnap !== undefined &&
           phaseCursor >= 0 &&
@@ -624,12 +716,21 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     const localIds = new Set(
       lastSnapshot.filter((s) => opts.registry.wasLocalRun(s.runId)).map((s) => s.runId),
     );
+    // Build token totals from phase registry for the tokens column.
+    const tokenTotals = new Map<string, number>();
+    for (const s of sorted) {
+      const phSnap = opts.phaseRegistry.getRunSnapshot(s.runId);
+      if (phSnap !== undefined && phSnap.totalTokens > 0) {
+        tokenTotals.set(s.runId, phSnap.totalTokens);
+      }
+    }
     return renderRunsList(sorted, {
       title: "pi-workflows  ·  /workflows overlay",
       nowMs: opts.nowMs(),
       ...(sorted.length > 0 ? { cursor } : {}),
       help,
       localRunIds: localIds,
+      tokenTotals,
     });
   };
 
@@ -782,6 +883,20 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         runKill(opts.pi, opts.registry, action.runId, "user-overlay");
         return;
       }
+      case "stop-agent": {
+        if (!action.runId || !action.agentId) return;
+        opts.onStopAgent?.(action.runId, action.agentId);
+        setBanner(`stopping agent ${action.agentId.slice(0, 12)}…`);
+        requestRender();
+        return;
+      }
+      case "restart-agent": {
+        if (!action.runId || !action.agentId) return;
+        opts.onRestartAgent?.(action.runId, action.agentId);
+        setBanner(`restarting agent ${action.agentId.slice(0, 12)}…`);
+        requestRender();
+        return;
+      }
       case "restart-requested":
         // Slice 14: emit the appendEntry stub for cross-process awareness
         // AND fire the on-restart callback so the host can start a fresh run.
@@ -798,7 +913,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           if (opts.onRestartRequested !== undefined) {
             const runIdCopy = action.runId;
             Promise.resolve(opts.onRestartRequested(runIdCopy)).catch(() => undefined);
-            banner = `restarting run ${shortenId(runIdCopy)}…`;
+            setBanner(`restarting run ${shortenId(runIdCopy)}…`);
             requestRender();
           }
         }
@@ -809,10 +924,36 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           Promise.resolve(opts.onSaveScriptRequested(runIdCopy)).catch(
             () => undefined,
           );
-          banner = `saving script for run ${shortenId(runIdCopy)}…`;
+          setBanner(`saving script for run ${shortenId(runIdCopy)}…`);
           requestRender();
         } else if (action.runId) {
-          banner = `save-script not wired (slice 14 callback missing)`;
+          // No callback wired — surface a clear, time-limited message
+          // rather than a stub literal. Production callers always wire
+          // `onSaveScriptRequested` (see workflowCmd.ts).
+          setBanner("save-script: no handler wired");
+          requestRender();
+        }
+        return;
+      case "visualize-requested":
+        if (action.runId && opts.onVisualizeRequested !== undefined) {
+          const runIdCopy = action.runId;
+          setBanner(`rendering DAG for run ${shortenId(runIdCopy)}…`);
+          requestRender();
+          Promise.resolve(opts.onVisualizeRequested(runIdCopy))
+            .then((target) => {
+              if (typeof target === "string" && target.length > 0) {
+                // Long banner TTL so the user has time to copy the path.
+                setBanner(`viz → ${target}`, 8000);
+                requestRender();
+              }
+            })
+            .catch((err: unknown) => {
+              const msg = err instanceof Error ? err.message : String(err);
+              setBanner(`viz failed: ${msg}`);
+              requestRender();
+            });
+        } else if (action.runId) {
+          setBanner("viz: no handler wired");
           requestRender();
         }
         return;
@@ -850,7 +991,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
               requestRender();
             })
             .catch(() => {
-              banner = "gc: error loading candidates";
+              setBanner("gc: error loading candidates");
               requestRender();
             })
             .finally(() => {
@@ -890,7 +1031,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
                 requestRender();
               })
               .catch(() => {
-                banner = "gc: delete failed";
+                setBanner("gc: delete failed");
                 gcDialogState = null;
                 requestRender();
               })
@@ -905,28 +1046,45 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         requestRender();
         return;
       case "open-transcript":
-        // Slice 15: the overlay can't block for the editor; signal to
-        // the banner and let the caller wire a real editor open.
-        // Production: workflowCmd.ts wraps with openTranscriptInEditor.
+        // The overlay computes the transcript path and delegates the
+        // actual open to the host-supplied `onOpenTranscript` callback
+        // (production wiring: `openTranscriptInEditor` in workflowCmd.ts).
+        // The callback returns the banner text to surface; if it isn't
+        // wired we still show the path so the user can `tail -f` it.
         if (action.runId !== undefined && openedRunId !== undefined && openedAgentId !== undefined) {
           const summary = opts.registry.getSummary(openedRunId);
           const path = agentTranscriptPath(summary?.runDir, openedAgentId);
-          banner = path !== undefined
-            ? `transcript: ${path}`
-            : "transcript: path unknown";
+          if (path === undefined) {
+            setBanner("transcript: path unknown");
+          } else if (opts.onOpenTranscript !== undefined) {
+            const msg = opts.onOpenTranscript(path);
+            setBanner(msg ?? `transcript: ${path}`);
+          } else {
+            setBanner(`transcript: ${path}`);
+          }
           requestRender();
         }
         return;
       case "copy-prompt":
-        // Slice 15: banner with prompt text (clipboard wiring in workflowCmd.ts).
+        // The overlay extracts the prompt text from the phase snapshot
+        // and delegates the clipboard write to `onCopyPrompt` (production
+        // wiring: `copyToClipboard` in workflowCmd.ts). No more fake
+        // "copied:" stub — the callback's return value tells us whether
+        // the copy actually succeeded.
         if (openedRunId !== undefined && openedAgentId !== undefined) {
           const phaseSnap = opts.phaseRegistry.getRunSnapshot(openedRunId);
           const agent = phaseSnap?.phases
             .flatMap((p) => p.agents)
             .find((a) => a.agentId === openedAgentId);
-          banner = agent?.summary
-            ? `copied: ${agent.summary.slice(0, 60)}…`
-            : "no prompt to copy";
+          const promptText = agent?.summary;
+          if (promptText === undefined || promptText.length === 0) {
+            setBanner("no prompt to copy");
+          } else if (opts.onCopyPrompt !== undefined) {
+            const msg = opts.onCopyPrompt(promptText);
+            setBanner(msg ?? "clipboard: no handler wired");
+          } else {
+            setBanner("clipboard: no handler wired");
+          }
           requestRender();
         }
         return;
@@ -936,7 +1094,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         // Exception: remote runs silently reject r/s — show a toast
         // so the user knows why nothing happened.
         if (action.reason === "disabled-for-remote") {
-          banner = "operation requires a local run (r/s unavailable on remote sessions)";
+          setBanner("operation requires a local run (r/s unavailable on remote sessions)");
           requestRender();
         }
         return;
@@ -984,12 +1142,21 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     if (view === "phase-view" && openedRunId !== undefined) {
       const summary = opts.registry.getSummary(openedRunId);
       const isRemote = !opts.registry.wasLocalRun(openedRunId);
+      // Find the agent under the phase cursor for per-agent actions.
+      const phaseSnapForKey = opts.phaseRegistry.getRunSnapshot(openedRunId);
+      const runningAgentRows = phaseSnapForKey?.phases
+        .filter((p) => p.status === "running")
+        .flatMap((p) => p.agents) ?? [];
+      const selectedAgent = runningAgentRows[phaseCursor];
       const action = dispatchHotkey({
         key,
         view,
         isRemote,
         ...(summary !== undefined
           ? { runState: summary.state, runId: openedRunId }
+          : {}),
+        ...(selectedAgent !== undefined
+          ? { agentId: selectedAgent.agentId, agentState: selectedAgent.state }
           : {}),
       });
       handleAction(action);

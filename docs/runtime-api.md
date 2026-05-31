@@ -617,6 +617,7 @@ Ledger entries: `checkpoint_set` (first write) / `checkpoint_hit` (resume hit).
 **Signature:**
 ```ts
 report(eventType: string, data?: Record<string, unknown>): void
+report(opts: { format: "mermaid" }): string
 ```
 
 Appends a structured domain-level event to the run ledger **and** emits it
@@ -631,6 +632,53 @@ ctx.report("agent.output.saved", { agentId: "analyst", bytes: result.text.length
 `data` must be JSON-serialisable (circular references throw `TypeError`).
 Ledger entry type: `report` with fields `event`, `data?`.
 Overlay event type: `pi-workflows.report` with payload `{ runId, event, data? }`.
+
+### Accessor form: `ctx.report({ format: "mermaid" })` *(gap/viz)*
+
+Returns a Mermaid `flowchart TD` string that visualises the run's DAG —
+one subgraph per phase, one node per agent, with durations and per-agent
+status (`ok` / `error` / `cache-hit` / `running`). Useful for emitting
+diagrams from inside a workflow:
+
+```js
+const diagram = ctx.report({ format: "mermaid" });
+await ctx.cache.set("final-dag", diagram);
+```
+
+The TUI also exposes the same renderer behind the `v` hotkey on the
+runs-list and phase views — that path writes the diagram to a tmp
+`.mmd` file and surfaces the path via a card.
+
+Unsupported formats throw `TypeError`. The diagram reflects the on-disk
+ledger up to the moment of the call, so calling it from inside a phase
+shows that phase mid-flight.
+
+---
+
+## `ctx.interrupt(opts)` — Mid-phase HITL pause-and-route *(gap/hitl)*
+
+Suspends the workflow until a supervisor injects an answer (via
+`WorkflowClient.resume(runId, value)`). Replay-perfect across pi
+restart — a resumed run replays prior `interrupt_resolved` ledger
+entries to restore answers without re-prompting.
+
+```js
+// Free-form answer.
+const plan = await ctx.interrupt({ question: "What's the rollout plan?" });
+
+// Multi-choice with default.
+const env = await ctx.interrupt({
+  question: "Pick a target",
+  choices: ["staging", "prod"],
+  default: "staging",
+});
+
+// String shorthand.
+const note = await ctx.interrupt("Add a release note?");
+```
+
+When no supervisor is wired, resolves immediately with `opts.default ?? null`.
+Full spec, on-disk protocol, and replay semantics: [`docs/hitl.md`](./hitl.md).
 
 ---
 
@@ -695,3 +743,34 @@ Run-wide default agent timeout in milliseconds. Applied when an individual
 dispatcher's hard-coded `600_000` ms (10 min) when absent.
 
 Configure via `RunManager` options or workflow manifest options.
+
+---
+
+## DAG visualization *(gap/viz)*
+
+The `runtime/visualize` module renders any run as a Mermaid `flowchart TD`
+diagram, derived from `<runDir>/manifest.json` + `<runDir>/ledger.jsonl`.
+Three entry points, all stable:
+
+```ts
+import {
+  renderMermaid,        // async — reads off disk, returns string
+  renderMermaidSync,    // sync variant — used by `ctx.report({format:'mermaid'})`
+  renderMermaidFromData, // pure transform — useful in tests
+  writeMermaidToTmp,    // wraps renderMermaid + writes to os.tmpdir()
+} from "@samfp/pi-workflows/runtime/visualize";
+```
+
+The `v` hotkey (runs-list and phase view) calls `writeMermaidToTmp` and
+surfaces the resulting `.mmd` path via a banner + card. Use any Mermaid
+renderer (e.g. `mmdc`, `mermaid-cli`, the GitHub preview) to render the
+file to SVG/PNG.
+
+Diagram conventions:
+
+- One `subgraph P<i>` per phase, in start order.
+- One node per agent inside its phase, labelled `<id> · <status> · <ms>ms`.
+- Phase labels include `<name> · <durationMs>ms · ok=N err=N hit=N`.
+- A `Start([...])` node anchors the entry; `End([finalState])` closes the
+  diagram with the run's last-seen state (`done`, `failed`, `running`,
+  `in-progress`, etc).

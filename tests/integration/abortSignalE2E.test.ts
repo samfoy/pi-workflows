@@ -1,11 +1,12 @@
 /**
  * tests/integration/abortSignalE2E.test.ts — slice 9 [F1] AbortSignal
- * end-to-end. The sandbox's `raceWithAbort` rejects the run promise
- * when the host signal aborts (PRD §5.5 user-stop). What we verify
- * here is that the WIRING actually exists: ctx.signal is a Context-
- * realm AbortSignal-shaped object, and aborting the host fires the
- * Context-side abort. Visibility is captured via ctx.log entries the
- * test reads from the ledger after the run rejects.
+ * end-to-end. The sandbox's worker-thread runner rejects the run
+ * promise when the host signal aborts (PRD §5.5 user-stop) by calling
+ * `worker.terminate()`. What we verify here is that the WIRING
+ * actually exists: ctx.signal is a Context-realm AbortSignal-shaped
+ * object, and aborting the host fires the Context-side abort.
+ * Visibility is captured via ctx.log entries the test reads from the
+ * ledger after the run rejects.
  */
 
 import test from "node:test";
@@ -81,7 +82,7 @@ test("ctx.signal exposed: aborted is false at start, becomes true on parent canc
   });
   setTimeout(() => run.cancel(new Error("parent shutdown")), 50);
 
-  // Run rejects via raceWithAbort — that's expected.
+  // Run rejects via the worker-thread abort path — that's expected.
   await assert.rejects(run.promise, /aborted|parent shutdown/);
 
   // Read ledger to verify the wiring fired.

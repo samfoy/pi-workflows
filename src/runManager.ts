@@ -38,7 +38,13 @@
  * the integration test relies on it.
  */
 
-import { promises as fs, watch as fsWatch, readFileSync } from "node:fs";
+import {
+  promises as fs,
+  watch as fsWatch,
+  readFileSync,
+  renameSync,
+  statSync,
+} from "node:fs";
 import { join } from "node:path";
 
 import type {
@@ -153,6 +159,30 @@ export interface Run {
    * `true` to approve, `false` to deny. No-op if no gate is pending.
    */
   respondGate(approved: boolean): void;
+  /**
+   * ZONE_HITL: resolve a pending `ctx.interrupt(...)` call. When `key`
+   * is supplied the matching pending interrupt is targeted; when
+   * omitted the oldest pending interrupt (FIFO) is resolved. Returns
+   * `true` if a resolver was found and fulfilled, `false` if no
+   * matching pending interrupt existed (no-op).
+   *
+   * The supervisor-facing entry point is
+   * `WorkflowClient.resume(runId, value)` — which appends a
+   * `resume-interrupt` line to `<runDir>/ctrl.jsonl`; the run's ctrl
+   * watcher then invokes this method.
+   */
+  respondInterrupt(value: unknown, key?: string): boolean;
+  /**
+   * Per-agent stop: abort a single in-flight agent by id. No-op if
+   * the agent is not currently running in this run.
+   */
+  stopAgent(agentId: string): void;
+  /**
+   * Per-agent restart: abort a single in-flight agent and re-dispatch
+   * the same prompt. Limited to 3 restarts per agent to prevent loops.
+   * No-op if the agent is not currently running.
+   */
+  restartAgent(agentId: string): void;
   /**
    * Slice 10: resolves AFTER `promise` settles AND the ledger has
    * been flushed. Always resolves (never rejects) with the full
@@ -280,6 +310,15 @@ export interface RunManagerStartOptions {
   /** Slice 8a doesn't flush approval dialogs; this is purely for tests. */
   readonly trustedAtStart?: boolean;
   /**
+   * ZONE_HITL: pre-populate `ctx.interrupt(...)` answers from a prior
+   * run's ledger. `resumeRun` collects every `interrupt_resolved`
+   * entry into a map keyed by the deterministic `int-N` sequence id
+   * and passes it through here so a fresh execution short-circuits
+   * each matching call site without re-prompting the supervisor.
+   * Empty (or absent) for non-resume starts.
+   */
+  readonly replayResolvedInterrupts?: ReadonlyMap<string, unknown>;
+  /**
    * When `true`, opens a cross-run `GlobalCacheStore` keyed by the workflow
    * source sha256 and passes it to `createRunCtxHost`. Agent results are read
    * from (and written to) the global cache so future runs of the same workflow
@@ -300,6 +339,13 @@ export interface RunManagerStartOptions {
    */
   readonly restartedFrom?: string;
   /**
+   * ZONE_TIMETRAVEL — lineage markers set by `forkFromCheckpoint`.
+   * When provided, RunManager writes `parentRunId` + `forkAtPhase`
+   * into the manifest.json so audit + GC can walk the fork lineage.
+   */
+  readonly parentRunId?: string;
+  readonly forkAtPhase?: string;
+  /**
    * Slice 14 — callback fired when the run emits a phase/agent
    * overlay event. Defaults to a no-op when undefined; the extension
    * wires this to `pi.appendEntry` at registration so the TUI
@@ -316,7 +362,9 @@ export interface RunManagerStartOptions {
       | "pi-workflows.report"
       | "pi-workflows.agent.log"
       | "pi-workflows.gate.requested"
-      | "pi-workflows.gate.resolved",
+      | "pi-workflows.gate.resolved"
+      | "pi-workflows.interrupt.requested"
+      | "pi-workflows.interrupt.resolved",
     data: Readonly<Record<string, unknown>>,
   ) => void;
 }
@@ -403,6 +451,7 @@ export async function startWorkflowRun(
       sha256: workflowSourceSha256,
       cwd,
       ...(opts.mockAgents !== undefined ? { mockAgents: opts.mockAgents } : {}),
+      phases: extractMetaPhases(sourceText),
       ...opts.approval,
     });
     if (approvalDecision.approved && approvalDecision.banner !== undefined) {
@@ -448,6 +497,8 @@ export async function startWorkflowRun(
           approvalDecision.reason === "user-always" ||
           approvalDecision.reason === "pi-p-trusted")),
     ...(opts.restartedFrom !== undefined ? { restartedFrom: opts.restartedFrom } : {}),
+    ...(opts.parentRunId !== undefined ? { parentRunId: opts.parentRunId } : {}),
+    ...(opts.forkAtPhase !== undefined ? { forkAtPhase: opts.forkAtPhase } : {}),
   };
   await writeManifestPartial(runDirAbs, partialManifest);
 
@@ -537,6 +588,9 @@ export async function startWorkflowRun(
       resumePaused: () => Promise.resolve(false),
       stop: () => undefined,
       respondGate: (_approved: boolean) => undefined,
+      respondInterrupt: (_value: unknown, _key?: string) => false,
+      stopAgent: (_agentId: string) => undefined,
+      restartAgent: (_agentId: string) => undefined,
     };
   }
 
@@ -604,6 +658,81 @@ export async function startWorkflowRun(
       };
     });
 
+  // ─── ZONE_HITL: ctx.interrupt() pending-resolver registry ────────────────────
+  // FIFO queue of pending interrupts. Each entry carries its run-scoped
+  // `key` (`int-N`) plus the resolver/rejecter that ctx.interrupt is
+  // awaiting. Resolution sources:
+  //   - `respondInterrupt(value, key?)`: TUI overlay, in-process callers.
+  //   - ctrl.jsonl `{type:"resume-interrupt", value, key?}`: supervisor
+  //     processes via WorkflowClient.resume(runId, value).
+  // Aborts during the wait reject through the same path used by gate
+  // (signal listener), with cleanup that removes the entry from the
+  // pending list so a stale resolver can't fire later.
+  interface PendingInterrupt {
+    readonly key: string;
+    readonly resolve: (value: unknown) => void;
+    readonly reject: (reason: unknown) => void;
+  }
+  const pendingInterrupts: PendingInterrupt[] = [];
+
+  const waitForInterrupt = (
+    key: string,
+    signal: AbortSignal,
+  ): Promise<unknown> =>
+    new Promise<unknown>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(signal.reason ?? new Error("aborted"));
+        return;
+      }
+      let settled = false;
+      const removeFromQueue = (): void => {
+        const idx = pendingInterrupts.findIndex((p) => p === entry);
+        if (idx >= 0) pendingInterrupts.splice(idx, 1);
+      };
+      const onAbort = (): void => {
+        if (!settled) {
+          settled = true;
+          removeFromQueue();
+          reject(signal.reason ?? new Error("aborted"));
+        }
+      };
+      signal.addEventListener("abort", onAbort, { once: true });
+      const entry: PendingInterrupt = {
+        key,
+        resolve: (value: unknown) => {
+          if (!settled) {
+            settled = true;
+            signal.removeEventListener("abort", onAbort);
+            removeFromQueue();
+            resolve(value);
+          }
+        },
+        reject: (reason: unknown) => {
+          if (!settled) {
+            settled = true;
+            signal.removeEventListener("abort", onAbort);
+            removeFromQueue();
+            reject(reason);
+          }
+        },
+      };
+      pendingInterrupts.push(entry);
+    });
+
+  // ZONE_HITL: replay-perfect resume. Walk the prior ledger to collect
+  // any `interrupt_resolved` entries from a previous incarnation of
+  // this run. The map is passed through to runCtx; a re-execution that
+  // hits the same `int-N` call site short-circuits and returns the
+  // stored value without writing a new request entry.
+  //
+  // Live (non-resume) starts skip this entirely — the constructor for
+  // `startWorkflowRun` injects an empty map so the runtime branch is
+  // preserved without an extra option flag. resumeRun.ts populates a
+  // populated map.
+  const replayResolvedInterrupts: Map<string, unknown> = new Map(
+    opts.replayResolvedInterrupts ?? [],
+  );
+
   // Serialize pause/resume against each other so two concurrent
   // `pause()` calls can't both decide they won the gate (the gate
   // itself is idempotent, but the ledger-write + sm.go() pair must
@@ -646,6 +775,8 @@ export async function startWorkflowRun(
       : {}),
     ...(globalCache !== undefined ? { globalCache } : {}),
     waitForGate,
+    waitForInterrupt,
+    replayResolvedInterrupts,
   });
 
   const sandbox = new Sandbox({
@@ -887,6 +1018,25 @@ export async function startWorkflowRun(
         // pendingGate is nulled inside resolve() after settlement.
       }
     },
+    respondInterrupt: (value: unknown, key?: string): boolean => {
+      // ZONE_HITL: dispatch to the matching pending interrupt. When
+      // `key` is supplied, match strictly; otherwise resolve the
+      // FIFO-oldest pending entry. Returns false when nothing
+      // matched (no-op) so callers can decide whether to retry or
+      // log a warning.
+      let entry: PendingInterrupt | undefined;
+      if (key !== undefined) {
+        const idx = pendingInterrupts.findIndex((p) => p.key === key);
+        if (idx >= 0) entry = pendingInterrupts[idx];
+      } else {
+        entry = pendingInterrupts[0];
+      }
+      if (entry === undefined) return false;
+      entry.resolve(value);
+      return true;
+    },
+    stopAgent: (agentId: string) => ctxHost.stopAgent(agentId),
+    restartAgent: (agentId: string) => ctxHost.restartAgent(agentId),
   };
 
   // Slice 13/F3: register the run handle into the per-process active
@@ -953,6 +1103,31 @@ async function writeManifestPartial(
 // ─── IPC ctrl-file watcher ─────────────────────────────────────────────────
 
 /**
+ * Default file-size threshold at which `startCtrlWatcher` rotates
+ * `ctrl.jsonl` to `ctrl.jsonl.archived`. 8 MiB is comfortably above
+ * normal traffic (each control command is ~50 bytes → ~150k commands)
+ * but small enough that a runaway producer can't fill the disk before
+ * we notice.
+ */
+const CTRL_ROTATE_BYTES = 8 * 1024 * 1024;
+
+/** Default poll interval for the mtime-based fallback path. */
+const CTRL_POLL_INTERVAL_MS = 1000;
+
+export interface StartCtrlWatcherOpts {
+  /** Override `fs.watch` for tests / failure-injection. */
+  watchFn?: typeof fsWatch;
+  /** Log sink — defaults to silent. */
+  log?: (level: "info" | "warn" | "error", msg: string) => void;
+  /** Rotate threshold in bytes. Default: 8 MiB. */
+  rotateBytes?: number;
+  /** Polling interval in ms. Default: 1000. */
+  pollIntervalMs?: number;
+  /** When true, skip the native `fs.watch` attempt entirely (tests). */
+  disableNativeWatch?: boolean;
+}
+
+/**
  * Watch `<runDir>/ctrl.jsonl` for control commands emitted by a
  * supervisor process. New lines are parsed as `CtrlCommand` objects
  * and dispatched to the appropriate `Run` method:
@@ -966,53 +1141,156 @@ async function writeManifestPartial(
  * supervisor. `fs.watch()` on a non-existent file throws; watching the
  * directory avoids that while staying event-driven.
  *
+ * Reliability layer (closes BUG: `fs.watch` silently fails on Docker
+ * bind-mounts and NFS):
+ *
+ *  1. Try `fs.watch` for instant notifications. If it throws, surface
+ *     a one-shot warning via `log` so the operator knows fs-events
+ *     aren't available on this filesystem.
+ *  2. ALWAYS run a 1s mtime poll alongside `fs.watch`. The poll uses
+ *     `statSync(ctrl.jsonl).size` to detect appends. This catches the
+ *     silent-failure case (where `fs.watch` returns a watcher but
+ *     events never fire) at the cost of one stat() per second per
+ *     active run — negligible.
+ *  3. `processNewLines` tracks `bytesRead` so re-entry from either
+ *     watch path is idempotent (we never re-process old lines).
+ *  4. When `bytesRead >= rotateBytes` (default 8 MiB), atomically
+ *     rename `ctrl.jsonl` → `ctrl.jsonl.archived` and reset offset.
+ *     `WorkflowClient.sendControl` opens the file with `O_APPEND` per
+ *     call, so a writer racing with rotation simply creates a fresh
+ *     `ctrl.jsonl` (no command loss).
+ *
  * The watcher is torn down when `run.terminated` resolves. All errors
  * are swallowed — a watcher failure must never affect the run itself.
  */
-function startCtrlWatcher(runDirAbs: string, run: Run): void {
+export function startCtrlWatcher(
+  runDirAbs: string,
+  run: Run,
+  opts: StartCtrlWatcherOpts = {},
+): void {
   const ctrlFile = join(runDirAbs, "ctrl.jsonl");
+  const archivedFile = ctrlFile + ".archived";
+  const watchFn = opts.watchFn ?? fsWatch;
+  const log = opts.log ?? (() => {});
+  const rotateBytes = opts.rotateBytes ?? CTRL_ROTATE_BYTES;
+  const pollIntervalMs = opts.pollIntervalMs ?? CTRL_POLL_INTERVAL_MS;
+
   let bytesRead = 0;
+  let lastSeenSize = -1;
+  let warnedFallback = false;
+
+  function maybeRotate(): void {
+    // Only rotate if we've actually read past the threshold; this
+    // avoids rotating during a single huge append where we haven't
+    // caught up yet.
+    if (bytesRead < rotateBytes) return;
+    try {
+      renameSync(ctrlFile, archivedFile);
+      bytesRead = 0;
+      lastSeenSize = -1;
+      log("info", `ctrl.jsonl: rotated to ctrl.jsonl.archived (>= ${rotateBytes} bytes)`);
+    } catch {
+      /* best-effort — rename can fail on read-only FS or if file
+         was already removed by another process. Reset offset so
+         we don't get stuck if the file was truncated externally. */
+    }
+  }
 
   function processNewLines(): void {
+    let buf: Buffer;
     try {
-      const buf = readFileSync(ctrlFile);
-      if (buf.length <= bytesRead) return;
-      const newData = buf.slice(bytesRead).toString("utf8");
-      bytesRead = buf.length;
-      for (const rawLine of newData.split("\n")) {
-        const line = rawLine.trim();
-        if (!line) continue;
-        let cmd: { type: string; reason?: string } | null = null;
-        try {
-          cmd = JSON.parse(line) as { type: string; reason?: string };
-        } catch { /* malformed JSON — skip */ }
-        if (!cmd || typeof cmd.type !== "string") continue;
-        const reason = typeof cmd.reason === "string" ? cmd.reason : "ctrl-ipc";
-        if (cmd.type === "pause") {
-          void run.pause(reason).catch(() => undefined);
-        } else if (cmd.type === "resume") {
-          void run.resumePaused(reason).catch(() => undefined);
-        } else if (cmd.type === "stop") {
-          try { run.stop(reason); } catch { /* idempotent */ }
-        }
+      buf = readFileSync(ctrlFile);
+    } catch {
+      // ENOENT or other — file not yet created. If we previously
+      // had a positive offset and the file is gone, reset — a
+      // rotation may have just happened from another process or the
+      // run dir was cleaned up.
+      if (bytesRead > 0) {
+        bytesRead = 0;
+        lastSeenSize = -1;
       }
-    } catch { /* ENOENT or other — file not yet created */ }
+      return;
+    }
+    if (buf.length < bytesRead) {
+      // File shrunk — someone (us or a peer) rotated/truncated.
+      // Reset and re-read from start so we don't lose any commands.
+      bytesRead = 0;
+    }
+    if (buf.length === bytesRead) return;
+    const newData = buf.slice(bytesRead).toString("utf8");
+    bytesRead = buf.length;
+    for (const rawLine of newData.split("\n")) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      let cmd: { type: string; reason?: string; value?: unknown; key?: string } | null = null;
+      try {
+        cmd = JSON.parse(line) as { type: string; reason?: string; value?: unknown; key?: string };
+      } catch { /* malformed JSON — skip */ }
+      if (!cmd || typeof cmd.type !== "string") continue;
+      const reason = typeof cmd.reason === "string" ? cmd.reason : "ctrl-ipc";
+      if (cmd.type === "pause") {
+        void run.pause(reason).catch(() => undefined);
+      } else if (cmd.type === "resume") {
+        void run.resumePaused(reason).catch(() => undefined);
+      } else if (cmd.type === "stop") {
+        try { run.stop(reason); } catch { /* idempotent */ }
+      } else if (cmd.type === "resume-interrupt") {
+        // ZONE_HITL: deliver supervisor-injected answer to the matching
+        // pending ctx.interrupt(...) call. Mismatches are silent — the
+        // supervisor doesn't get a synchronous error from a fire-and-
+        // forget ctrl line; the resulting interrupt_resolved entry is
+        // the durable receipt.
+        try {
+          const targetKey = typeof cmd.key === "string" ? cmd.key : undefined;
+          run.respondInterrupt(cmd.value, targetKey);
+        } catch { /* respond is sync + idempotent; defensive */ }
+      }
+    }
+    maybeRotate();
   }
 
+  function pollOnce(): void {
+    let st: ReturnType<typeof statSync>;
+    try {
+      st = statSync(ctrlFile);
+    } catch {
+      return; // file not yet created
+    }
+    if (st.size === lastSeenSize) return;
+    lastSeenSize = st.size;
+    processNewLines();
+  }
+
+  // ─── Native fs.watch (event-driven, may silently fail on NFS/Docker) ─
   let watcher: ReturnType<typeof fsWatch> | null = null;
-  try {
-    watcher = fsWatch(runDirAbs, (_event, filename) => {
-      if (filename === "ctrl.jsonl") processNewLines();
-    });
-    // Unref so the watcher doesn't keep the process alive after the
-    // session ends (matches the pattern used by fs.watch in slice 16).
-    watcher.unref();
-  } catch {
-    /* best-effort — watch not available on all platforms */
+  if (!opts.disableNativeWatch) {
+    try {
+      watcher = watchFn(runDirAbs, (_event, filename) => {
+        if (filename === "ctrl.jsonl") processNewLines();
+      });
+      // Unref so the watcher doesn't keep the process alive after the
+      // session ends (matches the pattern used by fs.watch in slice 16).
+      watcher.unref();
+    } catch (err) {
+      if (!warnedFallback) {
+        warnedFallback = true;
+        log(
+          "warn",
+          `ctrl.jsonl: fs.watch unavailable, using 1s mtime poll fallback: ${String(err)}`,
+        );
+      }
+    }
   }
 
-  // Tear down on run termination.
+  // ─── 1s mtime poll (always on; safety net for silent fs.watch fail) ─
+  // Even when fs.watch succeeded, the poll is a low-cost backstop on
+  // filesystems where events are unreliable (one statSync/sec).
+  const pollTimer = setInterval(pollOnce, pollIntervalMs);
+  pollTimer.unref();
+
+  // ─── Tear-down on run termination ────────────────────────────────────
   run.terminated.then(() => {
     try { watcher?.close(); } catch { /* already closed */ }
+    clearInterval(pollTimer);
   }).catch(() => undefined);
 }

@@ -45,6 +45,17 @@ import type {
 } from "../types/internal.js";
 import { CacheStore } from "./cache.js";
 import { getMemoStore } from "./memoStore.js";
+import {
+  appendMemoryUpdate,
+  buildPromptWithMemory,
+  compactMemoryFile,
+  MEMORY_READ_CAP_BYTES,
+  parseMemoryScope,
+  readMemoryFileWithMeta,
+  resolveMemoryDir,
+  type MemoryScope,
+} from "./agentMemory.js";
+import { recordAgentMemoryDir, recordAgentWorktreePath } from "./manifestWriter.js";
 import { LedgerWriter, log as ledgerLog } from "./ledger.js";
 import { agentErrorFromException } from "./ledger.js";
 import { dispatchAgent, recoverFromTranscript } from "./dispatcher.js";
@@ -54,6 +65,14 @@ import { cacheKey } from "../util/hash.js";
 import { sha256 } from "../util/hash.js";
 import { makeSemaphore } from "./semaphore.js";
 import { agentTranscriptPath } from "../util/paths.js";
+import { renderMermaidSync } from "./visualize.js";
+import {
+  assertGitRepo,
+  createWorktreeForAgent,
+  emitWorktreeDiff,
+  parseIsolation,
+  resolveWorktreeDiffPath,
+} from "./worktree.js";
 
 /**
  * Construction options for `createRunCtxHost`. Mostly DI seams so
@@ -134,7 +153,9 @@ export interface RunCtxHostOptions {
       | "pi-workflows.report"
       | "pi-workflows.agent.log"
       | "pi-workflows.gate.requested"
-      | "pi-workflows.gate.resolved",
+      | "pi-workflows.gate.resolved"
+      | "pi-workflows.interrupt.requested"
+      | "pi-workflows.interrupt.resolved",
     data: Readonly<Record<string, unknown>>,
   ) => void;
   /**
@@ -143,6 +164,40 @@ export interface RunCtxHostOptions {
    * (abort). When absent, gate() resolves immediately with `opts.default`.
    */
   readonly waitForGate?: (message: string, signal: AbortSignal) => Promise<boolean>;
+  /**
+   * ZONE_HITL — optional supervisor-injection resolver. Called by
+   * `ctx.interrupt(...)` after the request entry is written. Resolves
+   * with the JSON-cloneable answer when a `resume-interrupt` control
+   * command arrives (or rejects when the run aborts). When absent,
+   * `ctx.interrupt()` falls back to `opts.default` (or `null`).
+   */
+  readonly waitForInterrupt?: (
+    key: string,
+    signal: AbortSignal,
+  ) => Promise<unknown>;
+  /**
+   * ZONE_HITL — prior `interrupt_resolved` entries replayed from the
+   * ledger on resume. Keyed by the deterministic sequence id
+   * (`int-0`, `int-1`, ...). When `ctx.interrupt(...)` is called and a
+   * matching key is present, the stored value is returned immediately
+   * without writing a new request — this is the replay-perfect HITL
+   * contract. Empty for fresh runs.
+   */
+  readonly replayResolvedInterrupts?: ReadonlyMap<string, unknown>;
+
+  /**
+   * Test seam for `ctx.memory.compact(name, scope)`. Replaces the
+   * default summarizer (which spawns `pi --mode json -p` via
+   * `dispatchAgent`) so unit tests can run without invoking a real
+   * sub-agent. Receives the memory `name` and the original file
+   * content, must resolve to the new (compacted) content. Errors
+   * propagate to the caller as `CompactionError` (caught and turned
+   * into a `RunCtxBridgeResult.ok=false` by the bridge).
+   */
+  readonly compactSummarize?: (
+    name: string,
+    original: string,
+  ) => Promise<string>;
 }
 
 /**
@@ -159,6 +214,10 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   readonly getFinishCallbackPrompt: () => string | null;
   /** Number of agents dispatched so far (used by per-run cap check). */
   readonly getAgentCount: () => number;
+  /** Abort a single in-flight agent by id (no-op if not running). */
+  readonly stopAgent: (agentId: string) => void;
+  /** Abort + restart a single in-flight agent (up to 3 times). */
+  readonly restartAgent: (agentId: string) => void;
 } {
   const dispatch = opts.dispatch ?? dispatchAgent;
   const nowIso = opts.nowIso ?? (() => new Date().toISOString());
@@ -186,6 +245,35 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   let budgetReserved = 0;
   let finishPrompt: string | null = null;
   const tokenBudget: number | null = opts.tokenBudget ?? null;
+
+  // ─── ZONE_MEMORY oversize-warning dedup ('docs/agent-memory.md' #2) ──
+  // First time MEMORY.md exceeds the 25 KiB read cap for a given
+  // memory `name` within this run, we emit a single `log` warning so
+  // authors notice the file outgrew the prompt budget. Subsequent
+  // reads silently truncate (the documented contract). Keyed by
+  // memory-name only — a per-(run, name) Set is per-instance because
+  // this map is scoped to one createRunCtxHost call.
+  const memoryOversizeWarned = new Set<string>();
+
+  // ─── Per-agent abort + restart ──────────────────────────────────
+  // Keyed by agentId. Each running agent's AbortController is registered
+  // here so `stopAgent(id)` can abort just that agent without touching
+  // the phase or run-level controllers.
+  const agentAbortMap = new Map<string, AbortController>();
+  // Per-agent restart flags: set by restartAgent(), checked in runOneAgent
+  // after an AbortError to decide whether to re-dispatch.
+  const agentRestartFlags = new Map<string, boolean>();
+  // Per-agent restart counts: limit to 3 to prevent infinite loops.
+  const agentRestartCounts = new Map<string, number>();
+
+  function stopAgent(agentId: string): void {
+    agentAbortMap.get(agentId)?.abort();
+  }
+
+  function restartAgent(agentId: string): void {
+    agentRestartFlags.set(agentId, true);
+    stopAgent(agentId);
+  }
 
   // ─── ctx.agent ──────────────────────────────────────────────────
   // Pure: builds a handle object. No I/O. Auto-generates id if absent.
@@ -611,7 +699,12 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       // against a ledger that already shows agent_end success).
       try {
         if (schema !== null) {
-          (tagged as AgentResult & { output?: unknown }).output = extractJson(result.text);
+          const parsed = extractJson(result.text);
+          // gap-fix: post-parse schema validation. Throws SchemaValidationError
+          // before the result is returned so authors see WHERE the agent
+          // drifted, not just that it did.
+          validateAgainstSchema(parsed, schema);
+          (tagged as AgentResult & { output?: unknown }).output = parsed;
         }
       } catch (e) {
         await opts.ledger.append({
@@ -640,6 +733,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
           endedAt: nowIso(),
           durationMs: nowMs() - t0,
           cached: true,
+          usage: result.usage,
         });
       } catch {
         /* swallow */
@@ -677,7 +771,9 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       const tagged = { ...recovered, cached: true } as AgentResult & { cached: boolean; output?: unknown };
       try {
         if (schema !== null) {
-          tagged.output = extractJson(recovered.text);
+          const parsed = extractJson(recovered.text);
+          validateAgainstSchema(parsed, schema);
+          tagged.output = parsed;
         }
       } catch (e) {
         await opts.ledger.append({
@@ -706,6 +802,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
           endedAt: nowIso(),
           durationMs: nowMs() - t0,
           cached: true,
+          usage: recovered.usage,
         });
       } catch {
         /* swallow */
@@ -761,34 +858,183 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       }
 
       // Schema injection: build the actual prompt with schema instruction.
-      const effectivePrompt = schema
+      const promptWithSchema = schema
         ? handle.prompt + buildSchemaInstruction(schema)
         : handle.prompt;
 
-      const result = await dispatch({
-        runDir: opts.runDirAbs,
-        agentId: handle.id,
-        prompt: effectivePrompt,
-        promptHash: sha256(effectivePrompt),
-        cwd: opts.cwd,
-        signal: phaseCtrl.signal,
-        mockAgents: opts.mockAgents,
-        ...(opts.acceptEdits ? { acceptEdits: true } : {}),
-        ...(typeof handle.opts.model === "string"
-          ? { model: handle.opts.model }
-          : {}),
-        ...(typeof handle.opts.thinking === "string"
-          ? { thinking: handle.opts.thinking }
-          : {}),
-        // Improvement 3: per-agent timeout falls back to run-wide default.
-        timeoutMs:
-          typeof handle.opts.timeoutMs === 'number'
-            ? handle.opts.timeoutMs
-            : (opts.defaultAgentTimeoutMs ?? 600_000),
-        // Slice-8a integration tests use the parent-death wrapper-free
-        // path; `RunManager` owns this knob.
-        skipParentDeathGuard: opts.mockAgents,
-      });
+      // ZONE_MEMORY: resolve + read MEMORY.md for this agent and
+      // prepend `Persistent memory:\n<content>\n\n` to the prompt.
+      // No-op when `opts.memory` is absent / false / unrecognized;
+      // a missing MEMORY.md silently produces no injection so first
+      // runs work without any setup.
+      let memoryDir: string | null = null;
+      let memoryContent: string | null = null;
+      const rawMemoryOpt = (handle.opts as Record<string, unknown>).memory;
+      const memoryScope = parseMemoryScope(rawMemoryOpt);
+      if (memoryScope !== null) {
+        const rawName = (handle.opts as Record<string, unknown>).name;
+        const memoryName =
+          typeof rawName === "string" && rawName.length > 0
+            ? rawName
+            : handle.id;
+        try {
+          memoryDir = resolveMemoryDir({
+            scope: memoryScope,
+            name: memoryName,
+            cwd: opts.cwd,
+            runDirAbs: opts.runDirAbs,
+          });
+          const memoryRead = await readMemoryFileWithMeta(memoryDir);
+          memoryContent = memoryRead === null ? null : memoryRead.content;
+          // gap follow-up #2: emit a one-shot warning per (run, name)
+          // pair when MEMORY.md exceeds the 25 KiB read cap. Keeps
+          // the prompt-truncation contract silent on every read while
+          // surfacing it once so authors notice the file outgrew
+          // the budget.
+          if (
+            memoryRead !== null &&
+            memoryRead.truncated &&
+            !memoryOversizeWarned.has(memoryName)
+          ) {
+            memoryOversizeWarned.add(memoryName);
+            void opts.ledger
+              .append({
+                type: "log",
+                at: nowIso(),
+                level: "warn",
+                message: `agent-memory: MEMORY.md for "${memoryName}" (${memoryRead.totalBytes} bytes) exceeds the ${MEMORY_READ_CAP_BYTES}-byte read cap; only the leading slice is injected. Consider ctx.memory.compact("${memoryName}", "${memoryScope}").`,
+              })
+              .catch(() => undefined);
+          }
+          // Record the resolved dir into the manifest so resume
+          // re-mounts the same path. Best-effort — manifest write
+          // failures are not fatal to the agent run.
+          recordAgentMemoryDir(opts.runDirAbs, memoryName, memoryDir).catch(
+            () => undefined,
+          );
+        } catch (e) {
+          void opts.ledger
+            .append({
+              type: "log",
+              at: nowIso(),
+              level: "warn",
+              message: `agent-memory: failed to resolve dir for "${memoryName}" (scope=${memoryScope}): ${(e as Error).message}`,
+            })
+            .catch(() => undefined);
+          memoryDir = null;
+          memoryContent = null;
+        }
+      }
+      const effectivePrompt = buildPromptWithMemory(
+        promptWithSchema,
+        memoryContent,
+      );
+
+      // ZONE_WORKTREE: when `opts.isolation === 'worktree'`, mount
+      // the agent inside its own `git worktree add --detach` checkout
+      // off HEAD. The dispatcher's cwd is rewritten to point at that
+      // worktree so concurrent agents can't fight over the same
+      // working files (gap-analysis 2026-05-31 §3 — same-file write
+      // race seen in `hunt-bugs-loop`). On success we emit a diff at
+      // `<runDir>/worktrees/<agentId>.diff`. On error we leave the
+      // worktree in place for inspection.
+      //
+      // Failures here (bad opts shape, non-git cwd, or `git worktree
+      // add` itself) are thrown unhandled so the outer agent-lifecycle
+      // catch block ledgers `agent_error`, decrements the budget
+      // reservation, and releases the semaphore token uniformly with
+      // every other dispatch failure.
+      let worktreeCwd: string | null = null;
+      const rawIsolation = (handle.opts as Record<string, unknown>).isolation;
+      const isolationMode = parseIsolation(rawIsolation);
+      if (isolationMode === "worktree") {
+        // Refuse worktree mode if the run cwd isn't inside a git
+        // work tree — typed `NotAGitRepoError` lets the runtime
+        // distinguish env mis-config from a generic dispatcher
+        // failure.
+        await assertGitRepo({ cwd: opts.cwd });
+        worktreeCwd = await createWorktreeForAgent({
+          runDirAbs: opts.runDirAbs,
+          agentId: handle.id,
+          cwd: opts.cwd,
+        });
+        // Best-effort manifest record so resume can re-attach.
+        recordAgentWorktreePath(
+          opts.runDirAbs,
+          handle.id,
+          worktreeCwd,
+        ).catch(() => undefined);
+      }
+      const dispatchCwd = worktreeCwd ?? opts.cwd;
+
+      // Per-agent abort/restart loop. Each iteration creates a fresh
+      // AbortController composed with the phase-level signal so either
+      // `stopAgent(id)` or a phase abort kills just the right scope.
+      const MAX_AGENT_RESTARTS = 3;
+      let dispatchResult!: AgentResult;
+      let dispatchLoopDone = false;
+      while (!dispatchLoopDone) {
+        const agentCtrl = new AbortController();
+        // AbortSignal.any is available since Node 20.3 (we run Node 25).
+        const composedSignal = AbortSignal.any([
+          agentCtrl.signal,
+          phaseCtrl.signal,
+        ]);
+        agentAbortMap.set(handle.id, agentCtrl);
+        try {
+          dispatchResult = await dispatch({
+            runDir: opts.runDirAbs,
+            agentId: handle.id,
+            prompt: effectivePrompt,
+            promptHash: sha256(effectivePrompt),
+            cwd: dispatchCwd,
+            signal: composedSignal,
+            mockAgents: opts.mockAgents,
+            ...(opts.acceptEdits ? { acceptEdits: true } : {}),
+            ...(memoryDir !== null ? { memoryDir } : {}),
+            ...(typeof handle.opts.model === "string"
+              ? { model: handle.opts.model }
+              : {}),
+            ...(typeof handle.opts.thinking === "string"
+              ? { thinking: handle.opts.thinking }
+              : {}),
+            // Improvement 3: per-agent timeout falls back to run-wide default.
+            timeoutMs:
+              typeof handle.opts.timeoutMs === 'number'
+                ? handle.opts.timeoutMs
+                : (opts.defaultAgentTimeoutMs ?? 600_000),
+            // Slice-8a integration tests use the parent-death wrapper-free
+            // path; `RunManager` owns this knob.
+            skipParentDeathGuard: opts.mockAgents,
+          });
+          dispatchLoopDone = true;
+        } catch (innerErr) {
+          // Per-agent restart: only when the abort was triggered by
+          // restartAgent() (flag set), not by a phase/run abort.
+          const restartCount = agentRestartCounts.get(handle.id) ?? 0;
+          const shouldRestart =
+            agentRestartFlags.get(handle.id) === true &&
+            restartCount < MAX_AGENT_RESTARTS &&
+            (innerErr as { name?: string })?.name === "AbortError";
+          if (shouldRestart) {
+            agentRestartFlags.delete(handle.id);
+            agentRestartCounts.set(handle.id, restartCount + 1);
+            void opts.ledger.append({
+              type: "log",
+              at: nowIso(),
+              level: "info",
+              message: `[agent restart] agentId=${handle.id} attempt=${restartCount + 1}/${MAX_AGENT_RESTARTS}`,
+            }).catch(() => undefined);
+            // Loop continues with a fresh AgentController.
+          } else {
+            agentRestartCounts.delete(handle.id);
+            throw innerErr;
+          }
+        } finally {
+          agentAbortMap.delete(handle.id);
+        }
+      }
+      const result = dispatchResult;
       // Cache the success.
       const cacheEntry = {
         agentId: result.agentId,
@@ -807,11 +1053,40 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       // BUG-055: release the reservation and record actual spend together.
       budgetReserved -= 1;
       budgetSpent += result.usage.totalTokens;
+      // ZONE_WORKTREE: capture `git diff HEAD` from inside the
+      // worktree on success. Best-effort — a diff failure (e.g.
+      // git was uninstalled mid-run) is logged but never fails the
+      // agent. The worktree itself is not removed; auto-prune is
+      // tracked in docs/agent-worktree.md.
+      if (worktreeCwd !== null) {
+        const diffPath = resolveWorktreeDiffPath({
+          runDirAbs: opts.runDirAbs,
+          agentId: handle.id,
+        });
+        try {
+          await emitWorktreeDiff({
+            worktreePath: worktreeCwd,
+            diffPath,
+          });
+        } catch (e) {
+          void opts.ledger
+            .append({
+              type: "log",
+              at: nowIso(),
+              level: "warn",
+              message: `worktree diff failed for agent ${handle.id}: ${(e as Error).message}`,
+            })
+            .catch(() => undefined);
+        }
+      }
       // BUG-054 fix: extract schema output BEFORE logging agent_end so that
       // an extractJson failure only writes agent_error (the existing catch
       // block below), never both agent_end AND agent_error.
-      const schemaOutput: unknown =
-        schema !== null ? extractJson(result.text) : undefined;
+      let schemaOutput: unknown = undefined;
+      if (schema !== null) {
+        schemaOutput = extractJson(result.text);
+        validateAgainstSchema(schemaOutput, schema);
+      }
       await opts.ledger.append({
         type: "agent_end",
         at: nowIso(),
@@ -829,6 +1104,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
           endedAt: nowIso(),
           durationMs: nowMs() - t0,
           cached: false,
+          usage: result.usage,
         });
       } catch {
         /* swallow */
@@ -916,18 +1192,14 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
                 return String(message);
               }
             })();
-      // Ledger write: existing `log` entry (PRD §4.2.4 returns void).
+      // Single ledger entry per ctx.log call (the `log` shape).
+      // The previous implementation also appended an `agent_log`
+      // entry here, producing two ledger lines per ctx.log — that
+      // duplicated the OTel exporter's output and made `tail -f`
+      // confusing. The `log` entry is the canonical one; readers that
+      // want agent attribution can correlate via the surrounding
+      // `agent_start`/`agent_end` events.
       void ledgerLog(opts.ledger, level, msg, nowIso).catch(() => undefined);
-      // Ledger write: new `agent_log` entry for completeness in the ledger
-      // (so `tail ledger.jsonl` shows ctx.log calls alongside agent events).
-      void opts.ledger.append({
-        type: "agent_log",
-        at: nowIso(),
-        agentId: "",
-        phaseName: "",
-        level,
-        message: msg,
-      }).catch(() => undefined);
       // Overlay event: lets the TUI agent-detail view show ctx.log lines.
       try {
         opts.emitOverlayEvent?.("pi-workflows.agent.log", {
@@ -1004,6 +1276,126 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       }
 
       return { ok: true, value: approved };
+    } catch (e) {
+      return { ok: false, error: captureError(e) };
+    }
+  }
+
+  // ─── ctx.interrupt (ZONE_HITL) ─────────────────────────────────────────
+  // Mid-phase pause-and-route. The Nth `ctx.interrupt(...)` call gets a
+  // deterministic key `int-N` so a resumed run can pre-populate the same
+  // call site from the prior ledger's `interrupt_resolved` entries.
+  let interruptCounter = 0;
+  async function interruptFn(
+    optsArg: unknown,
+  ): Promise<RunCtxBridgeResult<unknown>> {
+    try {
+      const cfg = parseInterruptOpts(optsArg);
+      const idx = interruptCounter++;
+      const key = `int-${idx}`;
+
+      // 1. Replay-perfect short-circuit. If a prior run resolved this
+      //    interrupt and the result was replayed in via opts, return it
+      //    immediately. We still emit a single `interrupt_resolved` entry
+      //    with `source:"replay"` so the new ledger captures the answer
+      //    even though no IPC round-trip happened (a downstream resume
+      //    of THIS run finds it without re-walking the prior ledger).
+      if (
+        opts.replayResolvedInterrupts !== undefined &&
+        opts.replayResolvedInterrupts.has(key)
+      ) {
+        const replayed = opts.replayResolvedInterrupts.get(key);
+        await opts.ledger.append({
+          type: "interrupt_resolved",
+          at: nowIso(),
+          key,
+          value: replayed === undefined ? null : replayed,
+          source: "replay",
+        });
+        return { ok: true, value: replayed === undefined ? null : replayed };
+      }
+
+      // 2. Write the request entry. Choices/default are optional;
+      //    only include when present so JSON output stays minimal.
+      const requestEntry: {
+        type: "interrupt_requested";
+        at: string;
+        key: string;
+        question: string;
+        choices?: ReadonlyArray<string>;
+        default?: unknown;
+      } = {
+        type: "interrupt_requested",
+        at: nowIso(),
+        key,
+        question: cfg.question,
+      };
+      if (cfg.choices !== undefined) requestEntry.choices = cfg.choices;
+      if (cfg.hasDefault) requestEntry.default = cfg.defaultValue;
+      await opts.ledger.append(requestEntry);
+
+      // 3. Overlay event (best-effort).
+      try {
+        opts.emitOverlayEvent?.("pi-workflows.interrupt.requested", {
+          runId: opts.runMeta.id,
+          key,
+          question: cfg.question,
+          ...(cfg.choices !== undefined ? { choices: cfg.choices } : {}),
+          ...(cfg.hasDefault ? { default: cfg.defaultValue } : {}),
+        });
+      } catch {
+        /* swallow — overlay failures must not abort the interrupt */
+      }
+
+      // 4. Block. waitForInterrupt is wired by RunManager and resolves
+      //    when a `resume-interrupt` ctrl command arrives. When absent
+      //    (unit test / running outside the TUI) fall back to default.
+      let value: unknown;
+      let source: "ipc" | "default";
+      if (opts.waitForInterrupt !== undefined) {
+        value = await opts.waitForInterrupt(key, opts.signal);
+        source = "ipc";
+      } else {
+        value = cfg.hasDefault ? cfg.defaultValue : null;
+        source = "default";
+      }
+
+      // 5. Normalize undefined → null so the ledger never stores
+      //    `undefined` (not valid JSON; matches buildResultEntry).
+      const normalized = value === undefined ? null : value;
+
+      // 6. JSON-clone defense — catches realm-leaks and circular refs
+      //    at the host boundary, mirroring memo_set / report.
+      try {
+        JSON.stringify(normalized);
+      } catch (cycErr) {
+        throw new TypeError(
+          `ctx.interrupt: resolved value is not JSON-serializable (${(cycErr as Error).message})`,
+        );
+      }
+      const cloned: unknown = JSON.parse(JSON.stringify(normalized));
+
+      // 7. Write the resolution entry.
+      await opts.ledger.append({
+        type: "interrupt_resolved",
+        at: nowIso(),
+        key,
+        value: cloned,
+        source,
+      });
+
+      try {
+        opts.emitOverlayEvent?.("pi-workflows.interrupt.resolved", {
+          runId: opts.runMeta.id,
+          key,
+          value: cloned as Record<string, unknown> | unknown,
+          source,
+        });
+      } catch {
+        /* swallow */
+      }
+
+      return { ok: true, value: cloned };
     } catch (e) {
       return { ok: false, error: captureError(e) };
     }
@@ -1104,6 +1496,179 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     }
   }
 
+  // ─── ctx.memory.read / append / compact (gap follow-up #6) ──────
+  // Stdlib helpers letting workflow authors read or update a
+  // sub-agent's persistent memory directly, without going through
+  // a sub-agent's `memory_update` JSONL event. Same scope/name
+  // resolution as `ctx.agent({memory})` so authors don't reinvent
+  // path math.
+
+  /**
+   * Default `summarize` hook for `ctx.memory.compact`. Spawns a
+   * single short `pi --mode json -p` agent (no transcript persisted,
+   * no semaphore slot) asking it to preserve recent entries verbatim
+   * and condense the older ones. The returned string is the
+   * compacted MEMORY.md body.
+   *
+   * Failures bubble up as `CompactionError` from `compactMemoryFile`
+   * so authors see a typed error and the original file stays intact.
+   */
+  async function defaultCompactSummarize(
+    name: string,
+    original: string,
+  ): Promise<string> {
+    // Tiny synthetic agent id for the dispatcher — prefixed so it's
+    // easy to spot in transcripts. `assertSafeAgentId` accepts this
+    // shape (no `..`, no `/`, no leading `.`).
+    const compactAgentId = `memory-compact-${name}-${Date.now().toString(
+      36,
+    )}`;
+    const prompt = [
+      `You are compacting a long-running agent's persistent memory file.`,
+      `Agent name: ${name}`,
+      ``,
+      `Goal: produce a shorter version that preserves the MOST RECENT`,
+      `~25% of entries verbatim and condenses older entries into terse`,
+      `bullet summaries grouped by theme. Keep dates / identifiers.`,
+      `Drop redundant restatements. Output ONLY the new MEMORY.md body`,
+      `— no preamble, no fences, no commentary.`,
+      ``,
+      `--- begin original MEMORY.md ---`,
+      original,
+      `--- end original MEMORY.md ---`,
+    ].join("\n");
+    const result = await dispatch({
+      runDir: opts.runDirAbs,
+      agentId: compactAgentId,
+      prompt,
+      promptHash: sha256(prompt),
+      cwd: opts.cwd,
+      mockAgents: opts.mockAgents,
+    });
+    if (typeof result.text !== "string" || result.text.length === 0) {
+      throw new Error(
+        `ctx.memory.compact: agent returned empty text for "${name}"`,
+      );
+    }
+    return result.text;
+  }
+
+  function resolveMemoryArgs(
+    name: unknown,
+    scope: unknown,
+    fnName: string,
+  ): { dir: string; scope: MemoryScope; name: string } {
+    if (typeof name !== "string" || name.length === 0) {
+      throw new TypeError(`${fnName}: name must be a non-empty string`);
+    }
+    if (
+      scope !== "user" &&
+      scope !== "project" &&
+      scope !== "local"
+    ) {
+      throw new TypeError(
+        `${fnName}: scope must be 'user' | 'project' | 'local' (got ${JSON.stringify(scope)})`,
+      );
+    }
+    const parsed = scope as MemoryScope;
+    const dir = resolveMemoryDir({
+      scope: parsed,
+      name,
+      cwd: opts.cwd,
+      runDirAbs: opts.runDirAbs,
+    });
+    return { dir, scope: parsed, name };
+  }
+
+  async function memoryRead(
+    name: unknown,
+    scope: unknown,
+  ): Promise<RunCtxBridgeResult<string | null>> {
+    try {
+      const { dir, name: safeName } = resolveMemoryArgs(
+        name,
+        scope,
+        "ctx.memory.read",
+      );
+      const r = await readMemoryFileWithMeta(dir);
+      if (r === null) return { ok: true, value: null };
+      // Re-use the same one-shot oversize-warn dedup as auto-injection.
+      if (r.truncated && !memoryOversizeWarned.has(safeName)) {
+        memoryOversizeWarned.add(safeName);
+        void opts.ledger
+          .append({
+            type: "log",
+            at: nowIso(),
+            level: "warn",
+            message: `agent-memory: MEMORY.md for "${safeName}" (${r.totalBytes} bytes) exceeds the ${MEMORY_READ_CAP_BYTES}-byte read cap.`,
+          })
+          .catch(() => undefined);
+      }
+      return { ok: true, value: r.content };
+    } catch (e) {
+      return { ok: false, error: captureError(e) };
+    }
+  }
+
+  async function memoryAppend(
+    name: unknown,
+    scope: unknown,
+    text: unknown,
+  ): Promise<RunCtxBridgeResult<null>> {
+    try {
+      const { dir } = resolveMemoryArgs(
+        name,
+        scope,
+        "ctx.memory.append",
+      );
+      if (typeof text !== "string") {
+        throw new TypeError(
+          `ctx.memory.append: text must be a string (got ${typeof text})`,
+        );
+      }
+      await appendMemoryUpdate(dir, text);
+      return { ok: true, value: null };
+    } catch (e) {
+      return { ok: false, error: captureError(e) };
+    }
+  }
+
+  async function memoryCompact(
+    name: unknown,
+    scope: unknown,
+  ): Promise<
+    RunCtxBridgeResult<{
+      beforeBytes: number;
+      afterBytes: number;
+      ratio: number;
+    }>
+  > {
+    try {
+      const { dir, name: safeName } = resolveMemoryArgs(
+        name,
+        scope,
+        "ctx.memory.compact",
+      );
+      const summarize = opts.compactSummarize ?? defaultCompactSummarize;
+      const result = await compactMemoryFile({
+        dir,
+        summarize: (original) => summarize(safeName, original),
+      });
+      void opts.ledger
+        .append({
+          type: "log",
+          at: nowIso(),
+          level: "info",
+          message: `agent-memory: compacted MEMORY.md for "${safeName}" (${result.beforeBytes} → ${result.afterBytes} bytes, ratio=${result.ratio.toFixed(3)})`,
+        })
+        .catch(() => undefined);
+      memoryOversizeWarned.delete(safeName);
+      return { ok: true, value: result };
+    } catch (e) {
+      return { ok: false, error: captureError(e) };
+    }
+  }
+
   // ─── ctx.checkpoint (Improvement 6) ──────────────────────────────
   async function checkpointFn(
     label: unknown,
@@ -1138,8 +1703,32 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   }
 
   // ─── ctx.report (Improvement 7) ──────────────────────────────────
-  function reportFn(eventType: unknown, data?: unknown): RunCtxBridgeResult<null> {
+  function reportFn(
+    eventTypeOrAccessor: unknown,
+    data?: unknown,
+  ): RunCtxBridgeResult<null | string> {
     try {
+      // gap/viz: accessor form `ctx.report({format:'mermaid'})` returns
+      // the run's DAG as a Mermaid string. Detected by the first
+      // argument being an object with a `format` field; everything else
+      // falls through to the existing event-emit semantics.
+      if (
+        eventTypeOrAccessor !== null &&
+        typeof eventTypeOrAccessor === "object" &&
+        !Array.isArray(eventTypeOrAccessor) &&
+        "format" in (eventTypeOrAccessor as Record<string, unknown>)
+      ) {
+        const fmt = (eventTypeOrAccessor as Record<string, unknown>)["format"];
+        if (fmt !== "mermaid") {
+          throw new TypeError(
+            `ctx.report: unsupported format ${JSON.stringify(fmt)} (only 'mermaid' is implemented)`,
+          );
+        }
+        const mmd = renderMermaidSync(opts.runDirAbs);
+        return { ok: true, value: mmd };
+      }
+
+      const eventType = eventTypeOrAccessor;
       if (typeof eventType !== "string" || eventType.length === 0) {
         throw new TypeError(
           "ctx.report: eventType must be a non-empty string",
@@ -1198,6 +1787,71 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     return { scope, ttlMs };
   }
 
+  /**
+   * ZONE_HITL — normalize `ctx.interrupt(opts)` argument shape.
+   *
+   * Accepts:
+   *   - a plain string (treated as `{ question }`)
+   *   - `{ question: string, choices?: string[], default?: unknown }`
+   *
+   * Throws on any other shape so the caller's error envelope carries a
+   * descriptive message. JSON-clones `choices` and `default` so realm
+   * leaks / cycles fail at the host boundary.
+   */
+  function parseInterruptOpts(optsArg: unknown): {
+    question: string;
+    choices?: ReadonlyArray<string>;
+    hasDefault: boolean;
+    defaultValue: unknown;
+  } {
+    if (typeof optsArg === "string") {
+      return { question: optsArg, hasDefault: false, defaultValue: undefined };
+    }
+    if (optsArg === null || typeof optsArg !== "object" || Array.isArray(optsArg)) {
+      throw new TypeError(
+        "ctx.interrupt: opts must be a string question or { question, choices?, default? } object",
+      );
+    }
+    const o = optsArg as Record<string, unknown>;
+    if (typeof o.question !== "string" || o.question.length === 0) {
+      throw new TypeError(
+        "ctx.interrupt: opts.question must be a non-empty string",
+      );
+    }
+    let choices: ReadonlyArray<string> | undefined;
+    if (o.choices !== undefined) {
+      if (!Array.isArray(o.choices)) {
+        throw new TypeError("ctx.interrupt: opts.choices must be an array of strings");
+      }
+      const arr = o.choices as unknown[];
+      const cleaned: string[] = [];
+      for (let i = 0; i < arr.length; i++) {
+        const c = arr[i];
+        if (typeof c !== "string") {
+          throw new TypeError(
+            `ctx.interrupt: opts.choices[${i}] must be a string (got ${typeof c})`,
+          );
+        }
+        cleaned.push(c);
+      }
+      choices = Object.freeze(cleaned.slice());
+    }
+    const hasDefault = Object.prototype.hasOwnProperty.call(o, "default");
+    let defaultValue: unknown = undefined;
+    if (hasDefault) {
+      try {
+        defaultValue = JSON.parse(JSON.stringify(o.default));
+      } catch (cycErr) {
+        throw new TypeError(
+          `ctx.interrupt: opts.default is not JSON-serializable (${(cycErr as Error).message})`,
+        );
+      }
+    }
+    return choices !== undefined
+      ? { question: o.question, choices, hasDefault, defaultValue }
+      : { question: o.question, hasDefault, defaultValue };
+  }
+
   const host: RunCtxHost = {
     runMeta: opts.runMeta,
     input: opts.input,
@@ -1215,13 +1869,19 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     checkpoint: checkpointFn,
     report: reportFn,
     gate,
+    interrupt: interruptFn,
     memo_check,
     memo_set,
+    memory_read: memoryRead,
+    memory_append: memoryAppend,
+    memory_compact: memoryCompact,
   };
   return {
     host,
     getFinishCallbackPrompt: () => finishPrompt,
     getAgentCount: () => agentCount,
+    stopAgent,
+    restartAgent,
   };
 }
 
@@ -1312,6 +1972,143 @@ function buildSchemaInstruction(schema: Record<string, unknown>): string {
     "\n```\n" +
     "Place the JSON block at the END of your response. No other content after it."
   );
+}
+
+/**
+ * gap-fix: post-parse schema validation at the phase boundary.
+ *
+ * Thrown after `extractJson` succeeds but the parsed value doesn't
+ * match the agent's declared `opts.schema`. Surfaces the path to the
+ * mismatch and the expected vs. actual shape so authors see WHERE the
+ * agent's output drifted, not just that it did.
+ *
+ * Class identity is preserved through realmError.captureError and
+ * the Context-realm reconstructor (sandbox.ts `__pi_reconstruct_error`)
+ * so author code's `e instanceof Error && e.name === 'SchemaValidationError'`
+ * predicate works.
+ */
+export class SchemaValidationError extends Error {
+  readonly path: string;
+  readonly expected: string;
+  readonly actual: string;
+  constructor(path: string, expected: string, actual: string) {
+    super(
+      `ctx.agent schema: validation failed at "${path}": expected ${expected}, got ${actual}`,
+    );
+    this.name = "SchemaValidationError";
+    this.path = path;
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
+/**
+ * Minimal JSON-Schema-subset validator. Supports the slice of JSON
+ * Schema that DSPy and OpenAI structured-outputs use:
+ *   - `type`: 'object' | 'array' | 'string' | 'number' | 'integer'
+ *             | 'boolean' | 'null' (or array of these for unions)
+ *   - `properties` + `required` for object
+ *   - `items` for array
+ *   - `additionalProperties: false` (default true)
+ *   - `enum`: list of allowed primitive values
+ *
+ * Throws `SchemaValidationError` on first mismatch. Does NOT validate
+ * non-shape constraints (minLength, format, pattern, etc.) — those
+ * belong to a heavyweight validator like Ajv. The point here is
+ * "agent returned the wrong SHAPE", not full JSON Schema conformance.
+ */
+export function validateAgainstSchema(
+  value: unknown,
+  schema: unknown,
+  path: string = "$",
+): void {
+  if (schema === null || typeof schema !== "object" || Array.isArray(schema)) {
+    // Non-object schema (e.g. boolean true) — accept anything.
+    return;
+  }
+  const s = schema as Record<string, unknown>;
+  // enum: value must be one of the listed primitives.
+  if (Array.isArray(s.enum)) {
+    const enumArr = s.enum as unknown[];
+    let found = false;
+    for (let i = 0; i < enumArr.length; i++) {
+      if (enumArr[i] === value) { found = true; break; }
+    }
+    if (!found) {
+      throw new SchemaValidationError(
+        path,
+        `one of ${JSON.stringify(enumArr)}`,
+        JSON.stringify(value),
+      );
+    }
+  }
+  if (s.type === undefined) return;
+  const types = Array.isArray(s.type) ? (s.type as unknown[]) : [s.type];
+  // Resolve actual type label.
+  const actualType = ((): string => {
+    if (value === null) return "null";
+    if (Array.isArray(value)) return "array";
+    const t = typeof value;
+    if (t === "number") return Number.isInteger(value) ? "integer" : "number";
+    return t;
+  })();
+  // 'integer' satisfies 'number' (JSON Schema spec); 'number' alone does
+  // NOT satisfy 'integer'.
+  let typeOk = false;
+  for (let i = 0; i < types.length; i++) {
+    const t = types[i];
+    if (t === actualType) { typeOk = true; break; }
+    if (t === "number" && actualType === "integer") { typeOk = true; break; }
+  }
+  if (!typeOk) {
+    throw new SchemaValidationError(
+      path,
+      types.length === 1 ? String(types[0]) : `one of ${JSON.stringify(types)}`,
+      actualType,
+    );
+  }
+  // Recurse for object/array.
+  if (actualType === "object") {
+    const v = value as Record<string, unknown>;
+    const properties = (s.properties as Record<string, unknown> | undefined) ?? {};
+    const required = Array.isArray(s.required) ? (s.required as unknown[]) : [];
+    for (let i = 0; i < required.length; i++) {
+      const key = required[i];
+      if (typeof key !== "string") continue;
+      if (!Object.prototype.hasOwnProperty.call(v, key)) {
+        throw new SchemaValidationError(
+          `${path}.${key}`,
+          "required property",
+          "undefined",
+        );
+      }
+    }
+    const propKeys = Object.keys(properties);
+    for (let i = 0; i < propKeys.length; i++) {
+      const key = propKeys[i] as string;
+      if (Object.prototype.hasOwnProperty.call(v, key)) {
+        validateAgainstSchema(v[key], properties[key], `${path}.${key}`);
+      }
+    }
+    if (s.additionalProperties === false) {
+      const valueKeys = Object.keys(v);
+      for (let i = 0; i < valueKeys.length; i++) {
+        const k = valueKeys[i] as string;
+        if (!Object.prototype.hasOwnProperty.call(properties, k)) {
+          throw new SchemaValidationError(
+            `${path}.${k}`,
+            "no extra properties",
+            "unexpected property",
+          );
+        }
+      }
+    }
+  } else if (actualType === "array" && s.items !== undefined) {
+    const arr = value as unknown[];
+    for (let i = 0; i < arr.length; i++) {
+      validateAgainstSchema(arr[i], s.items, `${path}[${i}]`);
+    }
+  }
 }
 
 // Type-only re-exports kept off the runtime surface; these silence

@@ -179,3 +179,118 @@ test("PhaseRegistry: subscriber fires on mutation, microtask-coalesced", async (
   await Promise.resolve();
   assert.equal(calls, 1, `expected coalesced fire, got ${calls}`);
 });
+
+// ──────────────────────────────────────────────────────────────
+// Token rendering tests
+// ──────────────────────────────────────────────────────────────
+
+import { fmtTokens } from "../../src/runtime/phaseView.js";
+
+test("fmtTokens: < 1000 → N tok", () => {
+  assert.equal(fmtTokens(0), "0 tok");
+  assert.equal(fmtTokens(999), "999 tok");
+  assert.equal(fmtTokens(1), "1 tok");
+});
+
+test("fmtTokens: >= 1000 → X.Xk tok", () => {
+  assert.equal(fmtTokens(1000), "1.0k tok");
+  assert.equal(fmtTokens(1500), "1.5k tok");
+  assert.equal(fmtTokens(42_300), "42.3k tok");
+  assert.equal(fmtTokens(999_999), "1000.0k tok");
+});
+
+test("fmtTokens: >= 1_000_000 → X.XM tok", () => {
+  assert.equal(fmtTokens(1_000_000), "1.0M tok");
+  assert.equal(fmtTokens(2_500_000), "2.5M tok");
+});
+
+test("phase view: done phase shows token count when available", () => {
+  const reg = new PhaseRegistry();
+  reg.applyEntry({
+    customType: "pi-workflows.phase.started",
+    data: { runId: baseSummary.runId, phaseName: "tok-phase", agentCount: 1, startedAt: "2026-05-29T12:01:00Z" },
+  });
+  reg.applyEntry({
+    customType: "pi-workflows.agent.ended",
+    data: {
+      runId: baseSummary.runId,
+      phaseName: "tok-phase",
+      agentId: "t0",
+      cached: false,
+      durationMs: 5000,
+      usage: { input: 10000, output: 500, cacheRead: 0, cacheWrite: 0, totalTokens: 10500 },
+    },
+  });
+  reg.applyEntry({
+    customType: "pi-workflows.phase.ended",
+    data: { runId: baseSummary.runId, phaseName: "tok-phase", durationMs: 5000 },
+  });
+  const snap = reg.getRunSnapshot(baseSummary.runId)!;
+  const out = renderPhaseView(baseSummary, snap, { nowMs: FIXED_NOW });
+  const lines = out.lines.join("\n");
+  assert.match(lines, /10\.5k tok/, "done phase should show token count");
+});
+
+test("phase view: done phase shows cached segment when cachedTokens > 0", () => {
+  const reg = new PhaseRegistry();
+  reg.applyEntry({
+    customType: "pi-workflows.phase.started",
+    data: { runId: baseSummary.runId, phaseName: "cached-phase", agentCount: 1, startedAt: "2026-05-29T12:01:00Z" },
+  });
+  reg.applyEntry({
+    customType: "pi-workflows.agent.ended",
+    data: {
+      runId: baseSummary.runId,
+      phaseName: "cached-phase",
+      agentId: "c0",
+      cached: true,
+      durationMs: 3000,
+      usage: { input: 8000, output: 200, cacheRead: 0, cacheWrite: 0, totalTokens: 8200 },
+    },
+  });
+  reg.applyEntry({
+    customType: "pi-workflows.phase.ended",
+    data: { runId: baseSummary.runId, phaseName: "cached-phase", durationMs: 3000 },
+  });
+  const snap = reg.getRunSnapshot(baseSummary.runId)!;
+  const out = renderPhaseView(baseSummary, snap, { nowMs: FIXED_NOW });
+  const lines = out.lines.join("\n");
+  assert.match(lines, /8\.2k tok.*cached/, "done phase with cached agents should show cached segment");
+});
+
+test("phase view: run-level Total line appears when tokens present", () => {
+  const reg = new PhaseRegistry();
+  reg.applyEntry({
+    customType: "pi-workflows.phase.started",
+    data: { runId: baseSummary.runId, phaseName: "p1", agentCount: 1 },
+  });
+  reg.applyEntry({
+    customType: "pi-workflows.agent.ended",
+    data: {
+      runId: baseSummary.runId,
+      phaseName: "p1",
+      agentId: "x0",
+      usage: { input: 5000, output: 100, cacheRead: 0, cacheWrite: 0, totalTokens: 5100 },
+    },
+  });
+  const snap = reg.getRunSnapshot(baseSummary.runId)!;
+  const out = renderPhaseView(baseSummary, snap, { nowMs: FIXED_NOW });
+  const lines = out.lines.join("\n");
+  assert.match(lines, /Total:.*5\.1k tok/, "run header should show total token count");
+});
+
+test("phase view: no Total line when no token data", () => {
+  const reg = new PhaseRegistry();
+  reg.applyEntry({
+    customType: "pi-workflows.phase.started",
+    data: { runId: baseSummary.runId, phaseName: "p2", agentCount: 1 },
+  });
+  reg.applyEntry({
+    customType: "pi-workflows.agent.ended",
+    data: { runId: baseSummary.runId, phaseName: "p2", agentId: "y0" },
+  });
+  const snap = reg.getRunSnapshot(baseSummary.runId)!;
+  const out = renderPhaseView(baseSummary, snap, { nowMs: FIXED_NOW });
+  const lines = out.lines.join("\n");
+  assert.ok(!lines.includes("Total:"), "should not render Total line with no token data");
+});

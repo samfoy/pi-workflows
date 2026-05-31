@@ -441,3 +441,77 @@ test("disabled hotkey on terminal run is a silent noop (F1)", async () => {
   assert.equal(killEntries.length, 0);
   mount!.done();
 });
+
+test("banner TTL: stale banner is dropped from render after expiry", async () => {
+  // Simulates the gap analysis 2026-05-31 row "Banner state has no TTL":
+  // pressing `s` on a terminal run in phase-view emits a "saving
+  // script…" banner; after the 4s TTL the render must drop it even
+  // when no other event triggers a redraw.
+  const pi = makeFakePi();
+  const registry = new ActiveRunsRegistry();
+  const phaseReg = new PhaseRegistry();
+  // Drive a run into a terminal state so `s` fires save-script-requested
+  // (which sets a banner). `phase.started` makes phase-view renderable.
+  const runId = "wf-bnrttl0001";
+  registry.register(runId, fakeRun({ runId }), {
+    workflowName: "demo",
+    state: "done",
+    startedAt: "2026-05-29T00:00:00Z",
+  });
+  phaseReg.applyEntry({
+    customType: "pi-workflows.phase.started",
+    data: { runId, phaseName: "p1", agentCount: 1 },
+  } as never);
+
+  let capturedCtx: { cwd: string; ui: { notify: () => void } } | null = null;
+  pi.registerCommand("bnr-ttl", {
+    handler: async (_a, c) => {
+      capturedCtx = c as never;
+    },
+  });
+  await pi.invokeCommand("bnr-ttl", "");
+
+  // Drive a virtual clock so we can step past the 4s TTL without sleeping.
+  let now = 1_700_000_000_000;
+  let handle: OverlayHandleForTest | null = null;
+  let saveCalls = 0;
+  await mountOverlay({
+    pi,
+    ctx: capturedCtx!,
+    registry,
+    phaseRegistry: phaseReg,
+    forceTTY: true,
+    nowMs: () => now,
+    onSaveScriptRequested: () => {
+      saveCalls++;
+    },
+    onMounted: (api) => {
+      handle = api;
+    },
+  });
+  assert.ok(handle, "onMounted must fire");
+  const h: OverlayHandleForTest = handle!;
+
+  // Drill into phase-view (Enter), then press `s` to set the banner.
+  h.handleKey("\r");
+  await new Promise((r) => setTimeout(r, 50));
+  h.handleKey("s");
+  assert.equal(saveCalls, 1, "save-script callback must fire");
+
+  const linesAtSet = h.currentLines().join("\n");
+  assert.match(
+    linesAtSet,
+    /saving script/,
+    `expected banner to be visible right after press, got:\n${linesAtSet}`,
+  );
+
+  // Step past the 4s TTL and re-render. With TTL the banner must be gone.
+  now += 5_000;
+  const linesAfterTtl = h.currentLines().join("\n");
+  assert.doesNotMatch(
+    linesAfterTtl,
+    /saving script/,
+    `banner must be cleared after TTL, got:\n${linesAfterTtl}`,
+  );
+  h.close();
+});

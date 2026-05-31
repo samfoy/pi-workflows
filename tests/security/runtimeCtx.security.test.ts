@@ -68,6 +68,7 @@ function noopHost(): RunCtxHost {
     checkpoint: async () => ok(false),
     report: () => ok(null),
     gate: async () => ok(true),
+    interrupt: async () => ok(null),
     memo_check: async () => ok({ hit: false as const }),
     memo_set: async () => ok(null),
   };
@@ -138,6 +139,10 @@ test("slice 8a: host-realm-eval fixture passes with real runCtxHost", async () =
   assert.equal(stdlibIdent.parallelCtorIsContextFn, true);
   assert.equal(stdlibIdent.retryCtorIsContextFn, true);
   assert.equal(stdlibIdent.sleepCtorIsContextFn, true);
+  // gap-fix stdlib additions:
+  assert.equal(stdlibIdent.aggregateCtorIsContextFn, true);
+  assert.equal(stdlibIdent.extractJSONCtorIsContextFn, true);
+  assert.equal(stdlibIdent.critiqueCtorIsContextFn, true);
 
   // Slice 8b: factory must be deleted post-init.
   const stdlibHidden = r["stdlib-factory-hidden"] as Record<string, unknown>;

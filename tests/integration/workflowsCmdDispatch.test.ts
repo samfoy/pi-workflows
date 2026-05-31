@@ -141,3 +141,39 @@ test("/workflows in recursive mode: disabled message", async () => {
   const lastMsg = pi.messages[pi.messages.length - 1];
   assert.match(lastMsg!.content, /disabled in nested/);
 });
+
+test("/workflows keyword: toggles off then on", async () => {
+  const pi = makeFakePi();
+  let enabled = true;
+  registerWorkflowsCommand(pi, emptyRegistry(), {
+    keywordTrigger: { get: () => enabled, set: (v) => { enabled = v; } },
+  });
+
+  // Toggle off
+  await pi.invokeCommand("workflows", "keyword off");
+  assert.equal(enabled, false);
+  assert.match(pi.messages[pi.messages.length - 1]!.content, /off/);
+
+  // Toggle on explicitly
+  await pi.invokeCommand("workflows", "keyword on");
+  assert.equal(enabled, true);
+  assert.match(pi.messages[pi.messages.length - 1]!.content, /on/);
+
+  // Bare 'keyword' toggles
+  await pi.invokeCommand("workflows", "keyword");
+  assert.equal(enabled, false);
+});
+
+test("/workflows keyword: no keywordTrigger opt → graceful message", async () => {
+  const pi = makeFakePi();
+  registerWorkflowsCommand(pi, emptyRegistry());
+  await pi.invokeCommand("workflows", "keyword");
+  assert.match(pi.messages[pi.messages.length - 1]!.content, /not configured/);
+});
+
+test("/workflows <unknown-sub>: help includes keyword", async () => {
+  const pi = makeFakePi();
+  registerWorkflowsCommand(pi, emptyRegistry());
+  await pi.invokeCommand("workflows", "explode");
+  assert.match(pi.messages[pi.messages.length - 1]!.content, /keyword/);
+});

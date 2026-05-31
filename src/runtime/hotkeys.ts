@@ -53,8 +53,11 @@ export type HotkeyActionKind =
   | "pause"
   | "resume"
   | "stop"
+  | "stop-agent"
+  | "restart-agent"
   | "restart-requested"
   | "save-script-requested"
+  | "visualize-requested"
   | "open-gc-dialog"
   | "open-transcript"
   | "copy-prompt"
@@ -65,6 +68,8 @@ export type HotkeyActionKind =
 export interface HotkeyAction {
   readonly kind: HotkeyActionKind;
   readonly runId?: string;
+  /** Populated for `stop-agent` and `restart-agent` actions. */
+  readonly agentId?: string;
   /** When `kind === "noop"`, why the key was a no-op. Exposed so the
    * overlay can render an appropriate hint. */
   readonly reason?:
@@ -98,6 +103,14 @@ export interface DispatchInput {
    * `s` (save-script) are no-ops on remote runs.
    */
   readonly isRemote?: boolean | undefined;
+  /**
+   * Per-agent stop/restart: the agentId under the phase-view cursor.
+   * When set (and agentState === "running"), `x` → stop-agent and
+   * `r` → restart-agent instead of the run-level actions.
+   */
+  readonly agentId?: string | undefined;
+  /** State of the cursor-selected agent (queued | running | done). */
+  readonly agentState?: "queued" | "running" | "done" | undefined;
 }
 
 const NORM_KEY = new Map<string, string>([
@@ -133,6 +146,8 @@ const NORM_KEY = new Map<string, string>([
   ["Y", "y"],
   ["n", "n"],  // slice 15: GC dialog cancel
   ["N", "n"],
+  ["v", "v"], // gap/viz: write Mermaid DAG to tmp file
+  ["V", "v"],
 ]);
 
 function normalize(key: string): string {
@@ -171,9 +186,15 @@ export function isHotkeyEnabled(input: DispatchInput): boolean {
       // pause/resume on runs-list and phase-view, only for running/paused.
       return input.runState === "running" || input.runState === "paused";
     case "x":
+      // Agent-level: enabled in phase-view when cursor selects a running agent.
+      if (input.view === "phase-view" && input.agentId !== undefined && input.agentState === "running")
+        return true;
       return input.runState === "running" || input.runState === "paused";
     case "r":
       if (input.isRemote) return false; // F2: remote runs can't be restarted
+      // Agent-level restart: enabled in phase-view when cursor selects a running agent.
+      if (input.view === "phase-view" && input.agentId !== undefined && input.agentState === "running")
+        return true;
       if (input.view === "runs-list") {
         // Slice 14: `r` is enabled on paused (resume) AND terminal (restart).
         if (input.runState === "paused") return true;
@@ -199,6 +220,14 @@ export function isHotkeyEnabled(input: DispatchInput): boolean {
       return input.view === "agent-detail";
     case "c":
       return input.view === "agent-detail";
+    case "v":
+      // gap/viz: `v` writes the run's DAG to a tmp .mmd file.
+      // Enabled on runs-list and phase-view whenever a run is selected,
+      // including terminal states (the diagram is the most useful
+      // post-mortem artefact).
+      if (input.view === "runs-list") return input.runId !== undefined;
+      if (input.view === "phase-view") return input.runId !== undefined;
+      return false;
     default:
       return false;
   }
@@ -266,6 +295,14 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
       return { kind: "noop", runId, reason: "disabled-for-state" };
     }
     case "x": {
+      // Agent-level stop in phase-view when cursor is on a running agent.
+      if (
+        input.view === "phase-view" &&
+        input.agentId !== undefined &&
+        input.agentState === "running"
+      ) {
+        return { kind: "stop-agent", runId, agentId: input.agentId };
+      }
       if (input.runState === "running" || input.runState === "paused")
         return { kind: "stop", runId };
       return { kind: "noop", runId, reason: "disabled-for-state" };
@@ -278,6 +315,14 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
       // Slice 15 F2: `r` (restart) is disabled on remote runs.
       if (input.isRemote) {
         return { kind: "noop", runId, reason: "disabled-for-remote" };
+      }
+      // Agent-level restart in phase-view when cursor is on a running agent.
+      if (
+        input.view === "phase-view" &&
+        input.agentId !== undefined &&
+        input.agentState === "running"
+      ) {
+        return { kind: "restart-agent", runId, agentId: input.agentId };
       }
       if (input.runState === "paused")
         return { kind: "resume", runId };
@@ -311,6 +356,14 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
         return { kind: "copy-prompt", runId };
       }
       return { kind: "noop", runId, reason: "disabled-for-state" };
+    case "v":
+      // gap/viz: emit the Mermaid DAG. Available on runs-list and
+      // phase-view; agent-detail's `c`/`t` already use the row, so we
+      // keep the action scoped to where there's something to render.
+      if (input.view === "runs-list" || input.view === "phase-view") {
+        return { kind: "visualize-requested", runId };
+      }
+      return { kind: "noop", runId, reason: "disabled-for-state" };
     default:
       return { kind: "noop", runId, reason: "unknown-key" };
   }
@@ -330,6 +383,8 @@ export interface HelpBullet {
 export function helpForState(
   view: OverlayView,
   runState: RunSummaryState | undefined,
+  /** When an agent row is selected in phase-view, set its state for agent-level hints. */
+  agentState?: "queued" | "running" | "done" | undefined,
 ): HelpBullet[] {
   const dis = (
     key: string,
@@ -346,6 +401,7 @@ export function helpForState(
       const isRunning = runState === "running";
       const isPaused = runState === "paused";
       const isTerminal = runState !== undefined && TERMINAL.has(runState);
+      const agentRunning = agentState === "running";
       return [
         enabled("↑↓ jk", "agents"),
         dis("Enter", "agent detail", noSel),
@@ -356,11 +412,12 @@ export function helpForState(
         ),
         dis(
           "r",
-          isPaused ? "resume" : "restart",
-          noSel || (!isPaused && !isTerminal),
+          agentRunning ? "restart agent" : (isPaused ? "resume" : "restart"),
+          noSel || (!agentRunning && !isPaused && !isTerminal),
         ),
-        dis("x", "stop", noSel || (!isRunning && !isPaused)),
+        dis("x", agentRunning ? "stop agent" : "stop", noSel || (!agentRunning && !isRunning && !isPaused)),
         dis("s", "save script", noSel || !isTerminal),
+        dis("v", "viz", noSel),
         enabled("Esc", "back"),
         enabled("?", "help"),
       ];
@@ -390,6 +447,7 @@ export function helpForState(
     ),
     dis("x", "stop", noSel || (!isRunning && !isPaused)),
     dis("r", isPaused ? "resume" : "restart", noSel || (!isTerminal && !isPaused)),
+    dis("v", "viz", noSel),
     enabled("g", "gc"),
     enabled("Esc", "close"),
     enabled("?", "help"),

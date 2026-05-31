@@ -122,18 +122,81 @@ export function agentsDir(arg: string, byDir?: true): string {
 }
 
 /**
+ * Thrown by `assertSafeAgentId` when an agentId is rejected as a
+ * potential path-traversal vector. The dispatcher and any other
+ * caller that feeds an agentId into `path.join` MUST validate first;
+ * otherwise an attacker-controlled agentId like `../../etc/passwd`
+ * or `..\windows\system32` could escape the per-run agents dir.
+ */
+export class InvalidAgentIdError extends Error {
+  readonly agentId: string;
+  readonly reason: string;
+  constructor(agentId: string, reason: string) {
+    super(`invalid agentId ${JSON.stringify(agentId)}: ${reason}`);
+    this.name = "InvalidAgentIdError";
+    this.agentId = agentId;
+    this.reason = reason;
+  }
+}
+
+/**
+ * Reject any agentId that could escape the per-run `agents/` dir or
+ * collide with hidden / dotfile semantics.
+ *
+ * Disallowed:
+ *   - non-string / empty
+ *   - contains NUL (POSIX path terminator; some FS APIs truncate at NUL)
+ *   - contains `/` or `\` (POSIX or Windows path separator)
+ *   - contains `..` anywhere (path traversal — `a..b` is also a
+ *     defensive reject; legitimate agent ids never need it)
+ *   - starts with `.` (hidden file; would create `.foo.jsonl` which
+ *     `ls` skips and complicates backups)
+ *
+ * Throws `InvalidAgentIdError` on rejection.
+ */
+export function assertSafeAgentId(agentId: unknown): asserts agentId is string {
+  if (typeof agentId !== "string" || agentId.length === 0) {
+    throw new InvalidAgentIdError(
+      typeof agentId === "string" ? agentId : String(agentId),
+      "must be a non-empty string",
+    );
+  }
+  if (agentId.indexOf("\0") !== -1) {
+    throw new InvalidAgentIdError(agentId, "contains NUL byte");
+  }
+  if (agentId.indexOf("/") !== -1 || agentId.indexOf("\\") !== -1) {
+    throw new InvalidAgentIdError(agentId, "contains path separator");
+  }
+  if (agentId.indexOf("..") !== -1) {
+    throw new InvalidAgentIdError(agentId, "contains path-traversal sequence '..'");
+  }
+  if (agentId.startsWith(".")) {
+    throw new InvalidAgentIdError(agentId, "starts with '.' (hidden file)");
+  }
+}
+
+/**
  * `<runDir>/agents/<agentId>.jsonl` — raw NDJSON transcript of a
  * single sub-agent's `pi --mode json` output. Slice 6 tees stdout here.
+ *
+ * `agentId` is validated via `assertSafeAgentId`; an attacker-controlled
+ * id like `../../etc/passwd` is rejected with `InvalidAgentIdError`
+ * before it can escape the per-run agents dir.
  */
 export function agentTranscriptPath(runDirAbs: string, agentId: string): string {
+  assertSafeAgentId(agentId);
   return join(agentsDir(runDirAbs, true), `${agentId}.jsonl`);
 }
 
 /**
  * `<runDir>/agents/<agentId>.stderr` — child's stderr plus any
  * malformed-bytes appended for forensics (PRD §5.5.2).
+ *
+ * `agentId` is validated via `assertSafeAgentId` (see
+ * `agentTranscriptPath`).
  */
 export function agentStderrPath(runDirAbs: string, agentId: string): string {
+  assertSafeAgentId(agentId);
   return join(agentsDir(runDirAbs, true), `${agentId}.stderr`);
 }
 

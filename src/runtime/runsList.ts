@@ -86,6 +86,11 @@ export interface RenderOpts {
    * rendered (slice 13 behavior).
    */
   readonly localRunIds?: ReadonlySet<string>;
+  /**
+   * Token totals keyed by runId (from PhaseRegistry). When present,
+   * renders a `tokens` column alongside duration.
+   */
+  readonly tokenTotals?: ReadonlyMap<string, number>;
 }
 
 const DEFAULT_MAX = 50;
@@ -95,6 +100,7 @@ const COL_WORKFLOW = 22;
 const COL_STATE = 11;
 const COL_REL = 11;
 const COL_DURATION = 11;
+const COL_TOKENS = 9;
 
 function pad(s: string, n: number): string {
   if (s.length >= n) return s.slice(0, Math.max(0, n - 1)) + "…";
@@ -160,6 +166,16 @@ export function fmtRelative(startedAt: string, nowMs: number): string {
 }
 
 /**
+ * Format a token count as a compact column value.
+ * `—` when no data, `X.Xk` when ≥ 1000, else `N`.
+ */
+function fmtTokensShort(n: number): string {
+  if (n < 1000) return `${n}`;
+  if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
+  return `${(n / 1_000_000).toFixed(1)}M`;
+}
+
+/**
  * Sort runs: active first (running, paused), then terminal in
  * reverse chronological. PRD §10.3 wireframe puts Active above Recent.
  */
@@ -204,6 +220,7 @@ export function renderRunsList(
     pad("state", COL_STATE),
     pad("started", COL_REL),
     pad("duration", COL_DURATION),
+    pad("tokens", COL_TOKENS),
     "approval",
   ];
   const header = headerCols.join(" ");
@@ -223,12 +240,15 @@ export function renderRunsList(
     const remoteBadge = isRemote ? " ［remote］" : "";
     const cursor =
       opts.cursor !== undefined && opts.cursor === idx ? "▸ " : "  ";
+    const rawTokens = opts.tokenTotals?.get(r.runId);
+    const tokCell = rawTokens !== undefined ? fmtTokensShort(rawTokens) : "—";
     const cells = [
       pad(shortId(r.runId), COL_RUN_ID),
       pad(r.workflowName, COL_WORKFLOW),
       pad(r.state, COL_STATE),
       pad(startedRel, COL_REL),
       pad(dur, COL_DURATION),
+      pad(tokCell, COL_TOKENS),
       approvalCell + remoteBadge,
     ];
     return {

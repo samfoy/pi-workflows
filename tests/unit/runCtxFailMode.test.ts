@@ -235,6 +235,49 @@ test("opts.schema: no output field when schema absent", async () => {
   }
 });
 
+// gap-fix: post-parse schema validation throws SchemaValidationError
+// on a shape mismatch (e.g. JSON parses but is missing a required field).
+test("opts.schema: shape mismatch throws SchemaValidationError", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "wf-schema-bad-"));
+  try {
+    // Agent returns valid JSON but the wrong shape: required `count` missing.
+    const dispatch = (opts: DispatcherOptions): Promise<AgentResult> =>
+      Promise.resolve({
+        ok: true,
+        agentId: opts.agentId,
+        text: '```json\n{"items":["x"]}\n```',
+        usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+        toolCalls: 0,
+        durationMs: 1,
+        transcriptPath: "",
+        exitCode: 0,
+      });
+    const { host } = await makeCtx(dir, dispatch);
+    const handleRes = host.agent("list", {
+      id: "lister",
+      schema: {
+        type: "object",
+        properties: {
+          items: { type: "array" },
+          count: { type: "integer" },
+        },
+        required: ["items", "count"],
+      },
+    });
+    assert.ok(handleRes.ok);
+    const results = await host.phase("work", [handleRes.value]);
+    assert.equal(results.ok, false);
+    if (!results.ok) {
+      // The phase rejection is an AggregateError wrapping the schema validation error.
+      const errMsg = JSON.stringify(results.error);
+      assert.match(errMsg, /SchemaValidationError|validation failed/);
+      assert.match(errMsg, /count/);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 // ─── budget.total enforcement ─────────────────────────────────────────────────
 
 test("tokenBudget: throws when budget exhausted before dispatch", async () => {

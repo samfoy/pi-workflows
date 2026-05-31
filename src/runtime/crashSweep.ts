@@ -33,6 +33,7 @@
  */
 
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
 import {
@@ -49,39 +50,108 @@ import type { ActiveRunsRegistry } from "./activeRuns.js";
 // ─── Liveness primitives ──────────────────────────────────────────────
 
 /**
- * Read `/proc/sys/kernel/random/boot_id` on Linux. Returns empty
- * string on macOS / containers / chroot / any error. The empty string
- * is a sentinel meaning "we don't know the boot id for this host" —
- * pair it with parentBootId="" to skip the bootId check.
+ * Parse the `sec = NNN` field from `sysctl kern.boottime` output on
+ * macOS/BSD. Output looks like:
+ *
+ *   { sec = 1748714712, usec = 123456 } Mon May 31 12:34:56 2025
+ *
+ * Returns `"darwin-<sec>"` so the value is namespaced and never
+ * collides with a Linux UUID-shaped boot_id. Empty string on parse
+ * failure (sentinel matches the Linux fallback semantics).
+ *
+ * Exported for unit tests — production callers should go through
+ * `currentBootId()` which caches the resolved value.
  */
-export function currentBootId(): string {
-  if (process.platform !== "linux") return "";
-  try {
-    if (existsSync("/proc/sys/kernel/random/boot_id")) {
-      return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+export function parseDarwinBootTime(output: string): string {
+  const m = /sec\s*=\s*(\d+)/.exec(output);
+  if (m && m[1]) return `darwin-${m[1]}`;
+  // Some sysctl variants print just the integer seconds with `-n`.
+  const trimmed = output.trim();
+  if (/^\d+$/.test(trimmed)) return `darwin-${trimmed}`;
+  return "";
+}
+
+/**
+ * Compute the host boot identifier. Cached at module load — boot id
+ * cannot change without rebooting the host (which kills this
+ * process), so caching is safe.
+ *
+ *   - Linux:  read `/proc/sys/kernel/random/boot_id` (UUID).
+ *   - macOS:  shell out to `sysctl -n kern.boottime` once and parse
+ *             the `sec=` field. Returns `darwin-<boot_unix_ts>`.
+ *   - Other:  empty string (sentinel: pair with parentBootId="" to
+ *             skip the bootId check).
+ */
+function computeBootIdOnce(): string {
+  if (process.platform === "linux") {
+    try {
+      if (existsSync("/proc/sys/kernel/random/boot_id")) {
+        return readFileSync("/proc/sys/kernel/random/boot_id", "utf8").trim();
+      }
+    } catch {
+      /* ignore */
     }
-  } catch {
-    /* ignore */
+    return "";
+  }
+  if (process.platform === "darwin") {
+    try {
+      const out = execFileSync("sysctl", ["-n", "kern.boottime"], {
+        encoding: "utf8",
+        timeout: 1000,
+        stdio: ["ignore", "pipe", "ignore"],
+      });
+      return parseDarwinBootTime(out);
+    } catch {
+      /* ignore — sysctl unavailable / sandboxed */
+    }
+    return "";
   }
   return "";
 }
 
-/** Read another process's snapshotted bootId (always empty on macOS). */
+let _cachedBootId: string | null = null;
+
+/**
+ * Host boot identifier (cached). Empty string is the documented
+ * "unknown" sentinel — pair it with a manifest's empty
+ * `parentBootId` to skip the bootId check entirely.
+ *
+ * On macOS this is `darwin-<sec>` from `sysctl kern.boottime`; the
+ * value changes after every reboot, so a manifest written by a
+ * previous boot is detectable as stale even though PIDs may have
+ * recycled into the same numeric range.
+ */
+export function currentBootId(): string {
+  if (_cachedBootId === null) _cachedBootId = computeBootIdOnce();
+  return _cachedBootId;
+}
+
+/** Test seam: drop the cache so the next call re-resolves. */
+export function _resetBootIdCacheForTests(): void {
+  _cachedBootId = null;
+}
+
+/** Read another process's snapshotted bootId. Linux-only on the
+ * source side historically; with the macOS sysctl path this now
+ * returns a real value on darwin too. */
 export function readBootId(): string {
   return currentBootId();
 }
 
 /**
  * Combined liveness predicate per PRD §5.8.2:
- *   - bootId mismatch → host rebooted → parent is dead
- *   - bootId match + PID exists → alive
- *   - bootId match + PID gone → dead
+ *   - bootId mismatch  → host rebooted → parent is dead
+ *   - bootId match + PID exists (or EPERM) → alive
+ *   - bootId match + PID gone (ESRCH)      → dead (PID-recycle gap
+ *                                              closed: even on
+ *                                              macOS, a live PID
+ *                                              from the *same* boot
+ *                                              can be a recycled
+ *                                              foreign process, but
+ *                                              ESRCH is unambiguous)
  *
- * If `parentBootId` is empty (macOS / container) we fall back to the
- * pid-only check. Documented limitation: on PID-recycle the sweep can
- * see a foreign live process and decline to sweep an actually-dead
- * parent. The dispatcher's `parentStartTime` field is the v2 fix; v1
- * accepts this footgun.
+ * If `parentBootId` is empty (legacy manifests pre-darwin-sysctl, or
+ * unknown platform) we fall back to the pid-only check.
  */
 export function isParentAlive(opts: {
   parentPid: number;
@@ -97,8 +167,10 @@ export function isParentAlive(opts: {
   ) {
     return false;
   }
-  // PID-existence check via signal=0 (POSIX). EPERM also implies
-  // alive (process exists; we just can't signal it).
+  // PID-existence check via signal=0 (POSIX).
+  //   - success            → process exists → alive
+  //   - EPERM              → process exists, we just can't signal it → alive
+  //   - ESRCH (or other)   → process gone → dead (treat as crashed)
   try {
     process.kill(opts.parentPid, 0);
     return true;

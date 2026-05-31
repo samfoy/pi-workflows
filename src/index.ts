@@ -31,6 +31,7 @@ import {
 } from "./runtime/bundledWorkflows.js";
 import {
   registerWorkflowCommands,
+  registerSingleWorkflowCommand,
   registerWorkflowsCommand,
 } from "./commands/workflowCmd.js";
 import { makeConfirmDialog } from "./runtime/approval.js";
@@ -38,10 +39,16 @@ import { sweepCrashedRuns } from "./runtime/crashSweep.js";
 import { bindRegistryToFeed } from "./runtime/overlay.js";
 import { createHotReloadWatcher } from "./runtime/hotReload.js";
 import { getActiveRuns } from "./runtime/activeRuns.js";
+import { createOtelExporter, type OtelExporterHandle, type TailRunLedgerHandle } from "./runtime/otelExporter.js";
 import { registerWriteWorkflowTool } from "./runtime/writeWorkflowTool.js";
 import { startWorkflowRun } from "./runManager.js";
 import { wireRunDelivery } from "./runtime/resultDelivery.js";
 import { activeIndexPath, projectWorkflowsDir, workflowsHome } from "./util/paths.js";
+import {
+  KEYWORD_NOTICE,
+  WORKFLOW_DIRECTIVE,
+  shouldArmKeywordTrigger,
+} from "./runtime/keywordTrigger.js";
 import type {
   ExtensionAPI,
   ExtensionContextLike,
@@ -149,17 +156,12 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
   if (!initialCfg.recursive) {
     pi.on("input", async (rawEvent, ctx) => {
       const event = rawEvent as { text: string; source: string };
-      if (event.source === "extension") return { action: "continue" };
-      if (event.text.trimStart().startsWith("/")) return { action: "continue" };
-      if (_keywordTriggerEnabled && /\bworkflow\b/i.test(event.text)) {
+      if (_keywordTriggerEnabled && shouldArmKeywordTrigger(event)) {
         _workflowKeywordPending = true;
         // Notify the user so they know workflow mode was triggered.
         // They can simply not include the word "workflow" to suppress it.
         try {
-          ctx.ui.notify(
-            "[pi-workflows] workflow keyword detected — Claude will write a workflow script for this task",
-            "info",
-          );
+          ctx.ui.notify(KEYWORD_NOTICE, "info");
         } catch { /* older pi builds without ui.notify — safe to ignore */ }
       }
       return { action: "continue" };
@@ -170,18 +172,8 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
       _workflowKeywordPending = false;
       const event = rawEvent as { systemPrompt?: string };
       // Append a strong directive to the system prompt for this turn only.
-      const directive = [
-        "",
-        "## WORKFLOW TRIGGER",
-        "The user's prompt contains the word \"workflow\". You MUST respond by",
-        "calling the write_workflow tool to create a workflow script for this",
-        "task rather than working through it turn-by-turn. Design the workflow",
-        "with ctx.phase() for parallel agent fleets, appropriate failMode, and",
-        "a clear export const meta header. Call write_workflow with runNow:true",
-        "to save and immediately start the run.",
-      ].join("\n");
       return {
-        systemPrompt: (event.systemPrompt ?? "") + directive,
+        systemPrompt: (event.systemPrompt ?? "") + WORKFLOW_DIRECTIVE,
       };
     });
   }
@@ -256,10 +248,62 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
   // shutdown handler can reference it.
   let hotReloadHandle: { dispose(): Promise<void> } | null = null;
 
+  // ZONE_OTEL: OTel trace exporter handle. Created lazily on first
+  // session_start when the env var is set; disposed in
+  // session_shutdown. Per-run tailers are stored in a map so we can
+  // dispose them in shutdown order even if the run never emitted a
+  // terminal transition (parent-crash path).
+  let otelHandle: OtelExporterHandle | null = null;
+  const otelTailers = new Map<string, TailRunLedgerHandle>();
+  let otelUnsubscribe: (() => void) | null = null;
+
   pi.on("session_start", async (_event, ctx) => {
     const cwd = (ctx as ExtensionContextLike).cwd ?? process.cwd();
     sessionCwd = cwd; // update for write_workflow tool
     _statusCtx = ctx as ExtensionContextLike; // for inline run-status footer
+
+    // ZONE_OTEL: Bring up the OpenTelemetry exporter once per session
+    // when an OTLP endpoint is configured. Strict no-op when unset.
+    if (otelHandle === null && initialCfg.otelTracesEndpoint !== null) {
+      try {
+        otelHandle = await createOtelExporter({
+          endpoint: initialCfg.otelTracesEndpoint,
+          log: (level, msg) => {
+            try {
+              ctx.ui.notify(msg, level === "warn" ? "warning" : "info");
+            } catch { /* ignore */ }
+          },
+        });
+        if (otelHandle.enabled) {
+          ctx.ui.notify(
+            `[pi-workflows] OpenTelemetry exporter active → ${initialCfg.otelTracesEndpoint}`,
+            "info",
+          );
+          // Subscribe to the active-runs registry so each new run gets
+          // its own ledger tailer. The subscriber is idempotent: it
+          // diffs against `otelTailers` so re-firing notifications
+          // (state changes) don't spawn duplicate tailers.
+          const reg = getActiveRuns();
+          otelUnsubscribe = reg.subscribe(() => {
+            for (const s of reg.listSummaries()) {
+              if (otelTailers.has(s.runId)) continue;
+              if (otelHandle === null) continue;
+              const tail = otelHandle.tailRun(s.runId);
+              if (tail !== null) {
+                otelTailers.set(s.runId, tail);
+                // Self-cleanup on done (terminal transition observed).
+                tail.done
+                  .then(() => { otelTailers.delete(s.runId); })
+                  .catch(() => { otelTailers.delete(s.runId); });
+              }
+            }
+          });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        ctx.ui.notify(`[pi-workflows] OTel exporter init failed: ${msg}`, "warning");
+      }
+    }
 
     // Slice 11: crash-sweep BEFORE workflow discovery so any
     // sweep-flipped runs are visible to a same-tick `/workflows list`.
@@ -391,6 +435,13 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
         pi,
         activeRuns: getActiveRuns(),
         recursive,
+        // Slice 16 fix: when a new workflow file appears at runtime,
+        // register it via the same handler `registerWorkflowCommands`
+        // builds at discovery time — not the description-only stub
+        // the watcher used to install. Closes the gap where freshly
+        // added workflows could be discovered (`/workflows` listed
+        // them) but their `/<name>` slash-command was a no-op.
+        registerCommand: (file) => registerSingleWorkflowCommand(pi, file),
         log: (level, msg) => {
           if (level === "warn" || level === "error") {
             ctx.ui.notify(`[pi-workflows] ${msg}`, level === "error" ? "error" : "warning");
@@ -431,6 +482,25 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     if (hotReloadHandle !== null) {
       hotReloadHandle.dispose().catch(() => { /* ignore shutdown errors */ });
       hotReloadHandle = null;
+    }
+    // ZONE_OTEL: dispose per-run tailers + flush + shutdown the
+    // provider so any buffered spans land before the host exits.
+    if (otelUnsubscribe !== null) {
+      otelUnsubscribe();
+      otelUnsubscribe = null;
+    }
+    if (otelTailers.size > 0) {
+      const handles = Array.from(otelTailers.values());
+      otelTailers.clear();
+      void Promise.allSettled(handles.map((h) => h.dispose()));
+    }
+    if (otelHandle !== null) {
+      const h = otelHandle;
+      otelHandle = null;
+      void h.flush()
+        .catch(() => {})
+        .then(() => h.shutdown())
+        .catch(() => {});
     }
     try {
       ctx.ui.notify("[pi-workflows] session shutdown", "info");
@@ -473,3 +543,12 @@ function isConductorInstalled(cwd: string): boolean {
 // import it directly without digging into runtime internals.
 export { WorkflowClient } from "./client.js";
 export type { WorkflowClientOptions, ActiveRunsIndex, RunStateSummary } from "./client.js";
+
+// ZONE_TIMETRAVEL: time-travel / fork-from-checkpoint API.
+export {
+  forkFromCheckpoint,
+  ForkRunNotFoundError,
+  ForkPhaseNotFoundError,
+  FORK_OVERRIDES_KEY,
+} from "./runtime/forkRun.js";
+export type { ForkFromCheckpointOptions } from "./runtime/forkRun.js";
