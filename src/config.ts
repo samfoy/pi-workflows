@@ -27,6 +27,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import { resolveOtelEndpoint } from "./runtime/otelExporter.js";
+import { resolveOtelMetricsEndpoint } from "./runtime/otelMetricsExporter.js";
 import type { Config } from "./types/internal.js";
 
 const ENV_DISABLE = "PI_DISABLE_WORKFLOWS";
@@ -53,6 +54,7 @@ export function loadConfig(opts: LoadConfigOpts = {}): Config {
       disabledBy: "env",
       autoResumeCrashedWorkflows: false,
       otelTracesEndpoint: null,
+      otelMetricsEndpoint: null,
     };
   }
 
@@ -72,6 +74,7 @@ export function loadConfig(opts: LoadConfigOpts = {}): Config {
       disabledBy: "setting",
       autoResumeCrashedWorkflows: false,
       otelTracesEndpoint: null,
+      otelMetricsEndpoint: null,
     };
   }
 
@@ -86,6 +89,7 @@ export function loadConfig(opts: LoadConfigOpts = {}): Config {
     disabledBy: null,
     autoResumeCrashedWorkflows,
     otelTracesEndpoint: resolveOtelEndpoint(env),
+    otelMetricsEndpoint: resolveOtelMetricsEndpoint(env),
   };
 }
 

@@ -88,6 +88,13 @@ export interface Config {
    * `null`, the exporter is a strict no-op — no SDK is loaded.
    */
   readonly otelTracesEndpoint: string | null;
+  /**
+   * OTLP/HTTP endpoint for the OpenTelemetry metrics exporter
+   * (ZONE_OTEL). Resolved from `OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`
+   * (preferred) or the catch-all `OTEL_EXPORTER_OTLP_ENDPOINT`. When
+   * `null`, the metrics exporter is a strict no-op.
+   */
+  readonly otelMetricsEndpoint: string | null;
 }
 
 /**

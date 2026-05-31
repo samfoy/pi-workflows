@@ -40,6 +40,11 @@ import { bindRegistryToFeed } from "./runtime/overlay.js";
 import { createHotReloadWatcher } from "./runtime/hotReload.js";
 import { getActiveRuns } from "./runtime/activeRuns.js";
 import { createOtelExporter, type OtelExporterHandle, type TailRunLedgerHandle } from "./runtime/otelExporter.js";
+import {
+  createOtelMetricsExporter,
+  type OtelMetricsExporterHandle,
+  type TailRunMetricsHandle,
+} from "./runtime/otelMetricsExporter.js";
 import { registerWriteWorkflowTool } from "./runtime/writeWorkflowTool.js";
 import { startWorkflowRun } from "./runManager.js";
 import { wireRunDelivery } from "./runtime/resultDelivery.js";
@@ -257,6 +262,13 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
   const otelTailers = new Map<string, TailRunLedgerHandle>();
   let otelUnsubscribe: (() => void) | null = null;
 
+  // ZONE_OTEL: parallel metrics exporter handle. Brought up next to
+  // the trace exporter so traces+metrics share a session lifetime
+  // but are wired to independent endpoints + SDKs.
+  let otelMetricsHandle: OtelMetricsExporterHandle | null = null;
+  const otelMetricsTailers = new Map<string, TailRunMetricsHandle>();
+  let otelMetricsUnsubscribe: (() => void) | null = null;
+
   pi.on("session_start", async (_event, ctx) => {
     const cwd = (ctx as ExtensionContextLike).cwd ?? process.cwd();
     sessionCwd = cwd; // update for write_workflow tool
@@ -302,6 +314,45 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         ctx.ui.notify(`[pi-workflows] OTel exporter init failed: ${msg}`, "warning");
+      }
+    }
+
+    // ZONE_OTEL: Bring up the OpenTelemetry **metrics** exporter
+    // (counters + Gen-AI histograms). Independent endpoint resolution
+    // — operators can enable traces, metrics, both, or neither.
+    if (otelMetricsHandle === null && initialCfg.otelMetricsEndpoint !== null) {
+      try {
+        otelMetricsHandle = await createOtelMetricsExporter({
+          endpoint: initialCfg.otelMetricsEndpoint,
+          log: (level, msg) => {
+            try {
+              ctx.ui.notify(msg, level === "warn" ? "warning" : "info");
+            } catch { /* ignore */ }
+          },
+        });
+        if (otelMetricsHandle.enabled) {
+          ctx.ui.notify(
+            `[pi-workflows] OpenTelemetry metrics exporter active → ${initialCfg.otelMetricsEndpoint}`,
+            "info",
+          );
+          const reg = getActiveRuns();
+          otelMetricsUnsubscribe = reg.subscribe(() => {
+            for (const s of reg.listSummaries()) {
+              if (otelMetricsTailers.has(s.runId)) continue;
+              if (otelMetricsHandle === null) continue;
+              const tail = otelMetricsHandle.tailRun(s.runId);
+              if (tail !== null) {
+                otelMetricsTailers.set(s.runId, tail);
+                tail.done
+                  .then(() => { otelMetricsTailers.delete(s.runId); })
+                  .catch(() => { otelMetricsTailers.delete(s.runId); });
+              }
+            }
+          });
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        ctx.ui.notify(`[pi-workflows] OTel metrics exporter init failed: ${msg}`, "warning");
       }
     }
 
@@ -497,6 +548,24 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     if (otelHandle !== null) {
       const h = otelHandle;
       otelHandle = null;
+      void h.flush()
+        .catch(() => {})
+        .then(() => h.shutdown())
+        .catch(() => {});
+    }
+    // ZONE_OTEL: same teardown for the metrics exporter.
+    if (otelMetricsUnsubscribe !== null) {
+      otelMetricsUnsubscribe();
+      otelMetricsUnsubscribe = null;
+    }
+    if (otelMetricsTailers.size > 0) {
+      const handles = Array.from(otelMetricsTailers.values());
+      otelMetricsTailers.clear();
+      void Promise.allSettled(handles.map((h) => h.dispose()));
+    }
+    if (otelMetricsHandle !== null) {
+      const h = otelMetricsHandle;
+      otelMetricsHandle = null;
       void h.flush()
         .catch(() => {})
         .then(() => h.shutdown())

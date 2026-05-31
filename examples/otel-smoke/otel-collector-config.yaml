@@ -1,0 +1,48 @@
+# pi-workflows OTel smoke-test collector config.
+#
+# Receives OTLP/HTTP from pi-workflows, splits the signal:
+#   - traces  → Jaeger via OTLP exporter
+#   - metrics → Prometheus exposition (scraped by the prometheus
+#               service in docker-compose.yml)
+
+receivers:
+  otlp:
+    protocols:
+      http:
+        endpoint: 0.0.0.0:4318
+      grpc:
+        endpoint: 0.0.0.0:4317
+
+processors:
+  batch:
+    # Small timeouts to keep the smoke test responsive.
+    timeout: 1s
+    send_batch_size: 256
+
+exporters:
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    # Resource attributes lift onto Prometheus labels so we keep
+    # service.name, deployment.environment, etc. on every series.
+    resource_to_telemetry_conversion:
+      enabled: true
+  debug:
+    verbosity: basic
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [otlp/jaeger]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [prometheus]
+  telemetry:
+    logs:
+      level: info

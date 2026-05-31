@@ -2,27 +2,77 @@
 #
 #   docker compose up -d
 #
-# Then export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces
-# and run a workflow. Visit http://localhost:16686/ for the Jaeger UI.
+# Then export OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318
+# (or the signal-specific *_TRACES_ENDPOINT / *_METRICS_ENDPOINT).
+# Run a workflow.
+#
+#   - Traces:  http://localhost:16686/      (Jaeger UI)
+#   - Metrics: http://localhost:9090/        (Prometheus)
+#              http://localhost:3000/        (Grafana, admin/admin)
 #
 # Tear down with `docker compose down`.
+#
+# Architecture:
+#   pi-workflows ──OTLP/HTTP──▶ otel-collector ──┬── traces ▶ Jaeger
+#                                                 └── /metrics ▶ Prometheus ▶ Grafana
+#
+# A single OpenTelemetry Collector receives both signals and fans out
+# to Jaeger (traces) and Prometheus (metrics). This is closer to a
+# realistic prod stack than running Jaeger all-in-one and gives us a
+# real metrics scrape pipeline.
 
 services:
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.115.0
+    container_name: pi-workflows-otel-collector
+    command: ["--config=/etc/otelcol/config.yaml"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol/config.yaml:ro
+    ports:
+      - "4318:4318"  # OTLP/HTTP — the endpoint pi-workflows posts to.
+      - "4317:4317"  # OTLP/gRPC — pi-workflows ships HTTP today, but expose for parity.
+      - "8889:8889"  # Prometheus exposition (scraped by Prometheus below).
+    depends_on:
+      jaeger:
+        condition: service_healthy
+
   jaeger:
     image: jaegertracing/all-in-one:1.62
     container_name: pi-workflows-jaeger
     environment:
-      # All-in-one ships an OTLP receiver that's off by default.
       COLLECTOR_OTLP_ENABLED: "true"
     ports:
-      # OTLP/HTTP — the endpoint pi-workflows posts to.
-      - "4318:4318"
-      # OTLP/gRPC — pi-workflows ships HTTP today, but expose for parity.
-      - "4317:4317"
-      # Jaeger UI.
-      - "16686:16686"
+      - "16686:16686"  # Jaeger UI.
     healthcheck:
       test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:14269/"]
       interval: 5s
       timeout: 3s
       retries: 12
+
+  prometheus:
+    image: prom/prometheus:v2.55.1
+    container_name: pi-workflows-prometheus
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=1h
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+    ports:
+      - "9090:9090"
+    depends_on:
+      - otel-collector
+
+  grafana:
+    image: grafana/grafana-oss:11.3.0
+    container_name: pi-workflows-grafana
+    environment:
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+    volumes:
+      - ./grafana-datasources.yaml:/etc/grafana/provisioning/datasources/datasources.yaml:ro
+    ports:
+      - "3000:3000"
+    depends_on:
+      - prometheus
