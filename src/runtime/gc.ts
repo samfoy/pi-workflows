@@ -31,7 +31,8 @@ import { join } from "node:path";
 import { LedgerReader, TERMINAL_STATES } from "./ledger.js";
 import { runsHome } from "../util/paths.js";
 import { resumeLockPath, readResumeLock, isParentAlive } from "./runLock.js";
-import type { RunOutcome, RunState } from "../types/internal.js";
+import { pruneAgentWorktree, type ExecFileLike } from "./worktree.js";
+import type { RunOutcome, RunState, RunManifest } from "../types/internal.js";
 
 export interface GcCandidate {
   readonly runId: string;
@@ -75,6 +76,22 @@ export interface GcOptions {
   readonly apply?: boolean;
   /** Test seam — override resolveLedgerPath. */
   readonly resolveLedgerPath?: (runId: string) => string;
+  /**
+   * ZONE_WORKTREE follow-up #1 — when true, `git worktree remove` is
+   * invoked on each entry in `manifest.agentWorktrees` BEFORE the
+   * runDir is deleted (apply mode). Skips dirty worktrees with a warn.
+   * No effect when `apply` is false. Default true.
+   */
+  readonly pruneWorktrees?: boolean;
+  /**
+   * ZONE_WORKTREE follow-up #1 — when true, dirty worktrees are
+   * removed via `git worktree remove --force`. Use this when the
+   * operator has confirmed the diffs are no longer needed (e.g.
+   * scripted batch GC). Default false.
+   */
+  readonly forceRemoveDirtyWorktrees?: boolean;
+  /** Test seam: replace execFile for git invocations during prune. */
+  readonly _execFile?: ExecFileLike;
   /** Log sink. */
   readonly log?: (
     level: "info" | "warn" | "error",
@@ -235,7 +252,54 @@ export async function runGc(opts: GcOptions = {}): Promise<GcResult> {
 
   // Optionally delete candidates.
   if (apply) {
+    const pruneWorktrees = opts.pruneWorktrees !== false; // default ON
     for (const c of result.candidates) {
+      // ZONE_WORKTREE follow-up #1: prune any per-agent worktrees
+      // recorded in this run's manifest BEFORE rm-rf'ing the runDir.
+      // Otherwise `git worktree list` keeps stale entries pointing into
+      // a non-existent dir until the next `git worktree prune`.
+      if (pruneWorktrees) {
+        const manifest = readManifestForGc(c.runDir);
+        const agentTrees = manifest?.agentWorktrees ?? null;
+        if (agentTrees && manifest?.cwd) {
+          for (const [agentId, dir] of Object.entries(agentTrees)) {
+            if (typeof dir !== "string" || dir.length === 0) continue;
+            try {
+              const r = await pruneAgentWorktree({
+                worktreePath: dir,
+                sourceCwd: manifest.cwd,
+                ...(opts.forceRemoveDirtyWorktrees ? { force: true } : {}),
+                ...(opts._execFile ? { _execFile: opts._execFile } : {}),
+              });
+              if (r.removed) {
+                log?.(
+                  "info",
+                  `gc: pruned worktree ${agentId} (${c.runId})`,
+                  { dir, reason: r.reason },
+                );
+              } else if (r.skippedDirty) {
+                log?.(
+                  "warn",
+                  `gc: skipped dirty worktree ${agentId} (${c.runId}); pass forceRemoveDirtyWorktrees:true to override`,
+                  { dir, reason: r.reason },
+                );
+              } else {
+                log?.(
+                  "info",
+                  `gc: worktree ${agentId} (${c.runId}) noop`,
+                  { dir, reason: r.reason },
+                );
+              }
+            } catch (err) {
+              log?.(
+                "warn",
+                `gc: prune worktree ${agentId} (${c.runId}) failed: ${err instanceof Error ? err.message : String(err)}`,
+                { dir },
+              );
+            }
+          }
+        }
+      }
       try {
         rmSync(c.runDir, { recursive: true, force: true });
         result.deleted.push(c.runId);
@@ -250,6 +314,31 @@ export async function runGc(opts: GcOptions = {}): Promise<GcResult> {
   }
 
   return result;
+}
+
+/**
+ * Read just the worktree-relevant fields out of `<runDir>/manifest.json`
+ * for GC's prune step. Returns `null` if the file is absent or unreadable
+ * (the caller treats both as "no worktrees to prune").
+ */
+function readManifestForGc(
+  runDirAbs: string,
+): (Pick<RunManifest, "cwd"> & { agentWorktrees?: Record<string, string> }) | null {
+  const path = join(runDirAbs, "manifest.json");
+  if (!existsSync(path)) return null;
+  try {
+    const raw = readFileSync(path, "utf-8");
+    if (raw.trim().length === 0) return null;
+    const parsed = JSON.parse(raw) as unknown;
+    if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+      return parsed as Pick<RunManifest, "cwd"> & {
+        agentWorktrees?: Record<string, string>;
+      };
+    }
+  } catch {
+    /* ignore */
+  }
+  return null;
 }
 
 async function scanOne(args: {

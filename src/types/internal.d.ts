@@ -707,6 +707,26 @@ export interface RunCtxHost {
       ratio: number;
     }>
   >;
+  /**
+   * ZONE_WORKTREE follow-up #2 — promote agent worktree edits to
+   * the parent repo. Strategy `'apply'` reads the diff snapshot
+   * (`<runDir>/worktrees/<agentId>.diff`) and runs `git apply`
+   * against the parent CWD. Strategy `'rebase'` runs
+   * `git rebase --onto <target>` inside the worktree. Returns
+   * `{ strategy, applied, files }`. Throws `PromoteError`
+   * (delivered as `{ok:false}`) on any failure including missing
+   * diff, conflicts, or non-existent worktree.
+   */
+  promote?(
+    agentId: unknown,
+    opts?: unknown,
+  ): Promise<
+    RunCtxBridgeResult<{
+      strategy: "apply" | "rebase";
+      applied: boolean;
+      files: readonly string[];
+    }>
+  >;
 }
 
 /**

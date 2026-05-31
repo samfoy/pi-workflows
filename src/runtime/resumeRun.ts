@@ -66,6 +66,7 @@ import { acquireResumeLock, ResumeLockedError } from "./runLock.js";
 import { sha256 } from "../util/hash.js";
 import { runDir as runDirFor } from "../util/paths.js";
 import { crossCheckAgentMemoryDirs } from "./agentMemory.js";
+import { crossCheckAgentWorktrees } from "./worktree.js";
 import { log as ledgerLog } from "./ledger.js";
 import {
   Run,
@@ -413,6 +414,44 @@ export async function resumeRun(
           ledger,
           "warn",
           `agent-memory: dir for "${m.name}" moved between runs (recorded: ${m.recordedDir}; live: ${liveSummary})`,
+        );
+      }
+    }
+
+    // ZONE_WORKTREE follow-up #4 — resume cross-check.
+    // The manifest may carry `agentWorktrees` from the original run.
+    // If a worktree was deleted out-of-band (operator ran
+    // `git worktree remove` manually, or `rm -rf`'d the dir) the
+    // resumed run will spawn against a path that's gone or whose
+    // `.git/worktrees/` registration is stale. Surface as a `log: warn`;
+    // resume continues (the dispatcher will create fresh worktrees
+    // when the post-resume agents run).
+    const recordedWorktrees = (manifest as { agentWorktrees?: unknown })
+      .agentWorktrees;
+    if (
+      recordedWorktrees !== undefined &&
+      recordedWorktrees !== null &&
+      typeof recordedWorktrees === "object" &&
+      !Array.isArray(recordedWorktrees)
+    ) {
+      try {
+        const wtMismatches = await crossCheckAgentWorktrees({
+          recorded: recordedWorktrees as Record<string, string>,
+          sourceCwd: cwd,
+        });
+        for (const m of wtMismatches) {
+          await ledgerLog(
+            ledger,
+            "warn",
+            `agent-worktree: "${m.agentId}" mismatch (${m.reason}): recorded ${m.recordedDir}`,
+          );
+        }
+      } catch (err) {
+        // Cross-check is advisory; never let a git failure abort resume.
+        await ledgerLog(
+          ledger,
+          "warn",
+          `agent-worktree: cross-check skipped: ${err instanceof Error ? err.message : String(err)}`,
         );
       }
     }

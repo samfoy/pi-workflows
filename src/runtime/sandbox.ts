@@ -107,6 +107,17 @@ interface RunCtxHostInternal {
   gate(message: unknown, opts?: unknown): Promise<RunCtxBridgeResult<boolean>>;
   /** ZONE_HITL: mid-phase pause-and-route primitive. */
   interrupt(opts: unknown): Promise<RunCtxBridgeResult<unknown>>;
+  /** ZONE_WORKTREE follow-up #2 — promote agent worktree edits to parent. */
+  promote?(
+    agentId: unknown,
+    opts?: unknown,
+  ): Promise<
+    RunCtxBridgeResult<{
+      strategy: "apply" | "rebase";
+      applied: boolean;
+      files: readonly string[];
+    }>
+  >;
   memo_check(
     key: string,
     opts?: unknown,
@@ -1491,6 +1502,8 @@ function buildInitScript(nonce: string): string {
     "      append:  wrapHostAsync(__runCtxHost.memory_append),",
     "      compact: wrapHostAsync(__runCtxHost.memory_compact),",
     "    });",
+    "    // ZONE_WORKTREE follow-up #2: ctx.promote(agentId, opts?).",
+    "    __base.promote     = wrapHostAsync(__runCtxHost.promote);",,
     "  } else {",
     "    __base.progress   = function() { throw new Error('ctx.progress: no runtime (slice-2 stub)'); };",
     "    __base.checkpoint = function() { throw new Error('ctx.checkpoint: no runtime (slice-2 stub)'); };",
@@ -1500,6 +1513,7 @@ function buildInitScript(nonce: string): string {
     "      append:  function() { throw new Error('ctx.memory.append: no runtime (slice-2 stub)'); },",
     "      compact: function() { throw new Error('ctx.memory.compact: no runtime (slice-2 stub)'); },",
     "    });",
+    "    __base.promote    = function() { throw new Error('ctx.promote: no runtime (slice-2 stub)'); };",,
     "  }",
     "  const ctx = Object.freeze(__base);",
     "  __ctxRef.current = ctx;",

@@ -71,6 +71,7 @@ import {
   createWorktreeForAgent,
   emitWorktreeDiff,
   parseIsolation,
+  promoteAgentWorktree,
   resolveWorktreeDiffPath,
 } from "./worktree.js";
 
@@ -1669,6 +1670,70 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     }
   }
 
+  // ─── ctx.promote (ZONE_WORKTREE follow-up #2) ──────────────────
+
+  async function promote(
+    agentId: unknown,
+    promoteOpts?: unknown,
+  ): Promise<
+    RunCtxBridgeResult<{
+      strategy: "apply" | "rebase";
+      applied: boolean;
+      files: readonly string[];
+    }>
+  > {
+    try {
+      if (typeof agentId !== "string" || agentId.length === 0) {
+        throw new TypeError(
+          `ctx.promote: agentId must be a non-empty string (got ${typeof agentId})`,
+        );
+      }
+      // Tolerate undefined/null — default opts apply with strategy:'apply'.
+      let parsed: { strategy?: "apply" | "rebase"; target?: string } = {};
+      if (promoteOpts !== undefined && promoteOpts !== null) {
+        if (typeof promoteOpts !== "object" || Array.isArray(promoteOpts)) {
+          throw new TypeError(
+            `ctx.promote: opts must be an object (got ${typeof promoteOpts})`,
+          );
+        }
+        const o = promoteOpts as Record<string, unknown>;
+        if (o.strategy !== undefined) {
+          if (o.strategy !== "apply" && o.strategy !== "rebase") {
+            throw new TypeError(
+              `ctx.promote: opts.strategy must be 'apply' | 'rebase' (got ${JSON.stringify(o.strategy)})`,
+            );
+          }
+          parsed.strategy = o.strategy;
+        }
+        if (o.target !== undefined) {
+          if (typeof o.target !== "string" || o.target.length === 0) {
+            throw new TypeError(
+              `ctx.promote: opts.target must be a non-empty string (got ${typeof o.target})`,
+            );
+          }
+          parsed.target = o.target;
+        }
+      }
+      const result = await promoteAgentWorktree({
+        runDirAbs: opts.runDirAbs,
+        agentId,
+        sourceCwd: opts.cwd,
+        opts: parsed,
+      });
+      void opts.ledger
+        .append({
+          type: "log",
+          at: nowIso(),
+          level: "info",
+          message: `agent-worktree: promoted "${agentId}" (${result.strategy}, applied=${result.applied}, files=${result.files.length})`,
+        })
+        .catch(() => undefined);
+      return { ok: true, value: result };
+    } catch (e) {
+      return { ok: false, error: captureError(e) };
+    }
+  }
+
   // ─── ctx.checkpoint (Improvement 6) ──────────────────────────────
   async function checkpointFn(
     label: unknown,
@@ -1875,6 +1940,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     memory_read: memoryRead,
     memory_append: memoryAppend,
     memory_compact: memoryCompact,
+    promote,
   };
   return {
     host,

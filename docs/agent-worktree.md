@@ -1,7 +1,9 @@
 # Per-agent git-worktree isolation (ZONE_WORKTREE)
 
 Status: **shipped 2026-05-31** — create + cwd-rewrite + diff-on-success
-+ manifest record. Auto-prune and rebase deferred (see follow-ups).
++ manifest record + auto-prune (GC) + `ctx.promote(agentId)` +
+resume cross-check. Submodule/LFS + named-branch flag still deferred
+(see follow-ups).
 
 ## Surface
 
@@ -111,40 +113,63 @@ enter the key.
 - Error path: `emitWorktreeDiff` failure leaves the worktree dir
   and the agent's edits intact for inspection.
 
-## Follow-ups (deferred per task scoping)
+## Follow-ups
 
-These are tracked here rather than as bugs because the shipped slice
-covers create + cwd-rewrite + diff-on-success + manifest record, which
-is the load-bearing portion. Prune/rebase/promotion are workflow-
-ergonomics improvements on top.
+Shipped in the 2026-05-31 closure pass:
 
-1. **Auto-prune on run completion.** Today the worktree dir under
-   `<runDir>/worktrees/<agentId>/` is left in place forever. The
-   GC module already understands runDir lifetimes — extend it to
-   call `git worktree remove <path>` for each entry in
-   `agentWorktrees` before deleting the run dir, and surface the
-   reclaimed disk in the dashboard. Skip remove on a worktree that
-   has uncommitted edits unless the operator passes a force flag.
-2. **Rebase / fast-forward on convergence.** A common workflow is
-   "fan out N agents with isolation, then converge on the parent
-   branch." Today the operator has to `git worktree list`,
-   `git diff <wt>`, then manually merge or apply. A small helper
-   `ctx.promote(agentId, { strategy: 'rebase' | 'apply' })` would
-   close the loop. The diff file already produced is consumable
-   by `git apply` directly (we emit `--no-color` for that exact
-   reason).
-3. **Worktree-aware caching.** Cache hits skip dispatch entirely
-   today, including the worktree create. That's correct for
-   semantic cache hits but means an operator who expected the
-   worktree to exist (e.g. for forensics) gets surprised. Either
-   document the interaction explicitly in `runtime-api.md` or add
-   a `forceWorktree` opt that mints a worktree even on cache hit.
-4. **Resume cross-check.** Crash sweep should confirm
-   `manifest.agentWorktrees[id]` still exists on disk and is still
-   a registered worktree (`git worktree list --porcelain | grep
-   <path>`); divergence (operator deleted the worktree by hand,
-   parent crash + restore from backup) should emit a `log` warn
-   so resume doesn't silently dispatch into a stale path.
+1. ✅ **Auto-prune on run completion** — `runGc({ apply: true })`
+   now invokes `git worktree remove <path>` for each entry in
+   `manifest.agentWorktrees` BEFORE rm-rf'ing the runDir. Dirty
+   worktrees (`git status --porcelain` non-empty) are skipped with
+   a warn-log; `forceRemoveDirtyWorktrees: true` overrides.
+   `pruneWorktrees: false` disables the prune step entirely.
+   Implementation: `pruneAgentWorktree()` in `src/runtime/worktree.ts`,
+   wired through `src/runtime/gc.ts`. Tests in
+   `tests/unit/gcWorktree.test.ts` (5 cases).
+2. ✅ **`ctx.promote(agentId, opts)`** — promotes an agent's
+   worktree edits back into the parent repo.
+   - `opts.strategy = 'apply'` (default): reads
+     `<runDir>/worktrees/<agentId>.diff` and runs `git apply`
+     against the parent CWD. Empty diff is a no-op success.
+     Conflicts surface as `PromoteError` with the offending file
+     list extracted from git stderr.
+   - `opts.strategy = 'rebase'` with optional `opts.target`
+     (default `'HEAD'`) runs `git rebase --onto <target>` inside
+     the worktree. Lets the operator handle conflicts directly
+     in the worktree (git leaves it in a rebase-in-progress
+     state). On non-zero exit the rebase failure is wrapped as
+     `PromoteError`.
+   - Returns `{ strategy, applied, files }` where `files` is
+     parsed from the diff (apply) or `git diff --name-only`
+     (rebase).
+   Implementation: `promoteAgentWorktree()` in
+   `src/runtime/worktree.ts`, host bridge in
+   `src/runtime/runCtx.ts::promote`. Tests in
+   `tests/unit/worktreePromote.test.ts` (15 cases including a
+   real-git fixture diff applied to a tmp repo).
+3. **Worktree-aware caching.** _(still deferred)_ Cache hits skip
+   dispatch entirely today, including the worktree create. That's
+   correct for semantic cache hits but means an operator who
+   expected the worktree to exist (e.g. for forensics) gets
+   surprised. Either document the interaction explicitly in
+   `runtime-api.md` or add a `forceWorktree` opt that mints a
+   worktree even on cache hit.
+4. ✅ **Resume cross-check.** `resumeRun` now invokes
+   `crossCheckAgentWorktrees(...)` after appending the resume
+   ledger entry. For each `manifest.agentWorktrees[id]`, it
+   verifies the path still exists on disk AND that
+   `git worktree list --porcelain` includes it. Divergences
+   surface as `log: warn` ledger entries (`agent-worktree:
+   "<id>" mismatch (missing-on-disk|not-registered): recorded
+   <path>`). Resume continues regardless — the warning is
+   advisory; the dispatcher will create fresh worktrees when
+   post-resume agents run. Implementation in
+   `src/runtime/worktree.ts::crossCheckAgentWorktrees`,
+   wired into `src/runtime/resumeRun.ts`. Tests in
+   `tests/unit/worktreeResumeCheck.test.ts` (7 cases).
+
+Still deferred:
+
 5. **Submodules + LFS.** `git worktree add` does the right thing
    for plain repos but submodules and LFS-tracked content require
    additional plumbing. Today an agent inside a worktree of an
@@ -163,13 +188,20 @@ ergonomics improvements on top.
 ## Files touched in this slice
 
 - `src/runtime/worktree.ts` — new module (parse, validate, create,
-  diff, error types).
+  diff, error types). 2026-05-31 closure adds: `pruneAgentWorktree`,
+  `promoteAgentWorktree`, `crossCheckAgentWorktrees`, `parseDiffFiles`,
+  `extractGitApplyConflictFiles`, `PromoteError`.
+- `src/runtime/gc.ts` — worktree prune wired into
+  `runGc({apply:true})` before runDir delete.
+- `src/runtime/resumeRun.ts` — cross-check + warn-log on resume.
+- `src/runtime/runCtx.ts` — `ctx.promote` host implementation +
+  pre-dispatch worktree resolution.
+- `src/runtime/sandbox.ts` — `ctx.promote` bridge wiring.
 - `src/runtime/manifestWriter.ts` — `recordAgentWorktreePath`
   helper, reuses the existing per-runDir write queue.
-- `src/runtime/runCtx.ts` — pre-dispatch worktree resolution,
-  cwd-rewrite, post-success diff emission. Mirrors the ZONE_MEMORY
-  wiring exactly so the two features behave consistently.
 - `src/types/internal.d.ts` — `agentWorktrees` field on
-  `RunManifest`.
-- `tests/unit/worktree.test.ts` — 26 tests covering everything
-  above.
+  `RunManifest`; `RunCtxHost.promote?` method.
+- `tests/unit/worktree.test.ts` — 26 base tests.
+- `tests/unit/gcWorktree.test.ts` — 5 prune tests.
+- `tests/unit/worktreePromote.test.ts` — 15 promote tests.
+- `tests/unit/worktreeResumeCheck.test.ts` — 7 cross-check tests.
