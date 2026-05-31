@@ -40,6 +40,7 @@ import { createHotReloadWatcher } from "./runtime/hotReload.js";
 import { getActiveRuns } from "./runtime/activeRuns.js";
 import { registerWriteWorkflowTool } from "./runtime/writeWorkflowTool.js";
 import { startWorkflowRun } from "./runManager.js";
+import { wireRunDelivery } from "./runtime/resultDelivery.js";
 import { activeIndexPath, projectWorkflowsDir, workflowsHome } from "./util/paths.js";
 import type {
   ExtensionAPI,
@@ -109,12 +110,17 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
       //
       // If startRun is ever called without prior user confirmation,
       // wire a real approval dialog here instead of bypassApproval.
-      await startWorkflowRun(workflow, input, {
+      const run = await startWorkflowRun(workflow, input, {
         cwd: sessionCwd,
         preApproved: true,
         activeRuns: getActiveRuns(),
         enableGlobalCache: true,
       });
+      // Without this wiring the run completes silently — no result
+      // card, no `pi.sendUserMessage`, so the conversation never
+      // resumes after the workflow finishes. The slash-command path
+      // in `commands/workflowCmd.ts` does the same thing.
+      void wireRunDelivery(pi, run);
     },
   });
 
@@ -129,18 +135,23 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
   // request cycle. Because pi calls these two handlers sequentially for
   // a single user turn, no race is possible.
   //
+  // `_keywordTriggerEnabled` persists across prompts and is toggled via
+  // `/workflows keyword [on|off]`. Alt+W suppresses just the pending
+  // trigger for the current prompt without changing the setting.
+  //
   // Skipped when:
   //   - source is "extension" (prevents loops when pi sends injected msgs)
   //   - the text itself is a /command (already handled by command routing)
   //   - recursive mode (nested pi sessions should never auto-write workflows)
   let _workflowKeywordPending = false;
+  let _keywordTriggerEnabled = true; // default: on
 
   if (!initialCfg.recursive) {
     pi.on("input", async (rawEvent, ctx) => {
       const event = rawEvent as { text: string; source: string };
       if (event.source === "extension") return { action: "continue" };
       if (event.text.trimStart().startsWith("/")) return { action: "continue" };
-      if (/\bworkflow\b/i.test(event.text)) {
+      if (_keywordTriggerEnabled && /\bworkflow\b/i.test(event.text)) {
         _workflowKeywordPending = true;
         // Notify the user so they know workflow mode was triggered.
         // They can simply not include the word "workflow" to suppress it.
@@ -175,6 +186,67 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     });
   }
 
+  // ── Alt+W — suppress workflow keyword trigger for next prompt ────────
+  // Mirrors CC's Alt+W behaviour: if the user typed "workflow" in their
+  // prompt but didn't intend to trigger the workflow writer, Alt+W
+  // cancels the pending trigger and notifies them.
+  if (!initialCfg.recursive) {
+    const piWithShortcut = pi as typeof pi & { registerShortcut?(s: string, o: { description?: string; handler(ctx: ExtensionContextLike): void }): void };
+    piWithShortcut.registerShortcut?.("alt+w", {
+      description: "Suppress workflow keyword trigger for this prompt",
+      handler(ctx) {
+        if (_workflowKeywordPending) {
+          _workflowKeywordPending = false;
+          try {
+            ctx.ui.notify(
+              "[pi-workflows] workflow trigger suppressed — prompt will run normally",
+              "info",
+            );
+          } catch { /* ignore */ }
+        }
+      },
+    });
+  }
+
+  // ── Inline run progress in footer status line ──────────────────────
+  // Shows "⚡ workflow-name · running" or "⚡ N workflows running" in
+  // the TUI footer whenever there are active runs. Clears when idle.
+  // Updated on every registry state change (no polling needed).
+  //
+  // statusCtx is captured from session_start and updated on each
+  // session (the ctx object wraps live TUI state and is safe to
+  // hold across event handlers).
+  let _statusCtx: ExtensionContextLike | null = null;
+  const STATUS_KEY = "pi-workflows";
+
+  const _updateRunStatus = (): void => {
+    if (_statusCtx === null) return;
+    // Explicit assertion: TS won't narrow a let-captured variable inside a
+    // closure, so we assert non-null after the early-exit.
+    const sctx = _statusCtx as ExtensionContextLike;
+    const setStatus = (sctx.ui as { setStatus?: (k: string, v: string | undefined) => void }).setStatus;
+    if (!setStatus) return;
+    const summaries = getActiveRuns().listSummaries();
+    const active = summaries.filter(
+      (s) => s.state === "running" || s.state === "paused",
+    );
+    try {
+      if (active.length === 0) {
+        setStatus(STATUS_KEY, undefined);
+      } else if (active.length === 1) {
+        const s = active[0]!;
+        const stateIcon = s.state === "paused" ? "⏸" : "⚡";
+        setStatus(STATUS_KEY, `${stateIcon} ${s.workflowName} · ${s.state}`);
+      } else {
+        setStatus(STATUS_KEY, `⚡ ${active.length} workflows running`);
+      }
+    } catch { /* swallow — TUI may not be mounted yet */ }
+  };
+
+  // Subscribe once at extension load. The same subscriber persists
+  // across sessions (each session_start refreshes _statusCtx).
+  getActiveRuns().subscribe(_updateRunStatus);
+
   // `/workflows` so its handler can return the documented error
   // message; we just don't expose `/<workflowName>`.
   const recursive = initialCfg.recursive;
@@ -187,6 +259,7 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
   pi.on("session_start", async (_event, ctx) => {
     const cwd = (ctx as ExtensionContextLike).cwd ?? process.cwd();
     sessionCwd = cwd; // update for write_workflow tool
+    _statusCtx = ctx as ExtensionContextLike; // for inline run-status footer
 
     // Slice 11: crash-sweep BEFORE workflow discovery so any
     // sweep-flipped runs are visible to a same-tick `/workflows list`.
@@ -294,7 +367,13 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     // Register the umbrella command first so it's always visible (even
     // in recursive nested sessions, where it returns the disabled
     // message).
-    registerWorkflowsCommand(pi, registry, { recursive });
+    registerWorkflowsCommand(pi, registry, {
+      recursive,
+      keywordTrigger: {
+        get: () => _keywordTriggerEnabled,
+        set: (v) => { _keywordTriggerEnabled = v; },
+      },
+    });
 
     // Per-workflow `/<name>` stubs — skipped in recursive children.
     const count = registerWorkflowCommands(pi, registry, { recursive });

@@ -43,7 +43,7 @@ import {
   stubMessage,
 } from "./workflowCmd.internal.js";
 import { startWorkflowRun, RunCancelledError } from "../runManager.js";
-import { deliverRunResult, RUN_STARTED_ENTRY } from "../runtime/resultDelivery.js";
+import { deliverRunResult, RUN_STARTED_ENTRY, wireRunDelivery } from "../runtime/resultDelivery.js";
 import { makeConfirmDialog } from "../runtime/approval.js";
 import type { ApprovalDialog } from "../types/internal.js";
 import {
@@ -190,28 +190,7 @@ export function registerWorkflowCommands(
           // `Run.terminated` so the slash-command handler returns
           // immediately (fire-and-forget). The terminal info promise
           // never rejects, so we don't have to chain a .catch.
-          run.promise.catch(() => undefined); // suppress unhandled
-          void run.terminated.then(async (info) => {
-            try {
-              await deliverRunResult({
-                pi,
-                outcome: info.outcome,
-                workflowName: info.workflowName,
-                runId: info.runId,
-                runDirAbs: info.runDirAbs,
-                startedAt: info.startedAt,
-                endedAt: info.endedAt,
-                durationMs: info.durationMs,
-                agentCount: info.agentCount,
-                result: info.result,
-                error: info.error,
-                approval: info.approval,
-                finishCallbackPrompt: info.finishCallbackPrompt,
-              });
-            } catch {
-              /* never let delivery crash the session */
-            }
-          });
+          void wireRunDelivery(pi, run);
         } catch (err) {
           if (err instanceof RunCancelledError) {
             // Slice 10: route the cancelled-pre-run path through
@@ -284,7 +263,17 @@ export function registerWorkflowCommands(
 export function registerWorkflowsCommand(
   pi: ExtensionAPI,
   registry: WorkflowRegistry,
-  opts: { recursive?: boolean } = {},
+  opts: {
+    recursive?: boolean;
+    /**
+     * Optional getter/setter for the keyword trigger toggle.
+     * When provided, `/workflows keyword` sub-command is enabled.
+     */
+    keywordTrigger?: {
+      get(): boolean;
+      set(value: boolean): void;
+    };
+  } = {},
 ): void {
   pi.registerCommand("workflows", {
     description:
@@ -310,7 +299,18 @@ export function registerWorkflowsCommand(
         // falls back to printing the runs list to chat per PRD
         // §10.9. Either way, we ALSO surface a workflow-discovery
         // listing so scripts that grep for it keep working.
-        const result = await mountOverlay({ pi, ctx });
+        const result = await mountOverlay({
+          pi,
+          ctx,
+          onStopAgent: (runId, agentId) => {
+            const run = getActiveRuns().getRun(runId);
+            run?.stopAgent(agentId);
+          },
+          onRestartAgent: (runId, agentId) => {
+            const run = getActiveRuns().getRun(runId);
+            run?.restartAgent(agentId);
+          },
+        });
         if (result.mode === "already-open") {
           ctx.ui.notify("workflows overlay already open", "info");
           return;
@@ -365,13 +365,42 @@ export function registerWorkflowsCommand(
             return await handleGc(pi, rest);
           case "kill":
             return handleKill(pi, rest);
+          case "keyword": {
+            const kt = opts.keywordTrigger;
+            if (!kt) {
+              pi.sendMessage(
+                { customType: STUB_CUSTOM_TYPE, content: "keyword trigger not configured", display: true, details: {} },
+                { triggerTurn: false, deliverAs: "nextTurn" },
+              );
+              return;
+            }
+            // 'keyword on|off' or 'keyword' to toggle
+            const arg = (rest[0] ?? "").toLowerCase();
+            if (arg === "on") kt.set(true);
+            else if (arg === "off") kt.set(false);
+            else kt.set(!kt.get()); // toggle
+            const newState = kt.get();
+            pi.sendMessage(
+              {
+                customType: STUB_CUSTOM_TYPE,
+                content: `workflow keyword trigger: **${newState ? "on" : "off"}**\n\n` +
+                  (newState
+                    ? "Claude will write a workflow script when your prompt includes the word \"workflow\"."
+                    : "Keyword detection is disabled. Use write_workflow directly or type /deep-research, /codebase-audit, etc."),
+                display: true,
+                details: { keywordTriggerEnabled: newState },
+              },
+              { triggerTurn: false, deliverAs: "nextTurn" },
+            );
+            return;
+          }
           default:
             pi.sendMessage(
               {
                 customType: STUB_CUSTOM_TYPE,
                 content:
                   `unknown sub-command "${sub}".\n\n` +
-                  "Available: (no args | list | show <id> | resume <id> [--latest] | gc [--apply] | kill <id>)",
+                  "Available: (no args | list | show <id> | resume <id> [--latest] | gc [--apply] | kill <id> | keyword [on|off])",
                 display: true,
                 details: { subcommand: sub, slice: 11 },
               },

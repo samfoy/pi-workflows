@@ -5,6 +5,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- `write_workflow` tool path now wires `Run.terminated → deliverRunResult`,
+  so workflows kicked off via the tool fire the result card AND
+  `pi.sendUserMessage` when they finish. Previously the run completed
+  silently — no card, no `result.json`, and the host pi conversation
+  never resumed. The slash-command path (`/<workflow-name>`) was
+  unaffected. Both call sites now share the new `wireRunDelivery`
+  helper in `src/runtime/resultDelivery.ts`.
+
 ## [0.2.0] - 2026-05-29
 
 ### Added

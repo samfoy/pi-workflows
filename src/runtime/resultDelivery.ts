@@ -44,6 +44,7 @@ import type {
   RunOutcome,
   RunResultFile,
 } from "../types/internal.js";
+import type { Run } from "../runManager.js";
 
 /**
  * Slice 10 result-delivery custom-type identifier. Stable across
@@ -378,4 +379,53 @@ export async function deliverRunResult(opts: DeliverOptions): Promise<RunResultF
   }
 
   return payload;
+}
+
+/**
+ * Wire the standard end-of-run delivery onto a live {@link Run}.
+ *
+ * Both the slash-command path (`/<workflow-name>`) and the
+ * `write_workflow` tool path need to invoke {@link deliverRunResult}
+ * once the run settles. Without this wiring, the card never lands and
+ * `pi.sendUserMessage` never fires — meaning the conversation does NOT
+ * resume after the workflow finishes.
+ *
+ * The chain:
+ *   - `run.terminated` always resolves (never rejects) with full
+ *     terminal classification.
+ *   - We swallow `run.promise` rejections so a failed workflow doesn't
+ *     surface as an unhandled rejection.
+ *   - Any throw inside `deliverRunResult` is swallowed so result
+ *     delivery never crashes the host pi session.
+ *
+ * Idempotent in spirit but NOT in practice — call exactly once per
+ * Run. Calling twice would deliver the card twice.
+ *
+ * Returns the delivery promise so callers (mainly tests) can await
+ * the delivered card. Production callers ignore the return value;
+ * the chain is fire-and-forget by design.
+ */
+export function wireRunDelivery(pi: ExtensionAPI, run: Run): Promise<void> {
+  run.promise.catch(() => undefined);
+  return run.terminated.then(async (info) => {
+    try {
+      await deliverRunResult({
+        pi,
+        outcome: info.outcome,
+        workflowName: info.workflowName,
+        runId: info.runId,
+        runDirAbs: info.runDirAbs,
+        startedAt: info.startedAt,
+        endedAt: info.endedAt,
+        durationMs: info.durationMs,
+        agentCount: info.agentCount,
+        result: info.result,
+        error: info.error,
+        approval: info.approval,
+        finishCallbackPrompt: info.finishCallbackPrompt,
+      });
+    } catch {
+      /* never let delivery crash the session */
+    }
+  });
 }
