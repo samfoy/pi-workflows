@@ -580,3 +580,299 @@ test("tailRunLedger: torn trailing line is buffered until next \\n arrives", asy
     env.cleanup();
   }
 });
+
+// ─── Span events: log / agent_log / gate_* ─────────────────────────────
+
+import {
+  parseOtelResourceAttributes,
+} from "../../src/runtime/otelExporter.ts";
+
+test("feedLedgerEntry: log → 'pi.log' event on root span (no phase open)", async () => {
+  const rig = makeRig();
+  const state = createReplayState();
+  feedLedgerEntry(state, { type: "init", at: ts(), manifest: { runId: "r", workflowName: "x" } }, rig.tracer, rig.api);
+  feedLedgerEntry(
+    state,
+    { type: "log", at: ts(), level: "info", message: "starting" },
+    rig.tracer,
+    rig.api,
+  );
+  feedLedgerEntry(state, { type: "transition", at: ts(), from: "running", to: "done" }, rig.tracer, rig.api);
+  await rig.provider.forceFlush();
+  const root = rig.exporter.getFinishedSpans().find((s) => s.name === "invoke_workflow x")!;
+  assert.equal(root.events.length, 1);
+  assert.equal(root.events[0]!.name, "pi.log");
+  assert.equal(root.events[0]!.attributes!["severity"], "info");
+  assert.equal(root.events[0]!.attributes!["message"], "starting");
+});
+
+test("feedLedgerEntry: log → 'pi.log' event lands on phase span when one is open", async () => {
+  const rig = makeRig();
+  const state = createReplayState();
+  feedLedgerEntry(state, { type: "init", at: ts(), manifest: { runId: "r", workflowName: "x" } }, rig.tracer, rig.api);
+  feedLedgerEntry(state, { type: "phase_start", at: ts(), phaseName: "p1", agentCount: 0 }, rig.tracer, rig.api);
+  feedLedgerEntry(
+    state,
+    { type: "log", at: ts(), level: "warn", message: "phase note" },
+    rig.tracer,
+    rig.api,
+  );
+  feedLedgerEntry(
+    state,
+    { type: "phase_end", at: ts(), phaseName: "p1", durationMs: 1, agentResults: { ok: 0, error: 0, cacheHit: 0 } },
+    rig.tracer,
+    rig.api,
+  );
+  feedLedgerEntry(state, { type: "transition", at: ts(), from: "running", to: "done" }, rig.tracer, rig.api);
+  await rig.provider.forceFlush();
+  const phase = rig.exporter.getFinishedSpans().find((s) => s.name === "phase p1")!;
+  const root = rig.exporter.getFinishedSpans().find((s) => s.name === "invoke_workflow x")!;
+  assert.equal(phase.events.length, 1, "phase has the event");
+  assert.equal(phase.events[0]!.name, "pi.log");
+  assert.equal(phase.events[0]!.attributes!["severity"], "warn");
+  assert.equal(root.events.length, 0, "root has no event when phase is open");
+});
+
+test("feedLedgerEntry: agent_log → 'pi.log' event lands on the matching agent span", async () => {
+  const rig = makeRig();
+  const state = createReplayState();
+  feedLedgerEntry(state, { type: "init", at: ts(), manifest: { runId: "r", workflowName: "x" } }, rig.tracer, rig.api);
+  feedLedgerEntry(state, { type: "phase_start", at: ts(), phaseName: "p", agentCount: 1 }, rig.tracer, rig.api);
+  feedLedgerEntry(state, { type: "agent_start", at: ts(), phaseName: "p", agentId: "a", promptHash: "h" }, rig.tracer, rig.api);
+  feedLedgerEntry(
+    state,
+    { type: "agent_log", at: ts(), phaseName: "p", agentId: "a", level: "info", message: "step 1" },
+    rig.tracer,
+    rig.api,
+  );
+  feedLedgerEntry(
+    state,
+    {
+      type: "agent_end",
+      at: ts(),
+      phaseName: "p",
+      agentId: "a",
+      durationMs: 5,
+      usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 },
+      cached: false,
+    },
+    rig.tracer,
+    rig.api,
+  );
+  feedLedgerEntry(
+    state,
+    { type: "phase_end", at: ts(), phaseName: "p", durationMs: 5, agentResults: { ok: 1, error: 0, cacheHit: 0 } },
+    rig.tracer,
+    rig.api,
+  );
+  feedLedgerEntry(state, { type: "transition", at: ts(), from: "running", to: "done" }, rig.tracer, rig.api);
+  await rig.provider.forceFlush();
+  const agent = rig.exporter.getFinishedSpans().find((s) => s.name === "invoke_agent a")!;
+  const phase = rig.exporter.getFinishedSpans().find((s) => s.name === "phase p")!;
+  assert.equal(agent.events.length, 1, "agent has the event");
+  assert.equal(agent.events[0]!.name, "pi.log");
+  assert.equal(agent.events[0]!.attributes!["severity"], "info");
+  assert.equal(agent.events[0]!.attributes!["message"], "step 1");
+  assert.equal(agent.events[0]!.attributes!["pi.agent.id"], "a");
+  assert.equal(agent.events[0]!.attributes!["pi.workflow.phase.name"], "p");
+  assert.equal(phase.events.length, 0, "phase span carries no event when agent is open");
+});
+
+test("feedLedgerEntry: log message clipped at 4 KiB with truncation marker", async () => {
+  const rig = makeRig();
+  const state = createReplayState();
+  feedLedgerEntry(state, { type: "init", at: ts(), manifest: { runId: "r", workflowName: "x" } }, rig.tracer, rig.api);
+  const huge = "a".repeat(8000);
+  feedLedgerEntry(
+    state,
+    { type: "log", at: ts(), level: "info", message: huge },
+    rig.tracer,
+    rig.api,
+  );
+  feedLedgerEntry(state, { type: "transition", at: ts(), from: "running", to: "done" }, rig.tracer, rig.api);
+  await rig.provider.forceFlush();
+  const root = rig.exporter.getFinishedSpans().find((s) => s.name === "invoke_workflow x")!;
+  const message = root.events[0]!.attributes!["message"] as string;
+  assert.equal(message.length, 4096 + "…[truncated]".length);
+  assert.ok(message.endsWith("…[truncated]"));
+});
+
+test("feedLedgerEntry: gate_requested → 'pi.gate.request' event with label", async () => {
+  const rig = makeRig();
+  const state = createReplayState();
+  feedLedgerEntry(state, { type: "init", at: ts(), manifest: { runId: "r", workflowName: "x" } }, rig.tracer, rig.api);
+  feedLedgerEntry(
+    state,
+    { type: "gate_requested", at: ts(), message: "approve plan?" },
+    rig.tracer,
+    rig.api,
+  );
+  feedLedgerEntry(
+    state,
+    { type: "gate_resolved", at: ts(), approved: true },
+    rig.tracer,
+    rig.api,
+  );
+  feedLedgerEntry(state, { type: "transition", at: ts(), from: "running", to: "done" }, rig.tracer, rig.api);
+  await rig.provider.forceFlush();
+  const root = rig.exporter.getFinishedSpans().find((s) => s.name === "invoke_workflow x")!;
+  assert.equal(root.events.length, 2);
+  assert.equal(root.events[0]!.name, "pi.gate.request");
+  assert.equal(root.events[0]!.attributes!["label"], "approve plan?");
+  assert.equal(root.events[1]!.name, "pi.gate.decision");
+  assert.equal(root.events[1]!.attributes!["decision"], "approved");
+});
+
+test("feedLedgerEntry: gate_resolved with approved=false → decision='rejected'", async () => {
+  const rig = makeRig();
+  const state = createReplayState();
+  feedLedgerEntry(state, { type: "init", at: ts(), manifest: { runId: "r", workflowName: "x" } }, rig.tracer, rig.api);
+  feedLedgerEntry(
+    state,
+    { type: "gate_resolved", at: ts(), approved: false },
+    rig.tracer,
+    rig.api,
+  );
+  feedLedgerEntry(state, { type: "transition", at: ts(), from: "running", to: "done" }, rig.tracer, rig.api);
+  await rig.provider.forceFlush();
+  const root = rig.exporter.getFinishedSpans().find((s) => s.name === "invoke_workflow x")!;
+  assert.equal(root.events[0]!.attributes!["decision"], "rejected");
+});
+
+test("feedLedgerEntry: log entry that arrives before init is dropped silently", async () => {
+  const rig = makeRig();
+  const state = createReplayState();
+  // No init yet — pickAncestorSpan returns null, event is dropped.
+  feedLedgerEntry(
+    state,
+    { type: "log", at: ts(), level: "info", message: "lost in the void" },
+    rig.tracer,
+    rig.api,
+  );
+  // Subsequent init still works.
+  feedLedgerEntry(state, { type: "init", at: ts(), manifest: { runId: "r", workflowName: "x" } }, rig.tracer, rig.api);
+  feedLedgerEntry(state, { type: "transition", at: ts(), from: "running", to: "done" }, rig.tracer, rig.api);
+  await rig.provider.forceFlush();
+  const root = rig.exporter.getFinishedSpans().find((s) => s.name === "invoke_workflow x")!;
+  assert.equal(root.events.length, 0);
+});
+
+// ─── parseOtelResourceAttributes ───────────────────────────────────────
+
+test("parseOtelResourceAttributes: parses simple k=v,k=v pairs", () => {
+  const out = parseOtelResourceAttributes(
+    "deployment.environment=prod,team=workflows",
+  );
+  assert.deepEqual(out, {
+    "deployment.environment": "prod",
+    team: "workflows",
+  });
+});
+
+test("parseOtelResourceAttributes: tolerates whitespace around separator", () => {
+  const out = parseOtelResourceAttributes(" a = 1 ,  b = 2 ");
+  assert.deepEqual(out, { a: "1", b: "2" });
+});
+
+test("parseOtelResourceAttributes: percent-decodes values", () => {
+  const out = parseOtelResourceAttributes("note=hello%20world");
+  assert.deepEqual(out, { note: "hello world" });
+});
+
+test("parseOtelResourceAttributes: skips malformed entries silently", () => {
+  const out = parseOtelResourceAttributes("good=1,=novalue,nokey,still=good");
+  assert.deepEqual(out, { good: "1", still: "good" });
+});
+
+test("parseOtelResourceAttributes: undefined / empty → empty object", () => {
+  assert.deepEqual(parseOtelResourceAttributes(undefined), {});
+  assert.deepEqual(parseOtelResourceAttributes(""), {});
+  assert.deepEqual(parseOtelResourceAttributes("   "), {});
+});
+
+test("parseOtelResourceAttributes: malformed percent-encoding falls back to raw", () => {
+  const out = parseOtelResourceAttributes("k=%E0%A4%A");
+  // Decode failure → keep raw value rather than crash.
+  assert.equal(out["k"], "%E0%A4%A");
+});
+
+// ─── createOtelExporter: OTEL_RESOURCE_ATTRIBUTES end-to-end ──────────
+
+test("loadOtelSdk: OTEL_RESOURCE_ATTRIBUTES env attrs land on exported spans", async () => {
+  const { _resetOtelSdkCacheForTests, loadOtelSdk } = await import(
+    "../../src/runtime/otelExporter.ts"
+  );
+  _resetOtelSdkCacheForTests();
+  const sdk = await loadOtelSdk({
+    endpoint: "http://localhost:0/v1/traces",
+    extraResourceAttributes: {
+      "deployment.environment": "test",
+      team: "workflows",
+    },
+  });
+  assert.ok(sdk, "SDK loaded");
+  // Wire an InMemorySpanExporter so we can read a span back. The
+  // BatchSpanProcessor inside the loaded provider is OTLP/HTTP
+  // bound — we layer a SimpleSpanProcessor over the same provider
+  // by adding it (provider.addSpanProcessor on v1; v2 doesn't expose
+  // that publicly so we instead spin up a parallel provider that
+  // shares the resource via copy).
+  //
+  // Simpler: ask the SDK for a tracer, start + end a span, then
+  // inspect the span's `resource` field via the InMemoryExporter
+  // by attaching it through `BatchSpanProcessor` on a NEW provider
+  // built with the same resource. But the resource isn't reachable
+  // from outside.
+  //
+  // Easiest: walk the provider's private `_resource` via Object.
+  // It's not in the public surface but it's stable across versions.
+  const internal = sdk!.provider as unknown as { _resource?: { attributes?: Record<string, unknown> } };
+  assert.ok(internal._resource, "provider._resource accessible");
+  const attrs = internal._resource.attributes ?? {};
+  assert.equal(attrs["deployment.environment"], "test");
+  assert.equal(attrs["team"], "workflows");
+  assert.equal(attrs["service.name"], "pi-workflows");
+  assert.equal(attrs["service.version"], "0.2.0");
+  await sdk!.provider.shutdown?.();
+  _resetOtelSdkCacheForTests();
+});
+
+test("loadOtelSdk: extraResourceAttributes can override service.name", async () => {
+  const { _resetOtelSdkCacheForTests, loadOtelSdk } = await import(
+    "../../src/runtime/otelExporter.ts"
+  );
+  _resetOtelSdkCacheForTests();
+  const sdk = await loadOtelSdk({
+    endpoint: "http://localhost:0/v1/traces",
+    extraResourceAttributes: { "service.name": "custom-name" },
+  });
+  assert.ok(sdk);
+  const internal = sdk!.provider as unknown as { _resource?: { attributes?: Record<string, unknown> } };
+  assert.equal(internal._resource?.attributes?.["service.name"], "custom-name");
+  await sdk!.provider.shutdown?.();
+  _resetOtelSdkCacheForTests();
+});
+
+test("createOtelExporter: env OTEL_RESOURCE_ATTRIBUTES flows through to loadOtelSdk", async () => {
+  const { _resetOtelSdkCacheForTests } = await import(
+    "../../src/runtime/otelExporter.ts"
+  );
+  _resetOtelSdkCacheForTests();
+  const handle = await createOtelExporter({
+    env: {
+      OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://localhost:0/v1/traces",
+      OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=ci,team=workflows",
+    },
+  });
+  assert.equal(handle.enabled, true);
+  // The cached SDK is what we just constructed.
+  const cached = await (await import("../../src/runtime/otelExporter.ts")).loadOtelSdk({
+    endpoint: "http://localhost:0/v1/traces",
+  });
+  assert.ok(cached);
+  const internal = cached!.provider as unknown as { _resource?: { attributes?: Record<string, unknown> } };
+  assert.equal(internal._resource?.attributes?.["deployment.environment"], "ci");
+  assert.equal(internal._resource?.attributes?.["team"], "workflows");
+  await handle.shutdown();
+  _resetOtelSdkCacheForTests();
+});

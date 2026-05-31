@@ -102,6 +102,16 @@ export interface OtelSpan {
   recordException(err: unknown): unknown;
   end(endTime?: Date | number): unknown;
   spanContext(): unknown;
+  /**
+   * Span events — host-side `log` / `agent_log` / `gate_*` ledger
+   * entries are surfaced as events on the active span so they show
+   * up alongside spans in OTel-aware UIs (Jaeger, Honeycomb, etc.).
+   */
+  addEvent(
+    name: string,
+    attributes?: Record<string, unknown>,
+    startTime?: Date | number,
+  ): unknown;
 }
 
 export interface OtelTracerProvider {
@@ -138,6 +148,12 @@ let _cachedSdkEndpoint: string | null = null;
 export async function loadOtelSdk(opts: {
   readonly endpoint: string;
   readonly serviceName?: string;
+  /**
+   * Extra resource attributes merged on top of `service.name` /
+   * `service.version`. Typically populated from
+   * `OTEL_RESOURCE_ATTRIBUTES` (parsed via {@link parseOtelResourceAttributes}).
+   */
+  readonly extraResourceAttributes?: Record<string, string>;
   readonly log?: (level: "warn" | "info", msg: string) => void;
 }): Promise<LoadedOtelSdk | null> {
   if (_cachedSdk !== null && _cachedSdkEndpoint === opts.endpoint) {
@@ -160,6 +176,15 @@ export async function loadOtelSdk(opts: {
     });
     const processor = new base.BatchSpanProcessor(otlpExporter);
 
+    // Merge service.* defaults with caller-supplied extra attributes.
+    // Caller wins so OTEL_RESOURCE_ATTRIBUTES can override service.name
+    // (matches the OTel SDK precedence: env-var beats SDK default).
+    const mergedAttrs: Record<string, unknown> = {
+      "service.name": opts.serviceName ?? "pi-workflows",
+      "service.version": TRACER_VERSION,
+      ...(opts.extraResourceAttributes ?? {}),
+    };
+
     // `resourceFromAttributes` (sdk v2) or `Resource.default()` (sdk v1).
     // Cast through `unknown` to keep the call cross-version: the v1 and
     // v2 typings are incompatible at the structural level even though
@@ -169,16 +194,10 @@ export async function loadOtelSdk(opts: {
     if (typeof resourcesAny["resourceFromAttributes"] === "function") {
       resource = (
         resourcesAny["resourceFromAttributes"] as (a: Record<string, unknown>) => unknown
-      )({
-        "service.name": opts.serviceName ?? "pi-workflows",
-        "service.version": TRACER_VERSION,
-      });
+      )(mergedAttrs);
     } else if (typeof resourcesAny["Resource"] === "function") {
       const Ctor = resourcesAny["Resource"] as new (a: Record<string, unknown>) => unknown;
-      resource = new Ctor({
-        "service.name": opts.serviceName ?? "pi-workflows",
-        "service.version": TRACER_VERSION,
-      });
+      resource = new Ctor(mergedAttrs);
     }
 
     // BasicTracerProvider's typed config is a moving target across SDK
@@ -291,6 +310,57 @@ function genAiUsageAttrs(usage: {
 const STATUS_OK = 1;
 const STATUS_ERROR = 2;
 const KIND_INTERNAL = 0;
+
+/**
+ * Maximum length of a `pi.log` event's `message` attribute. Cuts at
+ * 4 KiB to bound OTLP payload size on chatty workflows.
+ */
+const LOG_MESSAGE_MAX_BYTES = 4096;
+
+/** Clip a string at LOG_MESSAGE_MAX_BYTES, marking truncation. */
+function clipMessage(s: string): string {
+  if (typeof s !== "string") return String(s);
+  if (s.length <= LOG_MESSAGE_MAX_BYTES) return s;
+  return s.slice(0, LOG_MESSAGE_MAX_BYTES) + "…[truncated]";
+}
+
+/**
+ * Pick the most specific currently-open span for a host-side ledger
+ * event:
+ *
+ *   1. If `target.agentId`+`phaseName` provided AND that agent span is
+ *      open, return it.
+ *   2. Else if `target.phaseName` provided AND that phase span is
+ *      open, return it.
+ *   3. Else fall back to the root span.
+ *   4. Returns `null` only when there is no root span yet (events that
+ *      precede `init` are dropped).
+ */
+function pickAncestorSpan(
+  state: ReplayState,
+  target: { phaseName?: string; agentId?: string } | undefined,
+): OtelSpan | null {
+  if (target?.phaseName !== undefined && target.agentId !== undefined) {
+    const agentSpan = state.agentSpans.get(
+      agentKey(target.phaseName, target.agentId),
+    );
+    if (agentSpan !== undefined) return agentSpan;
+  }
+  if (target?.phaseName !== undefined) {
+    const phaseSpan = state.phaseSpans.get(target.phaseName);
+    if (phaseSpan !== undefined) return phaseSpan;
+  }
+  // No phase/agent target — pick the most-recently-opened still-open
+  // span. Maps preserve insertion order; iterate in reverse to find
+  // the deepest current span (agent > phase > root).
+  if (target === undefined) {
+    const agents = Array.from(state.agentSpans.values());
+    if (agents.length > 0) return agents[agents.length - 1]!;
+    const phases = Array.from(state.phaseSpans.values());
+    if (phases.length > 0) return phases[phases.length - 1]!;
+  }
+  return state.rootSpan;
+}
 
 /**
  * Apply one ledger entry to the replay state. Pure with respect to
@@ -556,10 +626,74 @@ export function feedLedgerEntry(
       return;
     }
 
+    case "log": {
+      // Workflow-level log entry. Attach as an event on the most
+      // specific currently-open ancestor span: prefer phase, fall back
+      // to root. There is no agent context for these (host-side log).
+      const target = pickAncestorSpan(state, undefined);
+      if (target === null) return;
+      target.addEvent(
+        "pi.log",
+        {
+          severity: entry.level,
+          message: clipMessage(entry.message),
+        },
+        t,
+      );
+      return;
+    }
+
+    case "agent_log": {
+      // Agent-scoped log. Attach to the matching agent span when open;
+      // otherwise fall back to the phase span (e.g. log lands after
+      // agent_end somehow).
+      const target = pickAncestorSpan(state, {
+        phaseName: entry.phaseName,
+        agentId: entry.agentId,
+      });
+      if (target === null) return;
+      target.addEvent(
+        "pi.log",
+        {
+          severity: entry.level,
+          message: clipMessage(entry.message),
+          "pi.agent.id": entry.agentId,
+          "pi.workflow.phase.name": entry.phaseName,
+        },
+        t,
+      );
+      return;
+    }
+
+    case "gate_requested": {
+      // Workflow-level approval gate request. Attach to root span.
+      const target = pickAncestorSpan(state, undefined);
+      if (target === null) return;
+      target.addEvent(
+        "pi.gate.request",
+        { label: entry.message },
+        t,
+      );
+      return;
+    }
+
+    case "gate_resolved": {
+      // Workflow-level approval gate decision.
+      const target = pickAncestorSpan(state, undefined);
+      if (target === null) return;
+      target.addEvent(
+        "pi.gate.decision",
+        {
+          decision: entry.approved ? "approved" : "rejected",
+        },
+        t,
+      );
+      return;
+    }
+
     default:
-      // Other entry types (log, agent_log, pause, resume, gate_*, etc.)
-      // do not produce spans. Future: emit them as span events on the
-      // currently-open ancestor span.
+      // Other entry types (pause, resume, checkpoint_*, report, etc.)
+      // do not produce spans or events today. Future: per-type events.
       return;
   }
 }
@@ -815,6 +949,47 @@ export interface OtelExporterHandle {
 }
 
 /**
+ * Parse `OTEL_RESOURCE_ATTRIBUTES` per the
+ * [OTel env-var spec](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/#general-sdk-configuration):
+ * a comma-separated list of `key=value` pairs, with optional
+ * percent-decoded values. Whitespace around the separator is
+ * tolerated. Empty / malformed entries are skipped silently.
+ *
+ * Example:
+ *   OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod,team=workflows
+ *
+ * Returns `{}` when the env var is unset or contains no usable pairs.
+ */
+export function parseOtelResourceAttributes(
+  raw: string | undefined,
+): Record<string, string> {
+  if (raw === undefined) return {};
+  const out: Record<string, string> = {};
+  // Char-code split on `,` — simpler than `split` and avoids the
+  // empty-string edge case at the boundaries.
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return out;
+  const parts = trimmed.split(",");
+  for (const p of parts) {
+    const eq = p.indexOf("=");
+    if (eq <= 0) continue; // missing key or '=value'
+    const k = p.slice(0, eq).trim();
+    if (k.length === 0) continue;
+    const v = p.slice(eq + 1).trim();
+    // Per-spec: values may be percent-encoded. Tolerate decode failures
+    // so a malformed entry doesn't blow up the whole parse.
+    let decoded: string;
+    try {
+      decoded = decodeURIComponent(v);
+    } catch {
+      decoded = v;
+    }
+    out[k] = decoded;
+  }
+  return out;
+}
+
+/**
  * Resolve the OTel endpoint from env. Honors both the catch-all
  * `OTEL_EXPORTER_OTLP_ENDPOINT` and the trace-specific
  * `OTEL_EXPORTER_OTLP_TRACES_ENDPOINT`. Returns `null` when neither
@@ -859,6 +1034,12 @@ export async function createOtelExporter(
       endpoint: endpoint!,
       ...(opts.serviceName !== undefined ? { serviceName: opts.serviceName } : {}),
       ...(opts.log !== undefined ? { log: opts.log } : {}),
+      // Honor OTEL_RESOURCE_ATTRIBUTES per the OTel env-var spec.
+      // Allows operators to set deployment.environment, team, etc.
+      // without code changes.
+      extraResourceAttributes: parseOtelResourceAttributes(
+        env["OTEL_RESOURCE_ATTRIBUTES"],
+      ),
     }));
   if (sdk === null) {
     return {

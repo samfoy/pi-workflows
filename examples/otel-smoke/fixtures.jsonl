@@ -1,0 +1,4 @@
+{"agentId":"greet-en","promptHash":"8a7f79e21e82e9c3a1148028cc4985ccfe78268c2abd745f575ee4e75d2debab","result":{"text":"Hello!","usage":{"input":12,"output":4,"cacheRead":0,"cacheWrite":0,"totalTokens":16},"durationMs":120}}
+{"agentId":"greet-fr","promptHash":"02f806c6a0e3e35ec11dab42b2bb11d068ca84c1607b516b030b943922ee02df","result":{"text":"Bonjour!","usage":{"input":12,"output":4,"cacheRead":0,"cacheWrite":0,"totalTokens":16},"durationMs":140}}
+{"agentId":"summarize-1","promptHash":"d53573f28f568eaa22ea40fe5c7ea342319eb6dfba7bda623e0ce3e93716dbfa","result":{"text":"A two-word English greeting.","usage":{"input":18,"output":8,"cacheRead":0,"cacheWrite":0,"totalTokens":26},"durationMs":210}}
+{"agentId":"summarize-2","promptHash":"bcf524c0df6140fa01d35b0291ce0f9c8bcf292cdebfbae97fae8d60bb3b19c2","result":{"text":"A two-word French greeting.","usage":{"input":18,"output":8,"cacheRead":0,"cacheWrite":0,"totalTokens":26},"durationMs":230}}

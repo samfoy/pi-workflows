@@ -1,0 +1,28 @@
+# pi-workflows — local OTel collector for tinkering.
+#
+#   docker compose up -d
+#
+# Then export OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces
+# and run a workflow. Visit http://localhost:16686/ for the Jaeger UI.
+#
+# Tear down with `docker compose down`.
+
+services:
+  jaeger:
+    image: jaegertracing/all-in-one:1.62
+    container_name: pi-workflows-jaeger
+    environment:
+      # All-in-one ships an OTLP receiver that's off by default.
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      # OTLP/HTTP — the endpoint pi-workflows posts to.
+      - "4318:4318"
+      # OTLP/gRPC — pi-workflows ships HTTP today, but expose for parity.
+      - "4317:4317"
+      # Jaeger UI.
+      - "16686:16686"
+    healthcheck:
+      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://localhost:14269/"]
+      interval: 5s
+      timeout: 3s
+      retries: 12

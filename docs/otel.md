@@ -116,6 +116,60 @@ pi-workflows logs a single warning and falls back to a no-op tracer:
 the endpoint is forwarded to the OTel SDK, which honors the standard
 `OTEL_*` environment variables.
 
+## Span events
+
+Host-side ledger entries that don't open spans (`log`, `agent_log`,
+`gate_requested`, `gate_resolved`) are surfaced as **span events** on
+the most-specific currently-open span. Events show up alongside the
+span timeline in Jaeger / Honeycomb / Tempo and carry the same
+resource as their parent span.
+
+| Ledger entry      | Event name         | Attributes                                                          | Lands on              |
+| ----------------- | ------------------ | ------------------------------------------------------------------- | --------------------- |
+| `log`             | `pi.log`           | `severity`, `message` (clipped at 4 KiB)                            | most-recent open span |
+| `agent_log`       | `pi.log`           | `severity`, `message`, `pi.agent.id`, `pi.workflow.phase.name`      | matching agent span   |
+| `gate_requested`  | `pi.gate.request`  | `label` (the gate's prompt text)                                    | root                  |
+| `gate_resolved`   | `pi.gate.decision` | `decision` (`approved` / `rejected`)                                | root                  |
+
+"Most-recent open span" walks the open-span maps in insertion order
+and picks the deepest match: agent > phase > root. Events that arrive
+before the root span (i.e. before `init`) are dropped silently.
+
+## Resource attributes
+
+The exporter honors the standard
+[`OTEL_RESOURCE_ATTRIBUTES`](https://opentelemetry.io/docs/specs/otel/configuration/sdk-environment-variables/#general-sdk-configuration)
+environment variable. Set a comma-separated list of `key=value`
+pairs (values may be percent-encoded) and they will be merged onto
+every span's resource alongside the built-in `service.name=pi-workflows`
+and `service.version`:
+
+```sh
+export OTEL_RESOURCE_ATTRIBUTES="deployment.environment=prod,team=workflows"
+```
+
+Caller-supplied attributes win when keys collide with the built-in
+defaults — so `OTEL_RESOURCE_ATTRIBUTES=service.name=my-service` will
+override the default `pi-workflows` service name. Malformed entries
+(missing `=`, empty key, undecodable percent-encoding) are skipped
+silently rather than crashing the exporter.
+
+## Smoke testing locally
+
+A full local end-to-end recipe ships at
+[`examples/otel-smoke/`](../examples/otel-smoke/):
+
+```sh
+npm run smoke:otel    # prints a pointer to the README
+```
+
+The recipe covers a `docker compose` stack running Jaeger
+all-in-one, the env-var configuration, mock-agent fixtures so the
+workflow runs without API tokens, and a screenshot-shaped trace tree
+you should see in the Jaeger UI. Use it before / after any change to
+`src/runtime/otelExporter.ts` to confirm the integration didn't
+regress.
+
 ## Implementation notes
 
 - Source: `src/runtime/otelExporter.ts`.
@@ -167,13 +221,6 @@ the endpoint is forwarded to the OTel SDK, which honors the standard
 
 ## Follow-ups
 
-- **Span events** — host-side `log` and `gate_*` ledger entries are
-  not yet attached as span events. The tail loop drops them. Could be
-  added without changing the span tree.
 - **Metrics** — only traces ship today. A complementary metrics
   exporter (run rate, agent error rate, p50/p95 token usage) could
   reuse the same ledger source.
-- **Resource detection** — the resource currently carries only
-  `service.name` and `service.version`. Honoring the standard
-  `OTEL_RESOURCE_ATTRIBUTES` env var (e.g. for `deployment.environment`)
-  is a one-line change.

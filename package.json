@@ -32,6 +32,7 @@
     "test:unit": "node --import tsx --test tests/unit/*.test.ts",
     "test:integration": "node --import tsx --test tests/integration/*.smoke.ts tests/integration/*.test.ts",
     "test:security": "node --import tsx --test tests/security/*.test.ts",
+    "smoke:otel": "node -e \"console.log('See examples/otel-smoke/README.md for the OTel smoke-test recipe.')\"",
     "prepublishOnly": "npm run build && npm test",
     "coverage": "c8 --include='src/runtime/**' --include='src/util/**' --reporter=text --reporter=lcov node --import tsx --test tests/unit/*.test.ts tests/integration/*.smoke.ts tests/integration/*.test.ts tests/security/*.test.ts",
     "coverage:check": "c8 check-coverage --lines 85 --branches 70 --include='src/runtime/**' --include='src/util/**'"
