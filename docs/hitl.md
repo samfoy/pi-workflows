@@ -12,20 +12,43 @@ returns whatever JSON-cloneable value the supervisor injects.
 
 ```js
 // 1. Free-form answer (string, object, anything JSON-cloneable).
-const plan = await ctx.interrupt({
+//    ctx.interrupt returns { key, value } so authors can disambiguate
+//    concurrent interrupts — destructure or capture .key as needed.
+const { value: plan } = await ctx.interrupt({
   question: "What should the rollout target look like?",
 });
 
 // 2. Multi-choice. The supervisor still picks the value (the choices
 //    list is purely advisory metadata — useful for the TUI prompt).
-const env = await ctx.interrupt({
+const { value: env } = await ctx.interrupt({
   question: "Pick a deploy target",
   choices: ["staging", "prod", "abort"],
   default: "staging",
 });
 
-// 3. Shorthand: a bare string is treated as { question }.
-const note = await ctx.interrupt("Add a release note?");
+// 3. Schema validation on the resume value (gap follow-up #3).
+const { value: cfg } = await ctx.interrupt({
+  question: "Settings?",
+  schema: {
+    type: "object",
+    required: ["approved"],
+    properties: { approved: { type: "boolean" } },
+  },
+});
+// If the supervisor's payload doesn't match the schema, the call
+// throws InterruptValueValidationError to the workflow author. The
+// supervisor sees the original prompt — they don't know the schema.
+
+// 4. Concurrent interrupts — capture each key for explicit routing.
+const [a, b] = await Promise.all([
+  ctx.interrupt({ question: "Region A?" }),
+  ctx.interrupt({ question: "Region B?" }),
+]);
+// a.key === "int-0", b.key === "int-1". Pass the key when answering:
+//   await client.resume(runId, "...", { key: a.key });
+
+// 5. Shorthand: a bare string is treated as { question }.
+const { value: note } = await ctx.interrupt("Add a release note?");
 ```
 
 If no supervisor is wired (no `WorkflowClient` in the loop, no TUI), the
@@ -127,6 +150,15 @@ abort.
 - `opts.choices`, when present, must be an array of strings.
 - `opts.default` is JSON-clone-validated at the host boundary (cycles
   and realm-leaks fail here, not on disk).
+- `opts.schema`, when present, must be a plain JSON-Schema-shaped
+  object. After the supervisor's value is JSON-cloned, the host runs
+  it through the same `validateAgainstSchema` validator used by
+  `ctx.agent({schema})`. On mismatch the workflow's awaiter throws
+  `InterruptValueValidationError` (with `key`, `path`, `expected`,
+  `actual`) — the supervisor sees no error since the supervisor never
+  sees the schema in the first place. The mismatched value is still
+  ledgered as `interrupt_resolved` so a future replay sees what the
+  supervisor sent.
 
 Invalid input fails the call envelope (`{ ok: false, error }`) without
 writing to the ledger. The supervisor's `WorkflowClient.resume(value)`
@@ -157,18 +189,20 @@ npx node --import tsx --test tests/unit/interrupt.test.ts
   `Run.respondInterrupt(value, key)`. End-to-end coverage:
   `tests/integration/hitlOverlayInterrupt.test.ts`.
 
-- **Multiple concurrent interrupts in parallel phases.** The FIFO
-  queue handles N pending interrupts but `WorkflowClient.resume`
-  without a key targets the OLDEST. Authors who fan out interrupts in
-  a parallel `ctx.phase(...)` should pass explicit keys (the
-  `ctx.interrupt` ledger entry exposes them) to disambiguate. Open
-  question: surface `ctx.interrupt(...)` returning the key alongside
-  the value so authors can echo it. Deferred until a real workflow
-  hits the case.
+- **Multiple concurrent interrupts in parallel phases.** ✅ **Shipped**
+  (polish-memory-hitl). `ctx.interrupt(...)` now returns `{ key, value }`
+  so authors fanning interrupts out across parallel agents can capture
+  each call site's key and pass it to `WorkflowClient.resume(runId,
+  value, { key })` for explicit disambiguation. Sequential callers can
+  destructure or ignore the wrapping. Tests:
+  `tests/unit/interrupt.test.ts — "concurrent interrupts: explicit
+  key on resume targets the right pending"` and the existing key-N
+  determinism + replay tests still cover the no-disambiguation case.
 
-- **Schema validation on the resume value.** Today the supervisor can
-  inject any JSON-cloneable value; if the workflow expects a specific
-  shape, it must validate manually. A `schema` field on the request
-  (mirroring `ctx.agent({ schema })`) would let the host validate the
-  injection before resolving the call. Deferred — adds surface area
-  with no proven need yet.
+- **Schema validation on the resume value.** ✅ **Shipped**
+  (polish-memory-hitl). `ctx.interrupt({ schema })` runs the
+  supervisor's payload through `validateAgainstSchema` post-clone; on
+  mismatch the workflow author sees a typed
+  `InterruptValueValidationError` and the supervisor sees only their
+  original prompt. Test: `tests/unit/interrupt.test.ts — "schema:
+  resume value mismatches → InterruptValueValidationError"`.

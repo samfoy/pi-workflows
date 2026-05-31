@@ -46,7 +46,7 @@ function stubHost(): RunCtxHost {
     checkpoint: async () => ok(false),
     report: () => ok(null),
     gate: async () => ok(true),
-    interrupt: async () => ok(null),
+    interrupt: async () => ok({ key: "int-0", value: null }),
     memo_check: async () => ok({ hit: false as const }),
     memo_set: async () => ok(null),
   };

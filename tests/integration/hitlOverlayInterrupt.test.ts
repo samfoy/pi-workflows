@@ -55,7 +55,9 @@ function makeTmpRun(): {
 }
 
 const HITL_WORKFLOW_SOURCE = `
-const answer = await ctx.interrupt({ question: "Approve?", choices: ["yes", "no"] });
+// ZONE_HITL polish: ctx.interrupt() now returns { key, value }; the
+// answer the operator picked lives at .value.
+const { value: answer } = await ctx.interrupt({ question: "Approve?", choices: ["yes", "no"] });
 return { answer };
 `;
 

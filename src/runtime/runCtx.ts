@@ -50,7 +50,9 @@ import {
   buildPromptWithMemory,
   compactMemoryFile,
   MEMORY_READ_CAP_BYTES,
-  parseMemoryScope,
+  parseMemoryOpts,
+  memoryReadOnlyKey,
+  ReadOnlyMemoryError,
   readMemoryFileWithMeta,
   resolveMemoryDir,
   type MemoryScope,
@@ -255,6 +257,14 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   // memory-name only — a per-(run, name) Set is per-instance because
   // this map is scoped to one createRunCtxHost call.
   const memoryOversizeWarned = new Set<string>();
+
+  // gap follow-up #5: track (scope, name) tuples that any ctx.agent()
+  // call has mounted with readOnly:true. ctx.memory.append against a
+  // tuple in this set throws ReadOnlyMemoryError so a workflow that
+  // shares a "playbook" persona can't accidentally clobber it from a
+  // sibling agent invocation. Once readonly, always readonly for the
+  // life of the run — a fresh process is needed to revoke.
+  const readOnlyMemoryKeys = new Set<string>();
 
   // ─── Per-agent abort + restart ──────────────────────────────────
   // Keyed by agentId. Each running agent's AbortController is registered
@@ -871,13 +881,27 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       let memoryDir: string | null = null;
       let memoryContent: string | null = null;
       const rawMemoryOpt = (handle.opts as Record<string, unknown>).memory;
-      const memoryScope = parseMemoryScope(rawMemoryOpt);
+      // gap follow-up #5: object shape `{scope, readOnly}` lets shared
+      // "playbook" memory get injected without granting the sub-agent
+      // a write-back channel. parseMemoryOpts is a strict superset of
+      // parseMemoryScope so legacy string callers still work.
+      const memoryOpts = parseMemoryOpts(rawMemoryOpt);
+      const memoryScope = memoryOpts === null ? null : memoryOpts.scope;
+      const memoryReadOnly = memoryOpts === null ? false : memoryOpts.readOnly;
       if (memoryScope !== null) {
         const rawName = (handle.opts as Record<string, unknown>).name;
         const memoryName =
           typeof rawName === "string" && rawName.length > 0
             ? rawName
             : handle.id;
+        // gap follow-up #5: lock (scope, name) tuples mounted with
+        // readOnly:true so a later ctx.memory.append against the
+        // same tuple throws ReadOnlyMemoryError. The flag persists
+        // for the run — a single readOnly mount poisons writes for
+        // the rest of the run, matching the "shared playbook" intent.
+        if (memoryReadOnly) {
+          readOnlyMemoryKeys.add(memoryReadOnlyKey(memoryScope, memoryName));
+        }
         try {
           memoryDir = resolveMemoryDir({
             scope: memoryScope,
@@ -993,6 +1017,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
             mockAgents: opts.mockAgents,
             ...(opts.acceptEdits ? { acceptEdits: true } : {}),
             ...(memoryDir !== null ? { memoryDir } : {}),
+            ...(memoryReadOnly ? { memoryReadOnly: true } : {}),
             ...(typeof handle.opts.model === "string"
               ? { model: handle.opts.model }
               : {}),
@@ -1286,14 +1311,41 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   // Mid-phase pause-and-route. The Nth `ctx.interrupt(...)` call gets a
   // deterministic key `int-N` so a resumed run can pre-populate the same
   // call site from the prior ledger's `interrupt_resolved` entries.
+  //
+  // Returns `{ok:true, value: {key, value}}` to the workflow. Authors
+  // doing concurrent interrupts in parallel `ctx.phase()` agents can
+  // capture `key` and pass it to `WorkflowClient.resume(runId, value,
+  // {key})` for explicit disambiguation. Sequential callers can
+  // destructure or ignore the wrapping.
   let interruptCounter = 0;
   async function interruptFn(
     optsArg: unknown,
-  ): Promise<RunCtxBridgeResult<unknown>> {
+  ): Promise<RunCtxBridgeResult<{ key: string; value: unknown }>> {
     try {
       const cfg = parseInterruptOpts(optsArg);
       const idx = interruptCounter++;
       const key = `int-${idx}`;
+
+      // Helper: validate the resolved value against opts.schema if
+      // present. Throws InterruptValueValidationError on mismatch —
+      // the workflow's awaiter sees the typed error in its catch
+      // block (or in the agent’s rejected promise). On success: no-op.
+      const validateValue = (val: unknown): void => {
+        if (cfg.schema === undefined) return;
+        try {
+          validateAgainstSchema(val, cfg.schema);
+        } catch (e) {
+          if (e instanceof SchemaValidationError) {
+            throw new InterruptValueValidationError(
+              key,
+              e.path,
+              e.expected,
+              e.actual,
+            );
+          }
+          throw e;
+        }
+      };
 
       // 1. Replay-perfect short-circuit. If a prior run resolved this
       //    interrupt and the result was replayed in via opts, return it
@@ -1301,19 +1353,24 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       //    with `source:"replay"` so the new ledger captures the answer
       //    even though no IPC round-trip happened (a downstream resume
       //    of THIS run finds it without re-walking the prior ledger).
+      //    Schema validation re-runs here — the schema may have changed
+      //    between runs, and cached "good" values from a stricter past
+      //    schema must still pass the current one.
       if (
         opts.replayResolvedInterrupts !== undefined &&
         opts.replayResolvedInterrupts.has(key)
       ) {
         const replayed = opts.replayResolvedInterrupts.get(key);
+        const normalized = replayed === undefined ? null : replayed;
+        validateValue(normalized);
         await opts.ledger.append({
           type: "interrupt_resolved",
           at: nowIso(),
           key,
-          value: replayed === undefined ? null : replayed,
+          value: normalized,
           source: "replay",
         });
-        return { ok: true, value: replayed === undefined ? null : replayed };
+        return { ok: true, value: { key, value: normalized } };
       }
 
       // 2. Write the request entry. Choices/default are optional;
@@ -1376,6 +1433,22 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       }
       const cloned: unknown = JSON.parse(JSON.stringify(normalized));
 
+      // 6b. Schema validation (gap follow-up #3). Runs AFTER the
+      //     JSON-clone so the validated value is the one we'd actually
+      //     store. On mismatch, the resolution still gets ledgered
+      //     (so a future replay sees what was injected) but the
+      //     workflow's await throws InterruptValueValidationError.
+      let schemaError: InterruptValueValidationError | null = null;
+      try {
+        validateValue(cloned);
+      } catch (e) {
+        if (e instanceof InterruptValueValidationError) {
+          schemaError = e;
+        } else {
+          throw e;
+        }
+      }
+
       // 7. Write the resolution entry.
       await opts.ledger.append({
         type: "interrupt_resolved",
@@ -1396,7 +1469,8 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         /* swallow */
       }
 
-      return { ok: true, value: cloned };
+      if (schemaError !== null) throw schemaError;
+      return { ok: true, value: { key, value: cloned } };
     } catch (e) {
       return { ok: false, error: captureError(e) };
     }
@@ -1617,11 +1691,16 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     text: unknown,
   ): Promise<RunCtxBridgeResult<null>> {
     try {
-      const { dir } = resolveMemoryArgs(
+      const { dir, scope: parsedScope, name: safeName } = resolveMemoryArgs(
         name,
         scope,
         "ctx.memory.append",
       );
+      // gap follow-up #5: refuse to write to a (scope, name) tuple
+      // that any prior ctx.agent() call mounted with readOnly:true.
+      if (readOnlyMemoryKeys.has(memoryReadOnlyKey(parsedScope, safeName))) {
+        throw new ReadOnlyMemoryError(safeName, parsedScope);
+      }
       if (typeof text !== "string") {
         throw new TypeError(
           `ctx.memory.append: text must be a string (got ${typeof text})`,
@@ -1857,24 +1936,33 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
    *
    * Accepts:
    *   - a plain string (treated as `{ question }`)
-   *   - `{ question: string, choices?: string[], default?: unknown }`
+   *   - `{ question: string, choices?: string[], default?: unknown,
+   *      schema?: object }`
    *
    * Throws on any other shape so the caller's error envelope carries a
    * descriptive message. JSON-clones `choices` and `default` so realm
    * leaks / cycles fail at the host boundary.
+   *
+   * `schema` (if provided) is validated against the resume value
+   * before the interrupt resolves — see `interruptFn` below for the
+   * validation site. Schema is NOT JSON-cloned because schema objects
+   * commonly contain shared references (e.g. nested object types) that
+   * are JSON-cloneable but the clone is wasteful; we hold the original
+   * reference in the runtime.
    */
   function parseInterruptOpts(optsArg: unknown): {
     question: string;
     choices?: ReadonlyArray<string>;
     hasDefault: boolean;
     defaultValue: unknown;
+    schema?: Record<string, unknown>;
   } {
     if (typeof optsArg === "string") {
       return { question: optsArg, hasDefault: false, defaultValue: undefined };
     }
     if (optsArg === null || typeof optsArg !== "object" || Array.isArray(optsArg)) {
       throw new TypeError(
-        "ctx.interrupt: opts must be a string question or { question, choices?, default? } object",
+        "ctx.interrupt: opts must be a string question or { question, choices?, default?, schema? } object",
       );
     }
     const o = optsArg as Record<string, unknown>;
@@ -1912,9 +2000,25 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         );
       }
     }
-    return choices !== undefined
-      ? { question: o.question, choices, hasDefault, defaultValue }
-      : { question: o.question, hasDefault, defaultValue };
+    let schema: Record<string, unknown> | undefined;
+    if (o.schema !== undefined && o.schema !== null) {
+      if (typeof o.schema !== "object" || Array.isArray(o.schema)) {
+        throw new TypeError(
+          "ctx.interrupt: opts.schema must be a JSON Schema object",
+        );
+      }
+      schema = o.schema as Record<string, unknown>;
+    }
+    const out: {
+      question: string;
+      choices?: ReadonlyArray<string>;
+      hasDefault: boolean;
+      defaultValue: unknown;
+      schema?: Record<string, unknown>;
+    } = { question: o.question, hasDefault, defaultValue };
+    if (choices !== undefined) out.choices = choices;
+    if (schema !== undefined) out.schema = schema;
+    return out;
   }
 
   const host: RunCtxHost = {
@@ -2062,6 +2166,37 @@ export class SchemaValidationError extends Error {
       `ctx.agent schema: validation failed at "${path}": expected ${expected}, got ${actual}`,
     );
     this.name = "SchemaValidationError";
+    this.path = path;
+    this.expected = expected;
+    this.actual = actual;
+  }
+}
+
+/**
+ * ZONE_HITL gap follow-up #3 — thrown when a `ctx.interrupt({schema})`
+ * receives a resume value that doesn't match the declared schema.
+ * The supervisor sees the original interrupt prompt; the workflow
+ * author sees this typed error so they can re-prompt or take an
+ * alternate code path. Mirrors `SchemaValidationError`'s shape so
+ * `e instanceof Error && e.name === 'InterruptValueValidationError'`
+ * works across the realm boundary.
+ */
+export class InterruptValueValidationError extends Error {
+  readonly key: string;
+  readonly path: string;
+  readonly expected: string;
+  readonly actual: string;
+  constructor(
+    key: string,
+    path: string,
+    expected: string,
+    actual: string,
+  ) {
+    super(
+      `ctx.interrupt(${JSON.stringify(key)}) schema: validation failed at "${path}": expected ${expected}, got ${actual}`,
+    );
+    this.name = "InterruptValueValidationError";
+    this.key = key;
     this.path = path;
     this.expected = expected;
     this.actual = actual;

@@ -669,7 +669,7 @@ export interface RunCtxHost {
    * Returns `{ ok: true, value }` where `value` is the JSON-cloneable
    * answer; `{ ok: false, error }` on abort or invalid args.
    */
-  interrupt(opts: unknown): Promise<RunCtxBridgeResult<unknown>>;
+  interrupt(opts: unknown): Promise<RunCtxBridgeResult<{ key: string; value: unknown }>>;
   /**
    * gap/ctx-memo — check if a cross-run memo entry exists and is fresh.
    * Returns `{ hit: true, value }` on a cache hit, or `{ hit: false }` on miss.
@@ -1001,6 +1001,15 @@ export interface DispatcherOptions {
    * surface them without aborting the agent run.
    */
   readonly memoryDir?: string;
+  /**
+   * ZONE_MEMORY follow-up #5: when `true`, the dispatcher COLLECTS
+   * `{type:'memory_update'}` events but DOES NOT write them to disk
+   * — each is logged via stderr instead. Used by `ctx.agent({memory:
+   * {scope, readOnly: true}})` to share a "playbook" memory file
+   * without granting the sub-agent a write-back channel. No-op when
+   * `memoryDir` is unset (no memory was mounted at all).
+   */
+  readonly memoryReadOnly?: boolean;
 }
 
 /** Minimal ChildProcess shape the dispatcher needs. */

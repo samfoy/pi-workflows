@@ -288,13 +288,92 @@ export function buildPromptWithMemory(
  * Throws `TypeError` for shapes that look like an attempt to enable
  * memory but with the wrong type (e.g. `{}` or `42`) so authors get
  * a clear error instead of silently disabled memory.
+ *
+ * NOTE: this returns ONLY the scope — it does not surface the
+ * `readOnly` flag from the object form. Callers that need read-only
+ * semantics use {@link parseMemoryOpts} instead. This narrow helper
+ * is preserved for back-compat with code paths that only care about
+ * scope resolution.
  */
 export function parseMemoryScope(raw: unknown): MemoryScope | null {
   if (raw === false || raw === undefined || raw === null) return null;
   if (raw === "user" || raw === "project" || raw === "local") return raw;
+  if (raw !== null && typeof raw === "object" && !Array.isArray(raw)) {
+    const o = raw as Record<string, unknown>;
+    if (o.scope === "user" || o.scope === "project" || o.scope === "local") {
+      return o.scope;
+    }
+  }
   throw new TypeError(
-    `ctx.agent: opts.memory must be 'user' | 'project' | 'local' | false (got ${JSON.stringify(raw)})`,
+    `ctx.agent: opts.memory must be 'user' | 'project' | 'local' | false | { scope, readOnly? } (got ${JSON.stringify(raw)})`,
   );
+}
+
+/**
+ * Parsed memory options. The object form lets authors flag a memory
+ * mount as read-only — the runtime injects MEMORY.md into the
+ * sub-agent prompt as usual but drops any `{type:'memory_update'}`
+ * events the sub-agent emits. Useful for shared "playbook" personas
+ * where a writer would corrupt the canonical memory file.
+ */
+export interface MemoryOpts {
+  readonly scope: MemoryScope;
+  readonly readOnly: boolean;
+}
+
+/**
+ * Parse a raw `opts.memory` value into a typed `MemoryOpts | null`.
+ * Accepts the legacy string shape (`'user'|'project'|'local'`) and
+ * the v0.3 object shape (`{ scope, readOnly? }`). Returns `null` for
+ * `false`/`undefined`/`null` (no-op).
+ *
+ * Throws `TypeError` for malformed shapes — same blame surface as
+ * {@link parseMemoryScope}.
+ */
+export function parseMemoryOpts(raw: unknown): MemoryOpts | null {
+  if (raw === false || raw === undefined || raw === null) return null;
+  if (raw === "user" || raw === "project" || raw === "local") {
+    return { scope: raw, readOnly: false };
+  }
+  if (typeof raw === "object" && !Array.isArray(raw)) {
+    const o = raw as Record<string, unknown>;
+    if (o.scope === "user" || o.scope === "project" || o.scope === "local") {
+      const readOnly = o.readOnly === true;
+      return { scope: o.scope, readOnly };
+    }
+  }
+  throw new TypeError(
+    `ctx.agent: opts.memory must be 'user' | 'project' | 'local' | false | { scope, readOnly? } (got ${JSON.stringify(raw)})`,
+  );
+}
+
+/**
+ * Build a string key for a (scope, name) tuple — used to track which
+ * tuples are flagged read-only across the run so `ctx.memory.append`
+ * can refuse writes against them.
+ */
+export function memoryReadOnlyKey(scope: MemoryScope, name: string): string {
+  return `${scope}:${name}`;
+}
+
+/**
+ * Thrown by `ctx.memory.append` when the (name, scope) tuple has been
+ * marked read-only via a prior `ctx.agent({memory: {scope, readOnly:
+ * true}, name})` call. Mirrors `SchemaValidationError`'s shape so
+ * `e instanceof Error && e.name === 'ReadOnlyMemoryError'` works
+ * across the realm boundary.
+ */
+export class ReadOnlyMemoryError extends Error {
+  readonly memoryName: string;
+  readonly memoryScope: MemoryScope;
+  constructor(memoryName: string, memoryScope: MemoryScope) {
+    super(
+      `ctx.memory.append: "${memoryName}" (${memoryScope}) is mounted read-only — drop the readOnly flag on ctx.agent() or call from a different name/scope.`,
+    );
+    this.name = "ReadOnlyMemoryError";
+    this.memoryName = memoryName;
+    this.memoryScope = memoryScope;
+  }
 }
 
 // ─── Cross-check on resume (gap follow-up #3) ───────────────────────

@@ -141,10 +141,15 @@ at the old path and isn't being seen by the resumed run.
    runDir and are GC'd with the run. `user` / `project` dirs persist
    forever; the existing `gc` module should not touch them but may
    want to surface their disk footprint in the dashboard. *Deferred.*
-5. **Read-only memory.** A `memory: { scope: 'user', readOnly: true }`
-   shape would let an author inject memory without exposing the
-   write-back channel — useful for shared "playbook" personas.
-   *Deferred.*
+5. ~~**Read-only memory.**~~ ✅ **shipped** (polish-memory-hitl).
+   `memory: { scope: 'user' | 'project' | 'local', readOnly: true }`
+   on `ctx.agent()` injects MEMORY.md as usual but instructs the
+   dispatcher to log + drop any `{type:'memory_update'}` events the
+   sub-agent emits. `ctx.memory.append(name, scope)` for the same
+   `(scope, name)` tuple throws `ReadOnlyMemoryError` so workflow
+   authors can’t accidentally write to a tuple another call mounted
+   read-only. Useful for shared "playbook" personas. Test:
+   `tests/unit/memory.test.ts — "readOnly mode"` group.
 6. ~~**Stdlib helper.**~~ ✅ shipped — `ctx.memory.read` /
    `ctx.memory.append` / `ctx.memory.compact`.
 

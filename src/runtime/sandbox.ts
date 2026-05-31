@@ -106,7 +106,7 @@ interface RunCtxHostInternal {
   report(eventType: unknown, data?: unknown): RunCtxBridgeResult<null | string>;
   gate(message: unknown, opts?: unknown): Promise<RunCtxBridgeResult<boolean>>;
   /** ZONE_HITL: mid-phase pause-and-route primitive. */
-  interrupt(opts: unknown): Promise<RunCtxBridgeResult<unknown>>;
+  interrupt(opts: unknown): Promise<RunCtxBridgeResult<{ key: string; value: unknown }>>;
   /** ZONE_WORKTREE follow-up #2 — promote agent worktree edits to parent. */
   promote?(
     agentId: unknown,

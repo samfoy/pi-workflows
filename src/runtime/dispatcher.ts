@@ -731,19 +731,38 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
   // sub-agent (no agent_end) doesn't leave partial memory updates on
   // disk. Failures are best-effort — we surface them via stderr but
   // never fail the agent run for a memory-write hiccup.
+  //
+  // gap follow-up #5 (read-only mode): when `opts.memoryReadOnly` is
+  // true, the agent had memory injected for read but is not allowed
+  // to write back. Each `memory_update` is logged to stderr (so the
+  // agent's misbehavior is visible in the run transcript) and
+  // dropped — MEMORY.md is never touched.
   if (opts.memoryDir !== undefined && agg.memoryUpdates.length > 0) {
-    for (const update of agg.memoryUpdates) {
+    if (opts.memoryReadOnly === true) {
       try {
-        await appendMemoryUpdate(opts.memoryDir, update);
-      } catch (e) {
+        const dropped = agg.memoryUpdates.length;
+        await fs.appendFile(
+          stderrPath,
+          `[pi-workflows] dropped ${dropped} memory_update event(s) — memoryReadOnly=true (sub-agent attempted to write to a read-only mount)\n`,
+          "utf8",
+        );
+      } catch {
+        /* ignore */
+      }
+    } else {
+      for (const update of agg.memoryUpdates) {
         try {
-          await fs.appendFile(
-            stderrPath,
-            `[pi-workflows] memory_update append failed: ${(e as Error).message}\n`,
-            "utf8",
-          );
-        } catch {
-          /* ignore */
+          await appendMemoryUpdate(opts.memoryDir, update);
+        } catch (e) {
+          try {
+            await fs.appendFile(
+              stderrPath,
+              `[pi-workflows] memory_update append failed: ${(e as Error).message}\n`,
+              "utf8",
+            );
+          } catch {
+            /* ignore */
+          }
         }
       }
     }

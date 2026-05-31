@@ -134,7 +134,11 @@ test("ctx.interrupt: waitForInterrupt resolves → returns the injected value", 
 
     const result = await p;
     assert.ok(result.ok, "envelope ok");
-    assert.deepEqual(result.value, { action: "deploy", version: "1.2.3" });
+    // ZONE_HITL polish: ctx.interrupt now returns `{key, value}` so
+    // authors can disambiguate concurrent interrupts. The unwrapped
+    // injected value lives at `.value.value`.
+    assert.equal(result.value.key, "int-0");
+    assert.deepEqual(result.value.value, { action: "deploy", version: "1.2.3" });
   } finally {
     ctx.cleanup();
   }
@@ -156,9 +160,14 @@ test("ctx.interrupt: sequential calls get deterministic int-N keys", async () =>
 
     assert.ok(r0.ok && r1.ok && r2.ok);
     assert.deepEqual(seenKeys, ["int-0", "int-1", "int-2"]);
-    assert.equal(r0.value, "int-0");
-    assert.equal(r1.value, "int-1");
-    assert.equal(r2.value, "int-2");
+    // ZONE_HITL polish: result wraps as {key, value}; the echo
+    // value here is the key string itself.
+    assert.equal(r0.value.key, "int-0");
+    assert.equal(r0.value.value, "int-0");
+    assert.equal(r1.value.key, "int-1");
+    assert.equal(r1.value.value, "int-1");
+    assert.equal(r2.value.key, "int-2");
+    assert.equal(r2.value.value, "int-2");
   } finally {
     ctx.cleanup();
   }
@@ -175,7 +184,8 @@ test("ctx.interrupt: no waitForInterrupt + opts.default → returns default imme
       default: "skip",
     });
     assert.ok(result.ok);
-    assert.equal(result.value, "skip");
+    assert.equal(result.value.key, "int-0");
+    assert.equal(result.value.value, "skip");
   } finally {
     ctx.cleanup();
   }
@@ -187,7 +197,8 @@ test("ctx.interrupt: no waitForInterrupt + no default → returns null", async (
   try {
     const result = await ctx.host.interrupt({ question: "Proceed?" });
     assert.ok(result.ok);
-    assert.equal(result.value, null);
+    assert.equal(result.value.key, "int-0");
+    assert.equal(result.value.value, null);
   } finally {
     ctx.cleanup();
   }
@@ -200,7 +211,8 @@ test("ctx.interrupt: string shorthand → treated as { question }", async () => 
     const result = await ctx.host.interrupt("Continue?" as unknown);
     assert.ok(result.ok, "string shorthand should be accepted");
     // No default → null.
-    assert.equal(result.value, null);
+    assert.equal(result.value.key, "int-0");
+    assert.equal(result.value.value, null);
   } finally {
     ctx.cleanup();
   }
@@ -344,8 +356,10 @@ test("ctx.interrupt: replayResolvedInterrupts short-circuits matching key", asyn
     const r1 = await ctx.host.interrupt({ question: "Q2?" });
 
     assert.ok(r0.ok && r1.ok);
-    assert.equal(r0.value, "from-prior-run");
-    assert.deepEqual(r1.value, { saved: true });
+    assert.equal(r0.value.key, "int-0");
+    assert.equal(r0.value.value, "from-prior-run");
+    assert.equal(r1.value.key, "int-1");
+    assert.deepEqual(r1.value.value, { saved: true });
     assert.equal(waitCalled, 0, "waitForInterrupt should be skipped on replay");
 
     // The new ledger gets fresh resolved entries with source='replay'
@@ -380,8 +394,12 @@ test("ctx.interrupt: replay miss falls through to live wait", async () => {
     const r0 = await ctx.host.interrupt({ question: "Q1?" });
     const r1 = await ctx.host.interrupt({ question: "Q2?" });
 
-    assert.equal(r0.ok && r0.value, "replayed");
-    assert.equal(r1.ok && r1.value, "live-int-1");
+    assert.ok(r0.ok);
+    assert.equal(r0.value.key, "int-0");
+    assert.equal(r0.value.value, "replayed");
+    assert.ok(r1.ok);
+    assert.equal(r1.value.key, "int-1");
+    assert.equal(r1.value.value, "live-int-1");
     assert.equal(liveCalls, 1, "live wait fires only for the un-replayed key");
   } finally {
     ctx.cleanup();

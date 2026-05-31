@@ -662,19 +662,39 @@ Suspends the workflow until a supervisor injects an answer (via
 restart — a resumed run replays prior `interrupt_resolved` ledger
 entries to restore answers without re-prompting.
 
+Returns `{ key, value }` so authors fanning out concurrent interrupts
+in parallel `ctx.phase()` agents can capture the key and pass it back
+to `WorkflowClient.resume(runId, value, { key })` for explicit
+disambiguation. Sequential callers can destructure or ignore the
+wrapping.
+
 ```js
 // Free-form answer.
-const plan = await ctx.interrupt({ question: "What's the rollout plan?" });
+const { value: plan } = await ctx.interrupt({ question: "What's the rollout plan?" });
 
 // Multi-choice with default.
-const env = await ctx.interrupt({
+const { value: env } = await ctx.interrupt({
   question: "Pick a target",
   choices: ["staging", "prod"],
   default: "staging",
 });
 
+// Concurrent interrupts — capture keys for explicit resume routing.
+const [{ key: keyA, value: a }, { key: keyB, value: b }] = await Promise.all([
+  ctx.interrupt({ question: "Region A?" }),
+  ctx.interrupt({ question: "Region B?" }),
+]);
+
+// Optional shape validation on the resume value.
+const { value: cfg } = await ctx.interrupt({
+  question: "Settings?",
+  schema: { type: "object", required: ["ok"], properties: { ok: { type: "boolean" } } },
+});
+// Throws InterruptValueValidationError if the supervisor's payload
+// doesn't match the schema.
+
 // String shorthand.
-const note = await ctx.interrupt("Add a release note?");
+const { value: note } = await ctx.interrupt("Add a release note?");
 ```
 
 When no supervisor is wired, resolves immediately with `opts.default ?? null`.
