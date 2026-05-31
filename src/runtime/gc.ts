@@ -25,7 +25,7 @@
  * must be invoked explicitly via `/workflows gc [--apply]`.
  */
 
-import { existsSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
+import { appendFileSync, existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { LedgerReader, TERMINAL_STATES } from "./ledger.js";
@@ -51,7 +51,8 @@ export interface GcSkipped {
     | "active-resume-lock"
     | "younger-than-cutoff"
     | "missing-manifest"
-    | "read-error";
+    | "read-error"
+    | "has-fork-children";
   readonly details?: string;
 }
 
@@ -90,6 +91,17 @@ export interface GcOptions {
    * scripted batch GC). Default false.
    */
   readonly forceRemoveDirtyWorktrees?: boolean;
+  /**
+   * ZONE_TIMETRAVEL polish (recursive-fork GC). When `false` (default),
+   * a candidate that has surviving forks (any other run's manifest
+   * carries `parentRunId === <this>`) is REFUSED — the candidate is
+   * moved to `skipped` with reason `"has-fork-children"`. When `true`,
+   * the parent is deleted anyway and each surviving fork's manifest
+   * is patched with `parentDeletedAt: <iso>` plus a `log: warn`
+   * tombstone ledger line so observability tools can render the
+   * broken-lineage state. Has no effect when `apply` is false.
+   */
+  readonly force?: boolean;
   /** Test seam: replace execFile for git invocations during prune. */
   readonly _execFile?: ExecFileLike;
   /** Log sink. */
@@ -221,6 +233,39 @@ export async function runGc(opts: GcOptions = {}): Promise<GcResult> {
     return result;
   }
 
+  // ZONE_TIMETRAVEL polish — build a fork-children index BEFORE
+  // scanning candidates. For each `wf-...` run dir, read its
+  // manifest's `parentRunId` and bucket the child runId under the
+  // parent. Children whose `parentRunId` doesn't appear in the
+  // runs-root set are surfaced as orphans (a log warning) but still
+  // included in the index so they don't block any GC of OTHER runs.
+  const childrenByParent = new Map<string, string[]>();
+  const runIdSet = new Set<string>(
+    entries.filter((e) => e.startsWith("wf-")),
+  );
+  for (const entry of entries) {
+    if (!entry.startsWith("wf-")) continue;
+    const childManifest = readManifestForGc(join(runsRoot, entry));
+    if (
+      childManifest === null ||
+      typeof childManifest.parentRunId !== "string" ||
+      childManifest.parentRunId.length === 0
+    ) {
+      continue;
+    }
+    const parentId = childManifest.parentRunId;
+    const list = childrenByParent.get(parentId) ?? [];
+    list.push(entry);
+    childrenByParent.set(parentId, list);
+    if (!runIdSet.has(parentId)) {
+      log?.(
+        "warn",
+        `gc: orphan fork ${entry} — parent ${parentId} not present in runs root`,
+        { child: entry, parent: parentId },
+      );
+    }
+  }
+
   for (const entry of entries) {
     if (!entry.startsWith("wf-")) continue;
     const runDir = join(runsRoot, entry);
@@ -253,7 +298,78 @@ export async function runGc(opts: GcOptions = {}): Promise<GcResult> {
   // Optionally delete candidates.
   if (apply) {
     const pruneWorktrees = opts.pruneWorktrees !== false; // default ON
+    const force = opts.force === true;
+    // ZONE_TIMETRAVEL polish — first pass: any candidate that has
+    // surviving forks is moved to `skipped` (when `force === false`).
+    // We do this BEFORE the worktree-prune loop so refused candidates
+    // never have their worktrees removed. "Surviving" = the fork's
+    // run dir is on disk RIGHT NOW; whether the fork is itself a GC
+    // candidate in this same pass is irrelevant. The user-visible
+    // contract is "don't silently break a lineage chain on a single
+    // pass" — if both A and B are eligible, the operator can re-run
+    // GC after B is deleted (lineage is auto-broken on the next pass).
+    const survivors: GcCandidate[] = [];
     for (const c of result.candidates) {
+      const liveChildren = (childrenByParent.get(c.runId) ?? []).filter(
+        (childId) => runIdSet.has(childId),
+      );
+      if (liveChildren.length === 0) {
+        survivors.push(c);
+        continue;
+      }
+      if (!force) {
+        result.skipped.push({
+          runId: c.runId,
+          reason: "has-fork-children",
+          details: `forks: [${liveChildren.join(", ")}]; pass force:true to override`,
+        });
+        log?.(
+          "warn",
+          `gc: refused ${c.runId} — ${liveChildren.length} surviving fork(s); pass force:true to override`,
+          { children: liveChildren },
+        );
+        continue;
+      }
+      // force === true — mark each surviving fork's manifest with
+      // `parentDeletedAt: <iso>` AND append a `log: warn` tombstone
+      // ledger line. Both are best-effort — a single fork-side
+      // failure must not abort the parent's GC.
+      const tombstoneAt = new Date(nowMs).toISOString();
+      for (const childId of liveChildren) {
+        const childDir = join(runsRoot, childId);
+        try {
+          patchManifestParentDeletedAt(childDir, c.runId, tombstoneAt);
+        } catch (err) {
+          log?.(
+            "warn",
+            `gc: failed to patch tombstone in ${childId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        try {
+          appendTombstoneLedgerLine(
+            childDir,
+            c.runId,
+            tombstoneAt,
+          );
+        } catch (err) {
+          log?.(
+            "warn",
+            `gc: failed to append tombstone ledger line in ${childId}: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        log?.(
+          "warn",
+          `gc: force-delete — marked ${childId} with parentDeletedAt=${tombstoneAt} (parent ${c.runId})`,
+          { child: childId, parent: c.runId, at: tombstoneAt },
+        );
+      }
+      survivors.push(c);
+    }
+    // Replace the candidates list with the survivor subset — callers
+    // see exactly which runs were both eligible AND not blocked by
+    // surviving forks.
+    result.candidates = survivors;
+    for (const c of survivors) {
       // ZONE_WORKTREE follow-up #1: prune any per-agent worktrees
       // recorded in this run's manifest BEFORE rm-rf'ing the runDir.
       // Otherwise `git worktree list` keeps stale entries pointing into
@@ -320,10 +436,19 @@ export async function runGc(opts: GcOptions = {}): Promise<GcResult> {
  * Read just the worktree-relevant fields out of `<runDir>/manifest.json`
  * for GC's prune step. Returns `null` if the file is absent or unreadable
  * (the caller treats both as "no worktrees to prune").
+ *
+ * Also surfaces fork-lineage fields (`parentRunId`, `forkAtPhase`,
+ * `parentDeletedAt`) so the recursive-fork GC pass can index children
+ * by parent without re-parsing the manifest.
  */
 function readManifestForGc(
   runDirAbs: string,
-): (Pick<RunManifest, "cwd"> & { agentWorktrees?: Record<string, string> }) | null {
+): (Pick<RunManifest, "cwd"> & {
+  agentWorktrees?: Record<string, string>;
+  parentRunId?: string;
+  forkAtPhase?: string;
+  parentDeletedAt?: string;
+}) | null {
   const path = join(runDirAbs, "manifest.json");
   if (!existsSync(path)) return null;
   try {
@@ -333,12 +458,85 @@ function readManifestForGc(
     if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
       return parsed as Pick<RunManifest, "cwd"> & {
         agentWorktrees?: Record<string, string>;
+        parentRunId?: string;
+        forkAtPhase?: string;
+        parentDeletedAt?: string;
       };
     }
   } catch {
     /* ignore */
   }
   return null;
+}
+
+/**
+ * ZONE_TIMETRAVEL polish — tombstone helpers for force-delete of a
+ * parent run that has surviving forks. Patch the child fork's
+ * `manifest.json` with `parentDeletedAt: <iso>` and append a
+ * `log: warn` ledger line documenting the broken lineage. Both are
+ * synchronous (the caller is in the apply loop, which is sync
+ * w.r.t. each candidate); both throw on disk error so the caller's
+ * try/catch can surface the failure as a `gc.errors` entry.
+ */
+function patchManifestParentDeletedAt(
+  childRunDirAbs: string,
+  parentRunId: string,
+  atIso: string,
+): void {
+  const target = join(childRunDirAbs, "manifest.json");
+  if (!existsSync(target)) return; // child manifest gone — nothing to do
+  const raw = readFileSync(target, "utf-8");
+  let parsed: Record<string, unknown> = {};
+  if (raw.trim().length > 0) {
+    const candidate = JSON.parse(raw) as unknown;
+    if (
+      candidate !== null &&
+      typeof candidate === "object" &&
+      !Array.isArray(candidate)
+    ) {
+      parsed = candidate as Record<string, unknown>;
+    }
+  }
+  // Idempotent: don't overwrite a prior tombstone (the earlier write
+  // wins; force-deleting an already-orphaned parent again is a no-op
+  // for the manifest payload).
+  if (typeof parsed["parentDeletedAt"] === "string") return;
+  parsed["parentDeletedAt"] = atIso;
+  // Sanity: the parent we're tombstoning should match the child's
+  // recorded parentRunId. If the manifest doesn't carry one (caller
+  // bug), still write the field — the caller has surfaced the
+  // intent.
+  if (
+    typeof parsed["parentRunId"] !== "string" ||
+    parsed["parentRunId"] !== parentRunId
+  ) {
+    // Don't refuse — just record the attempted parent so debugging
+    // can pinpoint the mismatch.
+    parsed["parentDeletedFrom"] = parentRunId;
+  }
+  // Atomic tmp+rename so a concurrent reader never sees a torn JSON.
+  const tmp = `${target}.tmp-${process.pid}-${Date.now()}`;
+  writeFileSync(tmp, JSON.stringify(parsed, null, 2) + "\n", "utf-8");
+  renameSync(tmp, target);
+}
+
+function appendTombstoneLedgerLine(
+  childRunDirAbs: string,
+  parentRunId: string,
+  atIso: string,
+): void {
+  const target = join(childRunDirAbs, "ledger.jsonl");
+  // Append a single `log: warn` line. We use the existing `log`
+  // discriminator (no schema change required) so existing readers
+  // surface the message verbatim.
+  const line =
+    JSON.stringify({
+      type: "log",
+      at: atIso,
+      level: "warn",
+      message: `parent run ${parentRunId} deleted by force GC at ${atIso}`,
+    }) + "\n";
+  appendFileSync(target, line, { encoding: "utf-8", mode: 0o644 });
 }
 
 async function scanOne(args: {

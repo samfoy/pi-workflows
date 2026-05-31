@@ -242,9 +242,16 @@ export function renderRunsList(
       opts.cursor !== undefined && opts.cursor === idx ? "▸ " : "  ";
     const rawTokens = opts.tokenTotals?.get(r.runId);
     const tokCell = rawTokens !== undefined ? fmtTokensShort(rawTokens) : "—";
+    // ZONE_TIMETRAVEL polish — surface fork lineage as a badge next
+    // to the workflow name. Short parentRunId only (12 chars max) so
+    // the column doesn't blow past COL_WORKFLOW.
+    const workflowCell =
+      r.parentRunId !== undefined
+        ? `${r.workflowName} (fork of ${shortId(r.parentRunId)})`
+        : r.workflowName;
     const cells = [
       pad(shortId(r.runId), COL_RUN_ID),
-      pad(r.workflowName, COL_WORKFLOW),
+      pad(workflowCell, COL_WORKFLOW),
       pad(r.state, COL_STATE),
       pad(startedRel, COL_REL),
       pad(dur, COL_DURATION),

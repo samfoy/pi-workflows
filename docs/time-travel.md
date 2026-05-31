@@ -1,6 +1,6 @@
 # Time travel / fork from checkpoint (ZONE_TIMETRAVEL)
 
-Status: **shipped 2026-05-31** — runtime API + ledger-copy + cache-inheritance + manifest lineage. **Updated 2026-05-31 (zone-tui-hitl-fork):** TUI `f` hotkey + strict cache filtering shipped.
+Status: **shipped 2026-05-31** — runtime API + ledger-copy + cache-inheritance + manifest lineage. **Updated 2026-05-31 (zone-tui-hitl-fork):** TUI `f` hotkey + strict cache filtering shipped. **Updated 2026-05-31 (polish-timetravel):** resume-of-fork lineage + recursive-fork GC validation shipped.
 
 ## Surface
 
@@ -90,15 +90,37 @@ after `atPhase` re-dispatch — fresh against the override values.
   `tests/unit/forkCacheFilter.test.ts` (helper-level) +
   `tests/integration/forkFromCheckpoint.test.ts` ("strict cache
   filtering — post-fork phases re-dispatch" case).
-- **Fork lineage in resume errors.** `resumeRun` doesn't yet read
-  `parentRunId` / `forkAtPhase` for diagnostics. Resuming a fork
-  works (the manifest fields are preserved end-to-end) but
-  ledger-output messaging treats it as a normal run.
-- **Recursive forks.** Forking a fork is supported (the
-  `parentRunId` field chains naturally) but not heavily exercised.
-  GC walks the chain via `parentRunId` lookups — be aware that
-  deleting a parent run that has live forks will leave dangling
-  lineage references in the children's manifests.
+- ~~**Fork lineage in resume errors.**~~ ✅ **Shipped** (polish-timetravel).
+  `resumeRun` reads `manifest.parentRunId` + `manifest.forkAtPhase` and:
+  (a) emits a single `{type:'fork_lineage', parentRunId, forkAtPhase}`
+  ledger entry directly after the `resume` entry so observability
+  tools (overlay, OTel exporter, third-party tail readers) can render
+  the lineage without re-reading the manifest; (b) prefixes any error
+  captured during the resumed run with `fork of <parent> at phase
+  <forkAtPhase> failed: …` — visible in the `error` ledger entry
+  and in the terminal `RunTerminalInfo.error.message`. The runs-list
+  overlay surfaces a `(fork of <short>)` badge in the workflow column
+  for any run whose registry summary carries `parentRunId`. Coverage:
+  `tests/unit/resumeForkLineage.test.ts` (5 tests — ledger entry,
+  error prefix on fork + non-fork regression guard, registry patch,
+  no-emit on non-fork) +
+  `tests/unit/runsList.test.ts` (fork-badge cell rendering).
+- ~~**Recursive forks.**~~ ✅ **Shipped** (polish-timetravel). GC builds
+  a child→parent index over the runs root before scanning candidates.
+  When pruning a run, `runGc` checks the index for any other run on
+  disk whose `manifest.parentRunId` points at the candidate. By
+  default GC **refuses** to delete such a parent: it moves to
+  `result.skipped` with `reason: "has-fork-children"` and `details:
+  "forks: [...]"`. Pass `force: true` to override; on force-delete,
+  each surviving fork's `manifest.json` is patched with
+  `parentDeletedAt: <iso>` and a `log: warn` tombstone line is
+  appended to its `ledger.jsonl` so observability tools render the
+  broken-lineage state. Forks whose `parentRunId` doesn't appear on
+  disk are logged as orphans (advisory — the orphan itself remains
+  GC-eligible). Coverage:
+  `tests/unit/gcRecursiveFork.test.ts` (5 tests — A→B refused, A→B
+  force-delete writes tombstone, A→B→C chain refuses GC of B,
+  orphan logged + still GC'd).
 
 ## Errors
 

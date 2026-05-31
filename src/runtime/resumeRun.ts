@@ -386,6 +386,28 @@ export async function resumeRun(
     // 7. Append a `resume` ledger entry.
     await ledger.append({ type: "resume", at: resumedAt });
 
+    // ZONE_TIMETRAVEL polish — if the manifest carries fork lineage,
+    // emit a single `fork_lineage` ledger entry directly after the
+    // `resume` so observability tools (overlay, OTel exporter,
+    // third-party tail readers) can render "fork of <parent> at <phase>"
+    // without re-reading the manifest.
+    const forkLineage =
+      typeof manifest.parentRunId === "string" &&
+      typeof manifest.forkAtPhase === "string"
+        ? {
+            parentRunId: manifest.parentRunId,
+            forkAtPhase: manifest.forkAtPhase,
+          }
+        : null;
+    if (forkLineage !== null) {
+      await ledger.append({
+        type: "fork_lineage",
+        at: resumedAt,
+        parentRunId: forkLineage.parentRunId,
+        forkAtPhase: forkLineage.forkAtPhase,
+      });
+    }
+
     // ZONE_MEMORY follow-up #3 — resume cross-check.
     // The manifest may carry `agentMemoryDirs` from the original
     // run. If the cwd or $HOME has shifted between runs the recorded
@@ -683,13 +705,17 @@ export async function resumeRun(
         } catch (e) {
           runError = e;
           const captured = captureError(e);
+          const captMsg =
+            forkLineage !== null
+              ? `fork of ${forkLineage.parentRunId} at phase ${forkLineage.forkAtPhase} failed: ${captured.message}`
+              : captured.message;
           await ledger
             .append({
               type: "error",
               at: (opts.nowIso ?? (() => new Date().toISOString()))(),
               error: {
                 name: captured.name,
-                message: captured.message,
+                message: captMsg,
                 ...(captured.stack !== null ? { stack: captured.stack } : {}),
               },
             })
@@ -729,7 +755,10 @@ export async function resumeRun(
             ? null
             : {
                 name: captured.name,
-                message: captured.message,
+                message:
+                  forkLineage !== null
+                    ? `fork of ${forkLineage.parentRunId} at phase ${forkLineage.forkAtPhase} failed: ${captured.message}`
+                    : captured.message,
                 ...(captured.stack !== null ? { stack: captured.stack } : {}),
               };
         terminalResolve({
@@ -872,6 +901,12 @@ export async function resumeRun(
             : initialState,
         startedAt,
         runDir: runDirAbs,
+        ...(forkLineage !== null
+          ? {
+              parentRunId: forkLineage.parentRunId,
+              forkAtPhase: forkLineage.forkAtPhase,
+            }
+          : {}),
       });
     }
 

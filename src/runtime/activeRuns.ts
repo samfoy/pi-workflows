@@ -88,6 +88,19 @@ export interface RunSummary {
   readonly approvalReason?: string;
   /** Working directory at run start (used by overlay metadata). */
   readonly runDir?: string;
+  /**
+   * ZONE_TIMETRAVEL polish — when this run was created by
+   * `forkFromCheckpoint`, this is the parent's runId. The runs-list
+   * renderer surfaces it as a `fork of <short>` badge next to the
+   * workflow name. Populated from `manifest.parentRunId` on register
+   * (both fresh starts and resume).
+   */
+  readonly parentRunId?: string;
+  /**
+   * ZONE_TIMETRAVEL polish — the phase the fork branched at. Paired
+   * with `parentRunId`; absent on non-fork runs.
+   */
+  readonly forkAtPhase?: string;
 }
 
 export type ActiveRunsListener = () => void;
@@ -184,6 +197,16 @@ export class ActiveRunsRegistry {
         : prior?.runDir !== undefined
           ? { runDir: prior.runDir }
           : {}),
+      ...(summaryPatch?.parentRunId !== undefined
+        ? { parentRunId: summaryPatch.parentRunId }
+        : prior?.parentRunId !== undefined
+          ? { parentRunId: prior.parentRunId }
+          : {}),
+      ...(summaryPatch?.forkAtPhase !== undefined
+        ? { forkAtPhase: summaryPatch.forkAtPhase }
+        : prior?.forkAtPhase !== undefined
+          ? { forkAtPhase: prior.forkAtPhase }
+          : {}),
     };
     this.#summaries.set(runId, next);
     this.#notify();
@@ -271,6 +294,12 @@ export class ActiveRunsRegistry {
           ...(d.approval?.reason !== undefined
             ? { approvalReason: d.approval.reason }
             : {}),
+          ...(prior?.parentRunId !== undefined
+            ? { parentRunId: prior.parentRunId }
+            : {}),
+          ...(prior?.forkAtPhase !== undefined
+            ? { forkAtPhase: prior.forkAtPhase }
+            : {}),
         };
         this.#summaries.set(d.runId, next);
         this.#notify();
@@ -294,6 +323,12 @@ export class ActiveRunsRegistry {
             ? { approvalReason: prior.approvalReason }
             : {}),
           ...(prior?.runDir !== undefined ? { runDir: prior.runDir } : {}),
+          ...(prior?.parentRunId !== undefined
+            ? { parentRunId: prior.parentRunId }
+            : {}),
+          ...(prior?.forkAtPhase !== undefined
+            ? { forkAtPhase: prior.forkAtPhase }
+            : {}),
         };
         this.#summaries.set(d.runId, next);
         this.#notify();
@@ -317,6 +352,12 @@ export class ActiveRunsRegistry {
             ? { approvalReason: prior.approvalReason }
             : {}),
           ...(prior?.runDir !== undefined ? { runDir: prior.runDir } : {}),
+          ...(prior?.parentRunId !== undefined
+            ? { parentRunId: prior.parentRunId }
+            : {}),
+          ...(prior?.forkAtPhase !== undefined
+            ? { forkAtPhase: prior.forkAtPhase }
+            : {}),
         };
         this.#summaries.set(d.runId, next);
         this.#handles.delete(d.runId);

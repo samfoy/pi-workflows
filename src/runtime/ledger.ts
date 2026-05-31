@@ -529,6 +529,7 @@ export class LedgerReader {
       case "interrupt_requested":
       case "interrupt_resolved":
       case "appendEntry":
+      case "fork_lineage":
         // Trust upstream — fields are emitted by writer in this
         // package; downstream readers shouldn't refuse a record
         // because of a single missing optional field.

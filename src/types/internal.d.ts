@@ -371,6 +371,15 @@ export interface RunManifest {
    * `phase_start`. Set together with `parentRunId`.
    */
   readonly forkAtPhase?: string;
+  /**
+   * ZONE_TIMETRAVEL polish — set on a child fork when its parent
+   * (referenced by `parentRunId`) was deleted via `runGc({ force: true })`.
+   * The ISO timestamp tombstone tells observability tools the lineage
+   * chain is broken: the parent's ledger / cache are gone, and
+   * `forkFromCheckpoint(parentRunId, ...)` against this fork would no
+   * longer find a usable parent on disk.
+   */
+  readonly parentDeletedAt?: string;
 }
 
 /**
@@ -1294,6 +1303,20 @@ export type LedgerEntry =
       readonly at: string;
       readonly customType: string;
       readonly data: Readonly<Record<string, unknown>>;
+    }
+  | {
+      /**
+       * ZONE_TIMETRAVEL polish — emitted on resume start when the run
+       * was created via `forkFromCheckpoint`. Carries the lineage so
+       * observability tools (overlay, OTel exporter, third-party tail
+       * readers) can render "fork of <parentRunId> at <forkAtPhase>"
+       * without having to re-read the manifest. Written exactly once
+       * per resume — directly after the `resume` entry.
+       */
+      readonly type: "fork_lineage";
+      readonly at: string;
+      readonly parentRunId: string;
+      readonly forkAtPhase: string;
     };
 
 /**

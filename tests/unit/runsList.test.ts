@@ -271,3 +271,38 @@ test("U3: when localRunIds is undefined, NO badge is rendered (slice 13 behavior
   const out = renderRunsList(summaries, { nowMs: NOW });
   assert.ok(!out.rows[0]!.line.includes("remote"));
 });
+
+// ZONE_TIMETRAVEL polish — fork-of-<short> badge in workflow column.
+
+test("fork badge: workflow cell shows '(fork of <short>)' when parentRunId is set", () => {
+  const summaries: RunSummary[] = [
+    {
+      runId: "wf-childfork000",
+      workflowName: "demo",
+      state: "running",
+      startedAt: "2026-05-29T11:59:00Z",
+      parentRunId: "wf-parent000000",
+      forkAtPhase: "p2",
+    },
+  ];
+  const out = renderRunsList(summaries, { nowMs: NOW });
+  assert.equal(out.rows.length, 1);
+  // The workflow column is 22 chars wide so a long fork badge gets
+  // truncated with an ellipsis. Assert on the prefix that survives.
+  assert.match(
+    out.rows[0]!.line,
+    /demo \(fork of wf-pare/,
+    `fork badge missing; got: ${out.rows[0]!.line}`,
+  );
+});
+
+test("fork badge: non-fork run has no '(fork of ...)' suffix", () => {
+  const summaries: RunSummary[] = [
+    summary({ runId: "wf-plain000001", state: "running" }),
+  ];
+  const out = renderRunsList(summaries, { nowMs: NOW });
+  assert.ok(
+    !out.rows[0]!.line.includes("fork of"),
+    `non-fork run must not carry a fork badge; got: ${out.rows[0]!.line}`,
+  );
+});

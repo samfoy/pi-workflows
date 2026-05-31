@@ -1054,6 +1054,12 @@ export async function startWorkflowRun(
       ...(approvalDecision !== null && approvalDecision.reason !== undefined
         ? { approvalReason: approvalDecision.reason }
         : {}),
+      ...(opts.parentRunId !== undefined
+        ? { parentRunId: opts.parentRunId }
+        : {}),
+      ...(opts.forkAtPhase !== undefined
+        ? { forkAtPhase: opts.forkAtPhase }
+        : {}),
     };
     activeRunsRegistry.register(runId, run, summaryPatch);
   }
