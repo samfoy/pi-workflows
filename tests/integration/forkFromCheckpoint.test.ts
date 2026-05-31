@@ -357,3 +357,120 @@ test(
     );
   },
 );
+
+test(
+  "forkFromCheckpoint: strict cache filtering — post-fork phases re-dispatch (no silent parent cache hit)",
+  { timeout: 30_000 },
+  async () => {
+    // ZONE_TIMETRAVEL strict filtering acceptance: when a post-fork
+    // phase's prompt does NOT depend on `overrides`, it must re-
+    // dispatch in the fork (not silently cache-hit the parent's
+    // result). Without strict filtering, p3 in the fork would replay
+    // the parent's output verbatim.
+    const { runsRoot, resolveRunDir } = makeTmpRun();
+    const wfPath = join(runsRoot, "three-phase-fork.workflow.js");
+    copyFixture(wfPath);
+
+    const parentSeed = fixturesFor([
+      { agentId: "a1", prompt: "phase 1 default prompt", text: "P1-PARENT" },
+      { agentId: "a2", prompt: "phase 2 default prompt", text: "P2-PARENT" },
+      { agentId: "a3", prompt: "phase 3 default prompt", text: "P3-PARENT" },
+    ]);
+    const parent = await startWorkflowRun(makeWorkflow(wfPath), "go", {
+      preApproved: true,
+      mockAgents: true,
+      cwd: runsRoot,
+      resolveRunDir,
+      seedFixturesJsonl: parentSeed,
+    });
+    await parent.promise;
+    await parent.terminated;
+
+    // Fork at p2 with NO overrides for p3's prompt. p3's prompt is
+    // identical between parent and fork — same cacheKey — so without
+    // strict filtering it would cache-hit and return P3-PARENT. With
+    // strict filtering, the parent's p3 agent_result is excluded
+    // from the fork's seeded cache, p3.a3 cache-misses, and the fork
+    // dispatches against the FORK fixture (P3-FORK-FRESH).
+    const forkSeed = fixturesFor([
+      // p1.a1 — still expected to cache-hit (pre-fork phase).
+      { agentId: "a1", prompt: "phase 1 default prompt", text: "P1-FORK-NEVER-USED" },
+      // p2.a2 — cache miss either way (we don't pass overrides so
+      // prompt is unchanged, but the parent's p2 result is filtered).
+      { agentId: "a2", prompt: "phase 2 default prompt", text: "P2-FORK-FRESH" },
+      // p3.a3 — the load-bearing assertion: must dispatch this fixture.
+      { agentId: "a3", prompt: "phase 3 default prompt", text: "P3-FORK-FRESH" },
+    ]);
+    const fork = await forkFromCheckpoint(parent.runId, {
+      atPhase: "p2",
+      preApproved: true,
+      mockAgents: true,
+      cwd: runsRoot,
+      resolveRunDir,
+      seedFixturesJsonl: forkSeed,
+    });
+    const forkResult = (await fork.promise) as {
+      phase1: Array<{ text: string; cached: boolean }>;
+      phase2: Array<{ text: string; cached: boolean }>;
+      phase3: Array<{ text: string; cached: boolean }>;
+    };
+    await fork.terminated;
+
+    // p1 still cache-hits.
+    assert.equal(
+      forkResult.phase1[0]?.text,
+      "P1-PARENT",
+      "p1 must cache-hit (parent's text)",
+    );
+    assert.equal(forkResult.phase1[0]?.cached, true, "p1 cached=true");
+
+    // p2 re-dispatches (post-fork phase).
+    assert.equal(
+      forkResult.phase2[0]?.text,
+      "P2-FORK-FRESH",
+      "p2 must re-dispatch (post-fork phase) — not parent's P2-PARENT",
+    );
+    assert.equal(forkResult.phase2[0]?.cached, false, "p2 cached=false");
+
+    // p3 re-dispatches — the strict-filtering assertion. Without it,
+    // p3.cached would be true and p3.text would be P3-PARENT.
+    assert.equal(
+      forkResult.phase3[0]?.text,
+      "P3-FORK-FRESH",
+      "strict-filter: p3 must re-dispatch even though prompt is unchanged",
+    );
+    assert.equal(forkResult.phase3[0]?.cached, false, "strict-filter: p3 cached=false");
+
+    // Read the fork's cache.jsonl pre-execution by checking that the
+    // post-execution cache contains FRESH timestamps for p2 and p3,
+    // i.e. the parent-era agent_result records were NOT inherited.
+    // We can't read pre-execution; instead we verify by ledger: the
+    // fork's ledger contains agent_start (i.e. real dispatch) for
+    // a2@p2 and a3@p3, NOT agent_cache_hit.
+    const forkLedger = readLedger(fork.runDirAbs);
+    const startedA2P2 = forkLedger.some(
+      (e) =>
+        e.type === "agent_start" && e.phaseName === "p2" && e.agentId === "a2",
+    );
+    const startedA3P3 = forkLedger.some(
+      (e) =>
+        e.type === "agent_start" && e.phaseName === "p3" && e.agentId === "a3",
+    );
+    const cachedA3P3 = forkLedger.some(
+      (e) =>
+        e.type === "agent_cache_hit" &&
+        e.phaseName === "p3" &&
+        e.agentId === "a3",
+    );
+    assert.ok(startedA2P2, "fork ledger must show agent_start for p2.a2");
+    assert.ok(startedA3P3, "fork ledger must show agent_start for p3.a3");
+    assert.equal(cachedA3P3, false, "fork ledger must NOT show agent_cache_hit for p3.a3 (strict filter)");
+
+    // Sanity: parent's p3 agent_result IS still on disk (parent intact).
+    const parentCache = readFileSync(join(parent.runDirAbs, "cache.jsonl"), "utf8");
+    assert.ok(
+      parentCache.includes("P3-PARENT"),
+      "parent's cache.jsonl must still contain P3-PARENT (parent intact)",
+    );
+  },
+);

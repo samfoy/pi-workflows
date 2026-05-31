@@ -58,6 +58,8 @@ export type HotkeyActionKind =
   | "restart-requested"
   | "save-script-requested"
   | "visualize-requested"
+  | "interrupt-answer-requested"
+  | "fork-requested"
   | "open-gc-dialog"
   | "open-transcript"
   | "copy-prompt"
@@ -111,6 +113,14 @@ export interface DispatchInput {
   readonly agentId?: string | undefined;
   /** State of the cursor-selected agent (queued | running | done). */
   readonly agentState?: "queued" | "running" | "done" | undefined;
+  /**
+   * ZONE_HITL TUI surface — number of pending interrupts on the
+   * selected run. When > 0, `i` is enabled and emits
+   * `interrupt-answer-requested`. The overlay populates this from
+   * the local pending-interrupt map driven by `interrupt_requested`
+   * / `interrupt_resolved` ledger events.
+   */
+  readonly pendingInterruptCount?: number | undefined;
 }
 
 const NORM_KEY = new Map<string, string>([
@@ -148,6 +158,12 @@ const NORM_KEY = new Map<string, string>([
   ["N", "n"],
   ["v", "v"], // gap/viz: write Mermaid DAG to tmp file
   ["V", "v"],
+  // ZONE_HITL TUI surface: 'i' answers the oldest pending interrupt.
+  ["i", "i"],
+  ["I", "i"],
+  // ZONE_TIMETRAVEL TUI surface: 'f' opens the fork-from-checkpoint dialog.
+  ["f", "f"],
+  ["F", "f"],
 ]);
 
 function normalize(key: string): string {
@@ -228,6 +244,21 @@ export function isHotkeyEnabled(input: DispatchInput): boolean {
       if (input.view === "runs-list") return input.runId !== undefined;
       if (input.view === "phase-view") return input.runId !== undefined;
       return false;
+    case "i":
+      // ZONE_HITL: 'i' answers the oldest pending interrupt for the
+      // selected run. Enabled only when there's at least one pending
+      // interrupt; available on runs-list AND phase-view since either
+      // is a reasonable place to be when the workflow pauses.
+      if (input.view !== "runs-list" && input.view !== "phase-view") return false;
+      if (input.runId === undefined) return false;
+      return (input.pendingInterruptCount ?? 0) > 0;
+    case "f":
+      // ZONE_TIMETRAVEL: 'f' forks the selected run from a chosen
+      // checkpoint. Available on runs-list when a run is selected,
+      // regardless of state — forking a running run is fine (the
+      // parent keeps running independently).
+      if (input.view !== "runs-list") return false;
+      return input.runId !== undefined;
     default:
       return false;
   }
@@ -364,6 +395,21 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
         return { kind: "visualize-requested", runId };
       }
       return { kind: "noop", runId, reason: "disabled-for-state" };
+    case "i":
+      // ZONE_HITL: answer the oldest pending interrupt.
+      if (
+        (input.view === "runs-list" || input.view === "phase-view") &&
+        (input.pendingInterruptCount ?? 0) > 0
+      ) {
+        return { kind: "interrupt-answer-requested", runId };
+      }
+      return { kind: "noop", runId, reason: "disabled-for-state" };
+    case "f":
+      // ZONE_TIMETRAVEL: open the fork dialog for this run.
+      if (input.view === "runs-list") {
+        return { kind: "fork-requested", runId };
+      }
+      return { kind: "noop", runId, reason: "disabled-for-state" };
     default:
       return { kind: "noop", runId, reason: "unknown-key" };
   }
@@ -385,6 +431,11 @@ export function helpForState(
   runState: RunSummaryState | undefined,
   /** When an agent row is selected in phase-view, set its state for agent-level hints. */
   agentState?: "queued" | "running" | "done" | undefined,
+  /**
+   * ZONE_HITL TUI: count of pending interrupts on the selected run.
+   * When > 0, the help line surfaces an enabled `i` bullet.
+   */
+  pendingInterruptCount?: number,
 ): HelpBullet[] {
   const dis = (
     key: string,
@@ -418,6 +469,7 @@ export function helpForState(
         dis("x", agentRunning ? "stop agent" : "stop", noSel || (!agentRunning && !isRunning && !isPaused)),
         dis("s", "save script", noSel || !isTerminal),
         dis("v", "viz", noSel),
+        dis("i", "answer prompt", noSel || (pendingInterruptCount ?? 0) === 0),
         enabled("Esc", "back"),
         enabled("?", "help"),
       ];
@@ -448,6 +500,8 @@ export function helpForState(
     dis("x", "stop", noSel || (!isRunning && !isPaused)),
     dis("r", isPaused ? "resume" : "restart", noSel || (!isTerminal && !isPaused)),
     dis("v", "viz", noSel),
+    dis("i", "answer prompt", noSel || (pendingInterruptCount ?? 0) === 0),
+    dis("f", "fork", noSel),
     enabled("g", "gc"),
     enabled("Esc", "close"),
     enabled("?", "help"),

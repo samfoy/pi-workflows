@@ -148,12 +148,14 @@ npx node --import tsx --test tests/unit/interrupt.test.ts
 
 ## Open follow-ups (deferred, non-blocking)
 
-- **TUI overlay surface.** Today the overlay sees `interrupt.requested`
-  and `interrupt.resolved` events but doesn't render an inline prompt.
-  Next pass: a hotkey + line-editor inside the run overlay so the
-  operator answers without leaving the TUI. (Out of scope for this
-  zone — the IPC path proves the primitive works; UI is a separate
-  ergonomics zone.)
+- ~~**TUI overlay surface.**~~ ✅ **Shipped** (zone-tui-hitl-fork).
+  When `pi-workflows.interrupt.requested` fires, the overlay tracks the
+  payload per-run, surfaces an enabled `i` bullet in the help line, and
+  on press dispatches through `onInterruptAnswerRequested`. The
+  production wiring (workflowCmd.ts) prompts via `ctx.ui.select` (when
+  `choices` is set) or `ctx.ui.input` and posts the answer through
+  `Run.respondInterrupt(value, key)`. End-to-end coverage:
+  `tests/integration/hitlOverlayInterrupt.test.ts`.
 
 - **Multiple concurrent interrupts in parallel phases.** The FIFO
   queue handles N pending interrupts but `WorkflowClient.resume`

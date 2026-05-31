@@ -17,14 +17,20 @@
  *   agent_end a2@p2    ✗  (cut here — atPhase = "p2")
  *   …                  ✗
  *
- * The cache is copied wholesale. Phase-1 agents in the fork have
- * the same `cacheKey` as the parent (same workflow sha + phaseName
- * + agentId + prompt + opts) → cache hit, no re-dispatch. Phase-2+
- * agents whose prompts depend on `overrides` get a different
- * `cacheKey` and re-dispatch with the override values. Agents
- * whose prompts DON'T depend on overrides will hit the parent's
- * cache — that's the workflow author's choice (call it cache reuse,
- * not a bug).
+ * Cache copy is **strictly filtered by phase boundary**. Walk the
+ * parent ledger to find the `phase_start` timestamp for `atPhase`;
+ * any `agent_result` cache record whose `at` is at-or-after that
+ * cutoff is dropped from the seed (it would belong to a post-fork
+ * phase). Phase-1 agents in the fork share the same `cacheKey` as
+ * the parent and cache-hit. Post-fork agents always re-dispatch —
+ * they cannot silently reuse the parent's results even when the
+ * agent prompt does not depend on `overrides`. Author-controlled
+ * records (`author_cache` / `author_cache_delete`) are kept verbatim
+ * since they are not auto-derived from agent execution and may
+ * legitimately encode pre-run state the workflow expects.
+ *
+ * See `_classifyParentCacheLine()` for the per-record decision and
+ * `docs/time-travel.md` for the broader rationale.
  *
  * `overrides` is exposed to the workflow as
  * `await ctx.cache.get('__fork_overrides__')`. The author reads it
@@ -37,12 +43,8 @@
  * field also carries those keys via the runManager merge.
  *
  * Deferred (TODO):
- *   - TUI hotkey to launch a fork from the runs-list view (see
- *     `docs/time-travel.md`).
- *   - Strict cache filtering (currently full-cache copy; relies on
- *     overrides changing prompt → different cacheKey).
  *   - Resume of a forked run (the resumeRun path doesn't yet
- *     surface lineage in error messages).
+ *     surface lineage in error messages — see docs/time-travel.md).
  */
 
 import { existsSync, mkdirSync, promises as fs, readFileSync, writeFileSync } from "node:fs";
@@ -231,6 +233,16 @@ export async function forkFromCheckpoint(
       && e.type !== "error" && e.type !== "shutdown" && e.type !== "cancelled",
   );
 
+  // Strict cache filtering boundary: the timestamp of the cut-point
+  // `phase_start` entry. Any `agent_result` cache record whose `at`
+  // is at-or-after this timestamp belongs to a post-fork phase and
+  // must NOT inherit. Below we use it in `_classifyParentCacheLine`.
+  const cutPhaseStart = entries[cutIndex];
+  const cutAt =
+    cutPhaseStart && cutPhaseStart.type === "phase_start"
+      ? cutPhaseStart.at
+      : ""; // empty string sorts before any ISO timestamp → never excludes
+
   // 3. Mint new runId + create new runDir.
   // We let startWorkflowRun mint the runId via its own factory so
   // there's a single source of truth for runId formatting.
@@ -259,16 +271,21 @@ export async function forkFromCheckpoint(
       // Pre-seed cache.jsonl: copy parent's cache + append the
       // overrides record. We copy raw lines (rather than via
       // CacheStore.replay) so we don't lose any record types this
-      // code doesn't know about (forward-compat).
+      // code doesn't know about (forward-compat). Each line goes
+      // through `_classifyParentCacheLine` for strict-phase
+      // filtering: agent_result records with `at >= cutAt` are
+      // dropped (they belong to post-fork phases). Other record
+      // types (author_cache*, unknown future types) are kept.
       const parentCachePath = join(parentRunDirAbs, "cache.jsonl");
       const lines: string[] = [];
       if (existsSync(parentCachePath)) {
         const buf = readFileSync(parentCachePath, "utf8");
-        // Drop only the trailing empty line; preserve every well-
-        // formed record verbatim.
         for (const raw of buf.split("\n")) {
           const line = raw.trim();
-          if (line.length > 0) lines.push(line);
+          if (line.length === 0) continue;
+          if (_classifyParentCacheLine(line, cutAt) === "keep") {
+            lines.push(line);
+          }
         }
       }
       // Append the overrides record (always — even when overrides is
@@ -353,3 +370,47 @@ export async function forkFromCheckpoint(
 // dependency clue; tests that reach into the cache to verify the
 // overrides record may want to use it directly.
 export { CacheStore };
+
+/**
+ * Decide whether a single `cache.jsonl` line from the parent run
+ * should be inherited by the fork.
+ *
+ * Rules (strict cache filtering for ZONE_TIMETRAVEL):
+ *   - `agent_result` with `at >= cutAt` → "drop" (post-fork phase;
+ *     re-dispatching is the safe behavior).
+ *   - `agent_result` with `at < cutAt` → "keep" (pre-fork phase
+ *     cache hit candidate).
+ *   - any other record type (author_cache, author_cache_delete,
+ *     unknown future types) → "keep" (workflow-author-controlled or
+ *     forward-compat).
+ *   - malformed JSON → "drop" (defensive; a parser error during
+ *     seed would corrupt the fork's cache).
+ *
+ * `cutAt` is the ISO timestamp of the parent's `phase_start` for
+ * the fork's `atPhase`. Pass `""` to disable filtering (legacy
+ * behavior — never excludes a record).
+ *
+ * Exported for unit-testability. Not part of the public API.
+ */
+export function _classifyParentCacheLine(
+  line: string,
+  cutAt: string,
+): "keep" | "drop" {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(line);
+  } catch {
+    return "drop";
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed))
+    return "drop";
+  const r = parsed as Record<string, unknown>;
+  if (typeof r.type !== "string") return "drop";
+  if (r.type !== "agent_result") return "keep";
+  // agent_result without an `at` field is malformed; drop defensively.
+  if (typeof r.at !== "string") return "drop";
+  // Lexicographic ISO comparison is correct here — UTC timestamps
+  // sort the same as their epoch-ms counterparts.
+  if (cutAt.length === 0) return "keep"; // disabled
+  return r.at < cutAt ? "keep" : "drop";
+}

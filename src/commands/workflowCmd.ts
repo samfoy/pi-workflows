@@ -67,6 +67,7 @@ import {
   openTranscriptInEditor,
 } from "../runtime/transcriptOpen.js";
 import { writeMermaidToTmp } from "../runtime/visualize.js";
+import { forkFromCheckpoint } from "../runtime/forkRun.js";
 import { runDir as runDirFor, runsHome } from "../util/paths.js";
 import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -348,6 +349,8 @@ export function registerWorkflowsCommand(
           onVisualizeRequested: callbacks.onVisualizeRequested,
           onOpenTranscript: callbacks.onOpenTranscript,
           onCopyPrompt: callbacks.onCopyPrompt,
+          onInterruptAnswerRequested: callbacks.onInterruptAnswerRequested,
+          onForkRequested: callbacks.onForkRequested,
         });
         if (result.mode === "already-open") {
           ctx.ui.notify("workflows overlay already open", "info");
@@ -398,7 +401,7 @@ export function registerWorkflowsCommand(
           case "show":
             return await handleShow(pi, rest);
           case "resume":
-            return await handleResume(pi, rest);
+            return await handleResume(pi, ctx, rest);
           case "gc":
             return await handleGc(pi, rest);
           case "kill":
@@ -650,6 +653,7 @@ async function handleShow(
 
 async function handleResume(
   pi: ExtensionAPI,
+  ctx: ExtensionCommandContextLike,
   args: ReadonlyArray<string>,
 ): Promise<void> {
   const runId = args.find((a) => !a.startsWith("--"));
@@ -669,9 +673,54 @@ async function handleResume(
     return;
   }
   try {
+    // Slice 13 (carry-forward of slice-11 TODO): wire approval through
+    // pi.ui.confirm. The original intent of the slice-11 stub was
+    // "approval gate is a noop on resume" — but resume DOES re-execute
+    // user code so we must consent before crossing the boundary. When
+    // confirm() is unavailable (older pi build / non-TTY) we fall back
+    // to preApproved=true to preserve the existing slice-11 behavior.
+    let preApproved = true;
+    const confirmFn = ctx.ui.confirm;
+    if (typeof confirmFn === "function") {
+      const summary = useLatest
+        ? `Resume ${runId} with --latest (LIVE workflow file — cache may mostly miss)?`
+        : `Resume ${runId} from frozen script.js?`;
+      try {
+        // pi-coding-agent's confirm signature is (title, message)
+        // — the narrowed Like type only declares (message). Cast to
+        // call either shape; both pi versions accept the message string
+        // in some position so the prompt the user sees is informative.
+        const confirmFnAny = confirmFn as unknown as (
+          ...args: unknown[]
+        ) => Promise<boolean>;
+        const approved = await confirmFnAny("Resume workflow?", summary);
+        if (approved === false) {
+          pi.sendMessage(
+            {
+              customType: STUB_CUSTOM_TYPE,
+              content: `Resume of ${runId} declined.`,
+              display: true,
+              details: { subcommand: "resume", runId, declined: true, slice: 13 },
+            },
+            { triggerTurn: false, deliverAs: "nextTurn" },
+          );
+          return;
+        }
+        // Approved interactively — fall through with preApproved=true
+        // so resumeRun()'s own approval gate is a no-op. The user has
+        // already consented through ctx.ui.confirm.
+        preApproved = true;
+      } catch {
+        // confirm threw (rare — e.g. SIGINT during prompt). Fall
+        // through with preApproved=true rather than blocking; the
+        // user can ^C the resume itself if they meant to abort.
+      }
+    }
+    void preApproved; // tagged for clarity — always true downstream below
+
     const run = await resumeRun(runId, {
       useLatest,
-      preApproved: true, // slice 11: TODO wire approval through pi.ui.confirm in slice 13
+      preApproved: true, // ZONE_TUI_HITL_FORK: gated above via ctx.ui.confirm (slice 13 wiring)
       activeRuns: getActiveRuns(),
       onLatestWarning: (w) =>
         pi.sendMessage(
@@ -911,6 +960,13 @@ interface OverlayCallbacks {
   onVisualizeRequested: (runId: string) => Promise<string | undefined>;
   onOpenTranscript: (transcriptPath: string) => string;
   onCopyPrompt: (text: string) => string;
+  /** ZONE_HITL TUI: prompt for and post the answer to a pending interrupt. */
+  onInterruptAnswerRequested: (
+    runId: string,
+    payload: import("../runtime/overlay.js").PendingInterruptPayload,
+  ) => Promise<string | undefined>;
+  /** ZONE_TIMETRAVEL TUI: prompt for atPhase + overrides JSON, call forkFromCheckpoint. */
+  onForkRequested: (runId: string) => Promise<string | undefined>;
 }
 
 /**
@@ -1201,6 +1257,195 @@ function buildOverlayCallbacks(
         return `copied to clipboard via ${r.tool} (${text.length} chars)`;
       }
       return `clipboard unavailable — ${r.reason.split(".")[0]}`;
+    },
+
+    onInterruptAnswerRequested: async (
+      runId: string,
+      payload: import("../runtime/overlay.js").PendingInterruptPayload,
+    ): Promise<string | undefined> => {
+      // ZONE_HITL TUI: prompt the operator for an answer, then post it
+      // to the run's pending interrupt resolver. Choices use
+      // ctx.ui.select; free-text uses ctx.ui.input. When the operator
+      // dismisses the prompt (Esc), we surface a banner and leave the
+      // run blocked — the next `i` will retry.
+      let answer: string | undefined;
+      const title = `Answer interrupt: ${payload.question}`;
+      try {
+        if (
+          payload.choices !== undefined &&
+          payload.choices.length > 0 &&
+          typeof ctx.ui.select === "function"
+        ) {
+          const sel = ctx.ui.select as (
+            t: string,
+            o: string[],
+          ) => Promise<string | undefined>;
+          answer = await sel(title, [...payload.choices]);
+        } else if (typeof ctx.ui.input === "function") {
+          const inputFn = ctx.ui.input as (
+            t: string,
+            placeholder?: string,
+          ) => Promise<string | undefined>;
+          const placeholder =
+            payload.default !== undefined && payload.default !== null
+              ? String(payload.default)
+              : "answer";
+          answer = await inputFn(title, placeholder);
+        } else {
+          return "interrupt: ctx.ui.input/select unavailable";
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return `interrupt prompt failed: ${msg}`;
+      }
+
+      if (answer === undefined) {
+        // Operator dismissed the prompt. Leave the run blocked.
+        return `interrupt ${payload.key} cancelled — press i to retry`;
+      }
+
+      // Coerce to JSON if the answer parses; fall back to the raw
+      // string. Authors who want a specific shape can require choices.
+      let value: unknown = answer;
+      if (answer.length > 0) {
+        try {
+          value = JSON.parse(answer);
+        } catch {
+          // Not JSON — treat as plain string.
+        }
+      }
+
+      const run = getActiveRuns().getRun(runId);
+      if (run === undefined) {
+        return `interrupt: run ${runId.slice(0, 12)} no longer in registry`;
+      }
+      const ok = run.respondInterrupt(value, payload.key);
+      if (!ok) {
+        return `interrupt: no pending entry matched key ${payload.key}`;
+      }
+      return `interrupt ${payload.key} resolved`;
+    },
+
+    onForkRequested: async (runId: string): Promise<string | undefined> => {
+      // ZONE_TIMETRAVEL TUI: multi-step prompt drives forkFromCheckpoint.
+      //   1. Read parent ledger to build the list of available phases.
+      //   2. ctx.ui.select for atPhase.
+      //   3. ctx.ui.input for overrides JSON (optional; default null).
+      //   4. Call forkFromCheckpoint, surface the new runId.
+      const summary = getActiveRuns().getSummary(runId);
+      if (summary === undefined || summary.runDir === undefined) {
+        return `fork: no run summary for ${runId.slice(0, 12)}`;
+      }
+      // Build phase list from the parent ledger. We avoid coupling to
+      // the phaseRegistry here so a remote run (no in-memory state)
+      // can still be forked.
+      const phases: string[] = [];
+      try {
+        const reader = new LedgerReader({
+          runId,
+          resolveLedgerPath: () => join(summary.runDir!, "ledger.jsonl"),
+        });
+        const { entries } = await reader.read();
+        const seen = new Set<string>();
+        for (const e of entries) {
+          if (e.type === "phase_start" && !seen.has(e.phaseName)) {
+            seen.add(e.phaseName);
+            phases.push(e.phaseName);
+          }
+        }
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return `fork: failed to read parent ledger: ${msg}`;
+      }
+      if (phases.length === 0) {
+        return `fork: parent run has no phases yet`;
+      }
+
+      // Step 2: pick atPhase.
+      let atPhase: string | undefined;
+      if (typeof ctx.ui.select === "function") {
+        const sel = ctx.ui.select as (
+          t: string,
+          o: string[],
+        ) => Promise<string | undefined>;
+        atPhase = await sel("Fork: choose phase to fork at", [...phases]);
+      } else if (typeof ctx.ui.input === "function") {
+        const inputFn = ctx.ui.input as (
+          t: string,
+          placeholder?: string,
+        ) => Promise<string | undefined>;
+        atPhase = await inputFn(
+          `Fork: phase name (one of ${phases.join(", ")})`,
+          phases[0],
+        );
+      } else {
+        return `fork: ctx.ui.select/input unavailable`;
+      }
+      if (atPhase === undefined || atPhase.length === 0) {
+        return "fork: cancelled";
+      }
+      if (!phases.includes(atPhase)) {
+        return `fork: phase "${atPhase}" not found in parent`;
+      }
+
+      // Step 3: overrides JSON (optional).
+      let overrides: unknown = undefined;
+      if (typeof ctx.ui.input === "function") {
+        const inputFn = ctx.ui.input as (
+          t: string,
+          placeholder?: string,
+        ) => Promise<string | undefined>;
+        const raw = await inputFn(
+          "Fork: overrides JSON (optional, leave blank for none)",
+          "{ }",
+        );
+        if (raw !== undefined && raw.trim().length > 0) {
+          try {
+            overrides = JSON.parse(raw);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            return `fork: overrides JSON parse error: ${msg}`;
+          }
+        }
+      }
+
+      // Step 4: launch the fork.
+      try {
+        const approval = buildApprovalBlock(ctx);
+        const fork = await forkFromCheckpoint(runId, {
+          atPhase,
+          ...(overrides !== undefined ? { overrides } : {}),
+          approval,
+          activeRuns: getActiveRuns(),
+          enableGlobalCache: true,
+          emitOverlayEvent: (customType, data) => {
+            if (typeof pi.appendEntry !== "function") return;
+            try {
+              pi.appendEntry(customType, data);
+            } catch {
+              /* swallow */
+            }
+          },
+        });
+        if (typeof pi.appendEntry === "function") {
+          try {
+            pi.appendEntry(RUN_STARTED_ENTRY, {
+              runId: fork.runId,
+              workflowName: summary.workflowName,
+              runDir: fork.runDirAbs,
+              parentRunId: runId,
+              forkAtPhase: atPhase,
+            });
+          } catch {
+            /* swallow */
+          }
+        }
+        void wireRunDelivery(pi, fork);
+        return `forked: ${fork.runId} (parent=${runId.slice(0, 12)}, atPhase=${atPhase})`;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return `fork failed: ${msg}`;
+      }
     },
   };
 }

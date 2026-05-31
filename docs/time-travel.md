@@ -1,6 +1,6 @@
 # Time travel / fork from checkpoint (ZONE_TIMETRAVEL)
 
-Status: **shipped 2026-05-31** — runtime API + ledger-copy + cache-inheritance + manifest lineage. TUI hotkey deferred.
+Status: **shipped 2026-05-31** — runtime API + ledger-copy + cache-inheritance + manifest lineage. **Updated 2026-05-31 (zone-tui-hitl-fork):** TUI `f` hotkey + strict cache filtering shipped.
 
 ## Surface
 
@@ -73,24 +73,23 @@ after `atPhase` re-dispatch — fresh against the override values.
 
 ## Deferred items
 
-- **TUI hotkey.** No `f` key in the runs-list view yet. To fork
-  interactively today, drop into a script:
-  ```bash
-  node -e "
-    import('@samfp/pi-workflows').then(async ({ forkFromCheckpoint }) => {
-      const r = await forkFromCheckpoint('<runId>', { atPhase: '<phase>', preApproved: true });
-      await r.terminated;
-    });
-  "
-  ```
-- **Strict cache filtering.** Currently the entire `cache.jsonl` is
-  copied; cache entries from phases ≥ `atPhase` are stale but
-  harmless (overrides change cacheKey → cache miss → re-dispatch).
-  A future revision could walk the parent ledger, compute which
-  cache keys belong to the post-fork phases, and exclude them.
-  Keep an eye on this when building forks against workflows whose
-  post-fork prompts DON'T depend on `overrides` — those forks will
-  cache-hit the parent's results and silently skip re-dispatch.
+- ~~**TUI hotkey.**~~ ✅ **Shipped** (zone-tui-hitl-fork). The runs-list
+  view binds `f` to a fork-from-checkpoint dialog. Production wiring
+  reads the parent ledger to enumerate phases, prompts via
+  `ctx.ui.select` for `atPhase`, prompts via `ctx.ui.input` for
+  optional `overrides` JSON, and calls `forkFromCheckpoint(...)`. The
+  resulting fork's runId is surfaced in the overlay banner.
+  End-to-end coverage: `tests/integration/forkOverlayHotkey.test.ts`.
+- ~~**Strict cache filtering.**~~ ✅ **Shipped** (zone-tui-hitl-fork).
+  The fork seed copies parent `cache.jsonl` lines through
+  `_classifyParentCacheLine`: `agent_result` records with `at >=`
+  parent's `phase_start` for `atPhase` are dropped. Author-controlled
+  `author_cache` records are kept verbatim. Net effect: post-fork
+  phases re-dispatch even when their prompts don't depend on
+  `overrides`. Coverage:
+  `tests/unit/forkCacheFilter.test.ts` (helper-level) +
+  `tests/integration/forkFromCheckpoint.test.ts` ("strict cache
+  filtering — post-fork phases re-dispatch" case).
 - **Fork lineage in resume errors.** `resumeRun` doesn't yet read
   `parentRunId` / `forkAtPhase` for diagnostics. Resuming a fork
   works (the manifest fields are preserved end-to-end) but

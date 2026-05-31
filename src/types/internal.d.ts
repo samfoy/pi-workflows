@@ -198,6 +198,28 @@ export interface ExtensionContextLike {
     /** Slice 13 — pi-coding-agent's `ctx.ui.confirm` (used by approval). */
     confirm?(message: string): Promise<boolean>;
     /**
+     * ZONE_TUI_HITL_FORK — pi-coding-agent's `ctx.ui.input`. Used by
+     * the resume-confirm gate, the interrupt-answer prompt, and the
+     * fork-from-checkpoint dialog. Optional because non-TTY pi modes
+     * may not expose it; callers degrade gracefully when undefined.
+     * Real signature on `pi-coding-agent` is `(title: string,
+     * placeholder?: string)` — we widen to `unknown` rest args so
+     * callers can pass either shape pi exposes at runtime.
+     */
+    input?(
+      titleOrMessage: string,
+      placeholder?: string,
+    ): Promise<string | undefined>;
+    /**
+     * ZONE_TUI_HITL_FORK — pi-coding-agent's `ctx.ui.select`. Used by
+     * the interrupt-answer dispatch (when `choices` is set) and the
+     * fork-dialog phase picker.
+     */
+    select?(
+      title: string,
+      options: ReadonlyArray<string>,
+    ): Promise<string | undefined>;
+    /**
      * Set a named status indicator in the TUI footer.
      * Pass `undefined` as the second arg to clear.
      * Safe to call from outside event handlers (fire-and-forget).

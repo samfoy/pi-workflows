@@ -467,3 +467,104 @@ test("isHotkeyEnabled: r in phase-view with running agent is enabled", () => {
     true,
   );
 });
+
+// ZONE_HITL TUI surface — `i` answers a pending interrupt.
+test("ZONE_HITL: `i` is enabled on runs-list when pendingInterruptCount > 0", () => {
+  assert.equal(
+    isHotkeyEnabled({
+      key: "i",
+      view: "runs-list",
+      runState: "running",
+      runId: "wf-1",
+      pendingInterruptCount: 1,
+    }),
+    true,
+  );
+});
+
+test("ZONE_HITL: `i` is disabled when no pending interrupts", () => {
+  assert.equal(
+    isHotkeyEnabled({
+      key: "i",
+      view: "runs-list",
+      runState: "running",
+      runId: "wf-1",
+      pendingInterruptCount: 0,
+    }),
+    false,
+  );
+});
+
+test("ZONE_HITL: `i` dispatches interrupt-answer-requested with runId", () => {
+  const action = dispatchHotkey({
+    key: "i",
+    view: "runs-list",
+    runState: "running",
+    runId: "wf-abc",
+    pendingInterruptCount: 2,
+  });
+  assert.equal(action.kind, "interrupt-answer-requested");
+  assert.equal(action.runId, "wf-abc");
+});
+
+test("ZONE_HITL: `i` is also enabled in phase-view", () => {
+  // Operator may have drilled into the phase view when the workflow
+  // pauses. The hotkey works there too — same dispatch.
+  const action = dispatchHotkey({
+    key: "i",
+    view: "phase-view",
+    runState: "running",
+    runId: "wf-abc",
+    pendingInterruptCount: 1,
+  });
+  assert.equal(action.kind, "interrupt-answer-requested");
+});
+
+test("ZONE_HITL: `i` in agent-detail is noop", () => {
+  const action = dispatchHotkey({
+    key: "i",
+    view: "agent-detail",
+    runState: "running",
+    runId: "wf-abc",
+    pendingInterruptCount: 1,
+  });
+  assert.equal(action.kind, "noop");
+});
+
+// ZONE_TIMETRAVEL TUI surface — `f` opens fork dialog.
+test("ZONE_TIMETRAVEL: `f` on runs-list dispatches fork-requested", () => {
+  const action = dispatchHotkey({
+    key: "f",
+    view: "runs-list",
+    runState: "done",
+    runId: "wf-parent01",
+  });
+  assert.equal(action.kind, "fork-requested");
+  assert.equal(action.runId, "wf-parent01");
+});
+
+test("ZONE_TIMETRAVEL: `f` is enabled regardless of run state (forking running runs is allowed)", () => {
+  for (const state of ["running", "paused", "done", "failed", "stopped", "cancelled-pre-run"] as const) {
+    assert.equal(
+      isHotkeyEnabled({ key: "f", view: "runs-list", runState: state, runId: "wf-1" }),
+      true,
+      `f must be enabled for state=${state}`,
+    );
+  }
+});
+
+test("ZONE_TIMETRAVEL: `f` outside runs-list is noop", () => {
+  const action = dispatchHotkey({
+    key: "f",
+    view: "phase-view",
+    runState: "running",
+    runId: "wf-1",
+  });
+  assert.equal(action.kind, "noop");
+});
+
+test("ZONE_TIMETRAVEL: `f` with no runId is noop (no-selection)", () => {
+  const action = dispatchHotkey({ key: "f", view: "runs-list" });
+  assert.equal(action.kind, "noop");
+  assert.equal(action.reason, "no-selection");
+});

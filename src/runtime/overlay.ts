@@ -156,11 +156,50 @@ export interface MountOverlayOpts {
    */
   readonly onCopyPrompt?: (text: string) => string | undefined;
   /**
+   * ZONE_HITL TUI surface — hotkey `i` (answer pending interrupt) on
+   * runs-list / phase-view. Receives the runId plus the pending
+   * interrupt payload (question/choices/default and key). The host
+   * is responsible for prompting the operator (typically through
+   * `pi.ui.input` or `pi.ui.select`) and calling
+   * `Run.respondInterrupt(value, key)` with the answer. Returns the
+   * banner text to display (e.g. "interrupt resolved" or an error).
+   * The overlay does NOT own the prompt UI — keeping the prompt out
+   * of the render loop avoids re-entrancy with `ctx.ui.custom`.
+   */
+  readonly onInterruptAnswerRequested?: (
+    runId: string,
+    payload: PendingInterruptPayload,
+  ) => Promise<string | undefined> | string | undefined;
+  /**
+   * ZONE_TIMETRAVEL TUI surface — hotkey `f` (fork from checkpoint)
+   * on runs-list. Receives the parent runId. The host is responsible
+   * for prompting for atPhase + overrides JSON and calling
+   * `forkFromCheckpoint(...)`. Returns the banner text to display
+   * (e.g. "fork started: <new runId>" or an error).
+   */
+  readonly onForkRequested?: (
+    runId: string,
+  ) => Promise<string | undefined> | string | undefined;
+  /**
    * Slice 15 — GC options forwarded to loadGcCandidates / applyGc.
    * Defaults to system GC settings.
    */
   readonly gcCutoffDays?: number;
   readonly gcRunsRootOverride?: string;
+}
+
+/**
+ * ZONE_HITL TUI surface — the payload an `interrupt_requested`
+ * appendEntry carries forward to the overlay's interrupt-answer
+ * callback. The overlay tracks one entry per (runId, key) pair and
+ * passes the OLDEST pending entry to the callback when the operator
+ * presses `i`.
+ */
+export interface PendingInterruptPayload {
+  readonly key: string;
+  readonly question: string;
+  readonly choices?: ReadonlyArray<string>;
+  readonly default?: unknown;
 }
 
 /** Test-only handle exposing internal overlay state for assertion. */
@@ -402,6 +441,8 @@ export async function mountOverlay(
     onRestartAgent: opts.onRestartAgent,
     onOpenTranscript: opts.onOpenTranscript,
     onCopyPrompt: opts.onCopyPrompt,
+    onInterruptAnswerRequested: opts.onInterruptAnswerRequested,
+    onForkRequested: opts.onForkRequested,
     ...(opts.gcCutoffDays !== undefined ? { gcCutoffDays: opts.gcCutoffDays } : {}),
     ...(opts.gcRunsRootOverride !== undefined ? { gcRunsRootOverride: opts.gcRunsRootOverride } : {}),
   }) as unknown as TuiComponentLike;
@@ -439,6 +480,15 @@ interface OverlayComponentOpts {
   readonly onRestartAgent?: ((runId: string, agentId: string) => void) | undefined;
   readonly onOpenTranscript?: ((transcriptPath: string) => string | undefined) | undefined;
   readonly onCopyPrompt?: ((text: string) => string | undefined) | undefined;
+  readonly onInterruptAnswerRequested?:
+    | ((
+        runId: string,
+        payload: PendingInterruptPayload,
+      ) => Promise<string | undefined> | string | undefined)
+    | undefined;
+  readonly onForkRequested?:
+    | ((runId: string) => Promise<string | undefined> | string | undefined)
+    | undefined;
   readonly gcCutoffDays?: number;
   readonly gcRunsRootOverride?: string;
 }
@@ -488,6 +538,12 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   let lastSnapshot: ReadonlyArray<RunSummary> = opts.registry.listSummaries();
   // gap/ctx-gate: pending gate prompt state.
   let gatePromptState: { runId: string; message: string; defaultAnswer: boolean } | null = null;
+  // ZONE_HITL TUI: per-run FIFO of pending interrupts. Driven by
+  // intercepted appendEntry events (interrupt.requested / .resolved
+  // emitted by runCtx::interruptFn). Cleared per (runId, key) on
+  // resolution. Drives the help-line `i` enable bit and the answer
+  // dispatch payload.
+  const pendingInterrupts: Map<string, PendingInterruptPayload[]> = new Map();
 
   const requestRender = () => {
     if (typeof opts.tui.requestRender === "function") opts.tui.requestRender();
@@ -574,6 +630,51 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         if (customType === "pi-workflows.gate.resolved") {
           gatePromptState = null;
           requestRender();
+        }
+        // ZONE_HITL TUI: track pending ctx.interrupt() requests per run.
+        if (
+          customType === "pi-workflows.interrupt.requested" &&
+          data !== null &&
+          typeof data === "object"
+        ) {
+          const d = data as Record<string, unknown>;
+          if (typeof d.runId === "string" && typeof d.key === "string") {
+            const list = pendingInterrupts.get(d.runId) ?? [];
+            const payload: PendingInterruptPayload = {
+              key: d.key,
+              question:
+                typeof d.question === "string" ? d.question : "(no question)",
+              ...(Array.isArray(d.choices)
+                ? { choices: d.choices.filter((c): c is string => typeof c === "string") }
+                : {}),
+              ...("default" in d ? { default: d.default } : {}),
+            };
+            // Idempotent: dedupe on key (re-emits during resume don't double-up).
+            if (!list.some((e) => e.key === payload.key)) {
+              list.push(payload);
+              pendingInterrupts.set(d.runId, list);
+              requestRender();
+            }
+          }
+        }
+        if (
+          customType === "pi-workflows.interrupt.resolved" &&
+          data !== null &&
+          typeof data === "object"
+        ) {
+          const d = data as Record<string, unknown>;
+          if (typeof d.runId === "string" && typeof d.key === "string") {
+            const list = pendingInterrupts.get(d.runId);
+            if (list !== undefined) {
+              const idx = list.findIndex((e) => e.key === d.key);
+              if (idx >= 0) {
+                list.splice(idx, 1);
+                if (list.length === 0) pendingInterrupts.delete(d.runId);
+                else pendingInterrupts.set(d.runId, list);
+                requestRender();
+              }
+            }
+          }
         }
       }
     };
@@ -688,8 +789,15 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           .filter((p) => p.status === "running")
           .flatMap((p) => p.agents) ?? [];
         const selectedAgentState = runningAgentsForHelp[phaseCursor]?.state;
+        const phasePendingInterrupts =
+          pendingInterrupts.get(openedRunId)?.length ?? 0;
         const help = helpVisible
-          ? helpForState("phase-view", summary.state, selectedAgentState)
+          ? helpForState(
+              "phase-view",
+              summary.state,
+              selectedAgentState,
+              phasePendingInterrupts,
+            )
           : [];
         const opts2: Parameters<typeof renderPhaseView>[2] = {
           nowMs: opts.nowMs(),
@@ -712,7 +820,13 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     }
     const sorted = sortAndClamp(lastSnapshot);
     const selected = sorted[cursor];
-    const help = helpVisible ? helpForState(view, selected?.state) : [];
+    const selectedPendingInterrupts =
+      selected !== undefined
+        ? pendingInterrupts.get(selected.runId)?.length ?? 0
+        : 0;
+    const help = helpVisible
+      ? helpForState(view, selected?.state, undefined, selectedPendingInterrupts)
+      : [];
     const localIds = new Set(
       lastSnapshot.filter((s) => opts.registry.wasLocalRun(s.runId)).map((s) => s.runId),
     );
@@ -1088,6 +1202,82 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           requestRender();
         }
         return;
+      case "interrupt-answer-requested": {
+        // ZONE_HITL TUI: dispatch the oldest pending interrupt for the
+        // run to the host callback. The callback owns the actual
+        // ctx.ui.input/select prompting; the overlay just hands off
+        // the payload + runId. We pop the entry optimistically here
+        // so a second `i` press doesn't try the same one. If the
+        // callback fails, the resolve event from the runtime would
+        // re-deliver — but more likely a callback failure means the
+        // operator dismissed the prompt; the runtime is still blocked
+        // until the next prompt or until the run is killed.
+        if (!action.runId) return;
+        const list = pendingInterrupts.get(action.runId);
+        const payload = list && list.length > 0 ? list[0] : undefined;
+        if (payload === undefined) {
+          setBanner("no pending interrupt to answer");
+          requestRender();
+          return;
+        }
+        if (opts.onInterruptAnswerRequested === undefined) {
+          setBanner("interrupt: no handler wired");
+          requestRender();
+          return;
+        }
+        const runIdCopy = action.runId;
+        setBanner(
+          `answering interrupt ${payload.key} on ${shortenId(runIdCopy)}…`,
+        );
+        requestRender();
+        Promise.resolve(
+          opts.onInterruptAnswerRequested(runIdCopy, payload),
+        )
+          .then((banner) => {
+            // Banner from callback (e.g. "resolved" / "cancelled").
+            if (typeof banner === "string" && banner.length > 0) {
+              setBanner(banner);
+              requestRender();
+            }
+          })
+          .catch((err: unknown) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            setBanner(`interrupt failed: ${msg}`);
+            requestRender();
+          });
+        return;
+      }
+      case "fork-requested": {
+        // ZONE_TIMETRAVEL TUI: hand off to the host's fork dialog
+        // (workflowCmd.ts wires the multi-step prompt: select phase,
+        // input overrides JSON, call forkFromCheckpoint). The
+        // callback returns a banner string with the new runId on
+        // success or an error message on failure.
+        if (!action.runId) return;
+        if (opts.onForkRequested === undefined) {
+          setBanner("fork: no handler wired");
+          requestRender();
+          return;
+        }
+        const runIdCopy = action.runId;
+        setBanner(`opening fork dialog for ${shortenId(runIdCopy)}…`);
+        requestRender();
+        Promise.resolve(opts.onForkRequested(runIdCopy))
+          .then((banner) => {
+            if (typeof banner === "string" && banner.length > 0) {
+              // Forks may produce long banners ("forked: wf-xxxxxxxx");
+              // give the user time to read.
+              setBanner(banner, 8000);
+              requestRender();
+            }
+          })
+          .catch((err: unknown) => {
+            const msg = err instanceof Error ? err.message : String(err);
+            setBanner(`fork failed: ${msg}`);
+            requestRender();
+          });
+        return;
+      }
       case "noop":
         // Intentional — disabled hotkey or no-selection. The help
         // line already conveys the disabled state visually.
@@ -1148,10 +1338,12 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         .filter((p) => p.status === "running")
         .flatMap((p) => p.agents) ?? [];
       const selectedAgent = runningAgentRows[phaseCursor];
+      const pendingCount = pendingInterrupts.get(openedRunId)?.length ?? 0;
       const action = dispatchHotkey({
         key,
         view,
         isRemote,
+        pendingInterruptCount: pendingCount,
         ...(summary !== undefined
           ? { runState: summary.state, runId: openedRunId }
           : {}),
@@ -1166,10 +1358,15 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     const selected = sorted[cursor];
     const isRemote =
       selected !== undefined && !opts.registry.wasLocalRun(selected.runId);
+    const selectedPendingCount =
+      selected !== undefined
+        ? pendingInterrupts.get(selected.runId)?.length ?? 0
+        : 0;
     const action = dispatchHotkey({
       key,
       view,
       isRemote,
+      pendingInterruptCount: selectedPendingCount,
       ...(selected !== undefined
         ? { runState: selected.state, runId: selected.runId }
         : {}),

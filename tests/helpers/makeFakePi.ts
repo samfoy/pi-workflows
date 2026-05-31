@@ -75,6 +75,32 @@ export interface FakeContext {
      * Returns a never-resolving Promise (the real overlay is closed by
      * `done()`); the harness exposes `mount.done()` to fire it. */
     custom?: FakeCustomFn;
+    /**
+     * ZONE_TUI_HITL_FORK — confirm dialog mock. Tests that need
+     * the resume / fork / interrupt flows to choose an answer set
+     * `pi.nextConfirmAnswer = true|false` before invoking the command.
+     * Default: `true` (matches pi-coding-agent's bare-minimum surface
+     * where confirm is optional).
+     */
+    confirm?: (title: string, message?: string) => Promise<boolean>;
+    /**
+     * ZONE_TUI_HITL_FORK — free-text input mock. When set, returns the
+     * value queued via `pi.nextInputAnswers.push(...)` (FIFO) so a
+     * test that drives multi-step prompts (atPhase + overrides JSON)
+     * gets each answer in turn.
+     */
+    input?: (
+      title: string,
+      placeholder?: string,
+    ) => Promise<string | undefined>;
+    /**
+     * ZONE_TUI_HITL_FORK — select dialog mock. Returns the value
+     * queued via `pi.nextSelectAnswers.push(...)` (FIFO).
+     */
+    select?: (
+      title: string,
+      options: string[],
+    ) => Promise<string | undefined>;
   };
 }
 
@@ -121,6 +147,16 @@ export interface FakePi {
    * `ctx.ui.custom`. Tests assert on length to verify mount/no-mount
    * and call `mount.component.handleInput(key)` to drive hotkeys. */
   readonly overlayMounts: ReadonlyArray<FakeOverlayMount>;
+  /** ZONE_TUI_HITL_FORK — next answer for `ctx.ui.confirm`. Default true. */
+  nextConfirmAnswer: boolean;
+  /** ZONE_TUI_HITL_FORK — FIFO queue of answers for `ctx.ui.input`. */
+  nextInputAnswers: string[];
+  /** ZONE_TUI_HITL_FORK — FIFO queue of answers for `ctx.ui.select`. */
+  nextSelectAnswers: string[];
+  /** ZONE_TUI_HITL_FORK — record of confirm calls (for assertions). */
+  readonly confirmCalls: ReadonlyArray<{ title: string; message?: string }>;
+  readonly inputCalls: ReadonlyArray<{ title: string; placeholder?: string }>;
+  readonly selectCalls: ReadonlyArray<{ title: string; options: string[] }>;
 
   // ── Drivers ───────────────────────────────────────────────────
   /** Fires every `session_start` handler in registration order. */
@@ -146,6 +182,15 @@ export function makeFakePi(_opts: MakeFakePiOpts = {}): FakePi {
   const entries: FakeAppendEntry[] = [];
   const userMessages: FakeUserMessage[] = [];
   const overlayMounts: FakeOverlayMount[] = [];
+  // ZONE_TUI_HITL_FORK — prompt mocks. The makeCtx() factory below
+  // wires these into ctx.ui.{confirm,input,select} so workflowCmd.ts
+  // (and any other consumer of these prompts) can be black-box tested.
+  const confirmCalls: { title: string; message?: string }[] = [];
+  const inputCalls: { title: string; placeholder?: string }[] = [];
+  const selectCalls: { title: string; options: string[] }[] = [];
+  let nextConfirmAnswer = true;
+  const nextInputAnswers: string[] = [];
+  const nextSelectAnswers: string[] = [];
   /**
    * Slice 13 — fake `ctx.ui.custom`. Captures the factory; awaiting
    * the returned Promise blocks until `done()` fires (mirrors real
@@ -184,6 +229,24 @@ export function makeFakePi(_opts: MakeFakePiOpts = {}): FakePi {
         notifications.push({ message, type });
       },
       custom: fakeCustom,
+      async confirm(title, message) {
+        const call: { title: string; message?: string } = { title };
+        if (message !== undefined) call.message = message;
+        confirmCalls.push(call);
+        return nextConfirmAnswer;
+      },
+      async input(title, placeholder) {
+        const call: { title: string; placeholder?: string } = { title };
+        if (placeholder !== undefined) call.placeholder = placeholder;
+        inputCalls.push(call);
+        if (nextInputAnswers.length === 0) return undefined;
+        return nextInputAnswers.shift();
+      },
+      async select(title, options) {
+        selectCalls.push({ title, options });
+        if (nextSelectAnswers.length === 0) return undefined;
+        return nextSelectAnswers.shift();
+      },
     },
   });
 
@@ -216,6 +279,17 @@ export function makeFakePi(_opts: MakeFakePiOpts = {}): FakePi {
     entries,
     userMessages,
     overlayMounts,
+    confirmCalls,
+    inputCalls,
+    selectCalls,
+    nextInputAnswers,
+    nextSelectAnswers,
+    get nextConfirmAnswer() {
+      return nextConfirmAnswer;
+    },
+    set nextConfirmAnswer(v: boolean) {
+      nextConfirmAnswer = v;
+    },
 
     async fireSessionStart(cwd) {
       const list = handlers.get("session_start") ?? [];
