@@ -8,6 +8,29 @@
  *
  * Field-ownership comments tag every later-slice field with the slice
  * number that populates it, so cross-slice contracts stay legible.
+ *
+ * ─── ARCHITECTURE NOTE ──────────────────────────────────────
+ * The 2026 audit flagged this file (1,600+ lines) as a god-types module
+ * and recommended a capability-interface-segregation refactor splitting
+ * it along its slice boundaries (manifest / extension / sandbox /
+ * runCtx-host / cache / agent / ledger / approval). That split is
+ * deferred:
+ *
+ *   - The cross-file fan-in is high (~50 importers across src/ and
+ *     tests/), and a partial split would force a same-PR migration of
+ *     every consumer.
+ *   - The capability boundaries the audit suggested don't all line up
+ *     cleanly with the existing slice headers; the right split needs
+ *     a focused design pass to avoid landing on a slightly-better
+ *     version of the same problem.
+ *   - The actual day-to-day pain points the audit named
+ *     (`as unknown as` clusters, AgentUsage<:Record, SettledAgent
+ *     missing) have already been fixed in-place — see commit
+ *     `dd16d3a refactor(types): replace 'as unknown as' cluster in
+ *     runCtx`.
+ *
+ * Until then, slice headers (// ──── Slice N ────) are the navigation
+ * primary key. Editor outline-folding gets you the rest of the way.
  */
 
 // ───────────────────────────────────────────────────────────────────────
