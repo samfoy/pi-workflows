@@ -54,6 +54,42 @@ export interface AgentOpts {
    * a workflow file edit on `resume --latest`. Default: `true`.
    */
   readonly bindToWorkflowVersion?: boolean;
+  /**
+   * Mount persistent memory for this agent (ZONE_MEMORY). The runtime
+   * resolves a `MEMORY.md` file under the chosen scope, prepends up
+   * to 25 KiB of its contents to the prompt as `Persistent memory:\n…`,
+   * and lets the sub-agent emit `memory_update` JSON events that
+   * append to the same file.
+   *
+   *   - `'user'`    → `~/.pi/agent/workflows/agent-memory/<name>/MEMORY.md`
+   *   - `'project'` → `<cwd>/.pi/workflows/agent-memory/<name>/MEMORY.md`
+   *   - `'local'`   → `<runDir>/agent-memory/<name>/MEMORY.md`
+   *   - `false` / omitted → no injection, no manifest record.
+   *   - `{ scope, readOnly: true }` → inject but refuse appends from
+   *     the sub-agent or any later `ctx.memory.append(...)` against
+   *     the same `(scope, name)` tuple in this run.
+   *
+   * `name` defaults to the agent id. See `docs/agent-memory.md`.
+   */
+  readonly memory?:
+    | MemoryScope
+    | false
+    | { readonly scope: MemoryScope; readonly readOnly?: boolean };
+  /**
+   * Per-agent isolation mode (ZONE_WORKTREE).
+   *
+   *   - `'worktree'` mounts the agent inside its own
+   *     `git worktree add --detach` checkout off HEAD; the
+   *     dispatcher's cwd is rewritten so concurrent agents can't
+   *     fight over the same working files. On success a diff is
+   *     emitted to `<runDir>/worktrees/<agentId>.diff`.
+   *   - `'none'` (default) reuses the run's cwd directly.
+   *
+   * Requires the run cwd to be inside a git work tree —
+   * `NotAGitRepoError` is thrown otherwise. See
+   * `docs/agent-worktree.md`.
+   */
+  readonly isolation?: IsolationMode;
   /** Permits any author-defined fields. */
   readonly [extra: string]: unknown;
 }
@@ -99,6 +135,144 @@ export interface RunMeta {
   readonly startedAt: string;
   readonly cwd: string;
   readonly resumed: boolean;
+}
+
+// ─── Persistent agent memory (ZONE_MEMORY) ───────────────────────────
+
+/** Memory-scope tag accepted by `ctx.agent({memory})` and `ctx.memory.*`. */
+export type MemoryScope = 'user' | 'project' | 'local';
+
+/** Stats returned by `ctx.memory.compact`. */
+export interface MemoryCompactResult {
+  /** Bytes on disk before compaction. */
+  readonly beforeBytes: number;
+  /** Bytes on disk after compaction (`afterBytes / beforeBytes` is the ratio). */
+  readonly afterBytes: number;
+  /** `afterBytes / beforeBytes` (1.0 means no shrinkage). */
+  readonly ratio: number;
+}
+
+// ─── Isolation tag (ZONE_WORKTREE) ───────────────────────────────────
+
+/** Per-agent isolation mode. `'worktree'` mounts the agent inside a `git worktree add --detach` checkout off HEAD. */
+export type IsolationMode = 'worktree' | 'none';
+
+// ─── Aggregation primitive (gap/dsl-primitives) ──────────────────────
+
+/** Methods supported by `ctx.aggregate`. */
+export type AggregateMethod =
+  | 'borda'
+  | 'schulze'
+  | 'ranked_pairs'
+  | 'kemeny_young'
+  | 'instant_runoff'
+  | 'coombs'
+  | 'score'
+  | 'approval';
+
+/** Result returned by `ctx.aggregate`. */
+export interface AggregateResult<C = string> {
+  /** Top-ranked candidate (== `ranking[0]`). */
+  readonly winner: C;
+  /** All candidates ranked best-to-worst. */
+  readonly ranking: ReadonlyArray<C>;
+  /**
+   * Numeric score per candidate. Populated by methods that compute
+   * scalar scores (`'borda'`, `'score'`, `'approval'`); omitted by
+   * pure-ordering methods (`'schulze'`, `'ranked_pairs'`,
+   * `'kemeny_young'`, `'instant_runoff'`, `'coombs'`).
+   */
+  readonly scores?: Readonly<Record<string, number>>;
+}
+
+// ─── Critique loop (gap/dsl-primitives) ──────────────────────────────
+
+/** Options accepted by `ctx.critique`. */
+export interface CritiqueOpts<O = unknown, C = unknown> {
+  /** Called each round with the previous critique (null on round 0). */
+  readonly producer: (lastCritique: C | null, round: number) => O | Promise<O>;
+  /** Receives the producer's output and returns a critique. */
+  readonly critic: (output: O, round: number) => C | Promise<C>;
+  /**
+   * Returns true when the latest output is acceptable. Default:
+   * always returns false (loop runs until `maxRounds` is hit).
+   */
+  readonly accept?: (critique: C, output: O) => boolean;
+  /** Maximum producer→critic rounds. Default 3. Must be >= 1. */
+  readonly maxRounds?: number;
+}
+
+/** Result of a `ctx.critique` run. */
+export interface CritiqueResult<O = unknown, C = unknown> {
+  /** Whether `accept(...)` returned true before `maxRounds`. */
+  readonly accepted: boolean;
+  /** Most recent producer output (or `null` if no rounds ran). */
+  readonly output: O | null;
+  /** Most recent critique (or `null`). */
+  readonly critique: C | null;
+  /** Number of rounds executed. */
+  readonly rounds: number;
+  /** All produced (output, critique) pairs in chronological order. */
+  readonly history: ReadonlyArray<{ readonly output: O; readonly critique: C }>;
+}
+
+// ─── HITL interrupt (ZONE_HITL) ──────────────────────────────────────
+
+/** Options for `ctx.interrupt`. */
+export interface InterruptOpts {
+  /** Prompt shown to the supervisor. Required. */
+  readonly question: string;
+  /** Multiple-choice options. When omitted, the supervisor's value is free-form. */
+  readonly choices?: ReadonlyArray<string>;
+  /** Default value when no supervisor mechanism is wired (e.g. running outside the TUI). */
+  readonly default?: unknown;
+  /**
+   * Optional JSON Schema. The supervisor's resume payload is
+   * validated against this — mismatches throw
+   * `InterruptValueValidationError` from the awaiter.
+   */
+  readonly schema?: Record<string, unknown>;
+}
+
+/** Resolved interrupt envelope returned by `ctx.interrupt`. */
+export interface InterruptResult<T = unknown> {
+  /**
+   * Deterministic per-call key (`int-0`, `int-1`, ...). Pass back to
+   * `WorkflowClient.resume(runId, value, { key })` for explicit
+   * disambiguation when multiple interrupts run concurrently.
+   */
+  readonly key: string;
+  /** Supervisor-injected value (or `default` / `null` when offline). */
+  readonly value: T;
+}
+
+// ─── Worktree promote (ZONE_WORKTREE follow-up #2) ───────────────────
+
+/** Options for `ctx.promote`. */
+export interface PromoteOpts {
+  /**
+   * `'apply'` (default): runs `git apply` against the parent CWD
+   * using the diff captured at `<runDir>/worktrees/<agentId>.diff`.
+   * Empty diff is a no-op success.
+   *
+   * `'rebase'`: runs `git rebase --onto <target>` inside the worktree.
+   * Conflicts surface as `PromoteError`; the worktree is left in a
+   * rebase-in-progress state for the operator to resolve.
+   */
+  readonly strategy?: 'apply' | 'rebase';
+  /**
+   * Rebase target ref. Only meaningful for `strategy: 'rebase'`.
+   * Default: `'HEAD'`.
+   */
+  readonly target?: string;
+}
+
+/** Result of a `ctx.promote` call. */
+export interface PromoteResult {
+  readonly strategy: 'apply' | 'rebase';
+  readonly applied: boolean;
+  /** Files touched (parsed from the diff or `git diff --name-only`). */
+  readonly files: ReadonlyArray<string>;
 }
 
 // ─── Stdlib helpers (slice 8b) ──────────────────────────────────────
@@ -228,11 +402,111 @@ export interface WorkflowContext {
   checkpoint(label: string, data?: Record<string, unknown>): Promise<boolean>;
 
   /**
+   * Render the run's DAG as a Mermaid `flowchart TD` string. Synchronous;
+   * derived from `<runDir>/manifest.json` + `<runDir>/ledger.jsonl`.
+   */
+  report(opts: { readonly format: 'mermaid' }): string;
+  /**
    * Append a structured report event to the ledger and emit to the
    * overlay. Useful for workflow authors to emit domain-level
    * observability events without polluting `ctx.log`.
    */
   report(eventType: string, data?: Record<string, unknown>): void;
+
+  // ─── gap-fix stdlib additions ────────────────────────────────────
+  /**
+   * Pure JSON extractor. Parses the LAST `` ```json … ``` `` fence in
+   * `text`, falling back to bracket-depth scanning when no fence is
+   * present. Throws `Error` on no-JSON-found / parse failure.
+   * Mirrors the host `extractJson` (BUG-051 + BUG-052 fixed).
+   */
+  extractJSON(text: string): unknown;
+
+  /**
+   * Pure ranked-aggregation primitive. `ballots` shape depends on
+   * `method`:
+   *
+   *   - `'borda'` / `'schulze'` / `'ranked_pairs'` / `'kemeny_young'` /
+   *     `'instant_runoff'` / `'coombs'` — array of candidate-ranking
+   *     arrays, e.g. `[["a", "b"], ["b", "a"]]`.
+   *   - `'score'` — array of `{ candidate: score }` records.
+   *   - `'approval'` — array of approved-candidate arrays.
+   *
+   * Returns `{ winner, ranking, scores? }`. Synchronous; no host bridge.
+   */
+  aggregate<C = string>(
+    method: AggregateMethod,
+    ballots: ReadonlyArray<unknown>,
+    opts?: Record<string, unknown>,
+  ): AggregateResult<C>;
+
+  /**
+   * Producer-critic loop. Each round: `producer` is called with the
+   * most recent critique (`null` on round 0); the producer's output
+   * is fed to `critic`; the critic's output is checked by
+   * `accept(critique, output)`. Returns when accepted, or after
+   * `maxRounds` with `accepted: false`.
+   *
+   * Authors typically wrap `ctx.agent + ctx.phase` calls inside
+   * `producer` / `critic`; the helper itself is realm-pure and never
+   * spawns agents directly.
+   */
+  critique<O = unknown, C = unknown>(
+    opts: CritiqueOpts<O, C>,
+  ): Promise<CritiqueResult<O, C>>;
+
+  /**
+   * Stdlib helpers for reading and updating an agent's persistent
+   * memory file directly. Same scope/name resolution as
+   * `ctx.agent({ memory })` — see `docs/agent-memory.md`.
+   */
+  readonly memory: {
+    /**
+     * Read the agent's `MEMORY.md` (returns `null` when missing).
+     * Truncated to the 25 KiB read cap; oversize files emit a single
+     * `log: warn` ledger entry per (run, name).
+     */
+    read(name: string, scope: MemoryScope): Promise<string | null>;
+    /**
+     * Append `text` to the agent's `MEMORY.md`. Throws
+     * `ReadOnlyMemoryError` if the (scope, name) tuple was previously
+     * mounted with `readOnly: true` by a `ctx.agent({memory})` call.
+     */
+    append(name: string, scope: MemoryScope, text: string): Promise<void>;
+    /**
+     * Compact older entries via a one-shot summarizer. Recent ~25%
+     * of entries are preserved verbatim; older entries are condensed
+     * into terse bullet summaries. Returns before/after byte counts
+     * plus the size ratio.
+     */
+    compact(name: string, scope: MemoryScope): Promise<MemoryCompactResult>;
+  };
+
+  /**
+   * Mid-phase HITL pause-and-route (ZONE_HITL). Suspends the run
+   * until a supervisor injects an answer via
+   * `WorkflowClient.resume(runId, value)`. Replay-perfect across pi
+   * restart — a resumed run replays prior `interrupt_resolved`
+   * ledger entries to restore answers without re-prompting.
+   *
+   * Returns `{ key, value }`. `key` is the deterministic per-call id
+   * (`int-0`, `int-1`, ...). The string-shorthand form
+   * `ctx.interrupt("...")` is equivalent to
+   * `ctx.interrupt({ question: "..." })`.
+   */
+  interrupt<T = unknown>(
+    opts: string | InterruptOpts,
+  ): Promise<InterruptResult<T>>;
+
+  /**
+   * Promote an agent's worktree edits back into the parent repo
+   * (ZONE_WORKTREE follow-up #2). The agent must have run with
+   * `{ isolation: 'worktree' }`. Throws `PromoteError` on conflict.
+   *
+   * Returns `{ strategy, applied, files }` where `files` is parsed
+   * from the diff (apply) or `git diff --name-only` (rebase).
+   */
+  promote(agentId: string, opts?: PromoteOpts): Promise<PromoteResult>;
 
   // ─── stdlib helpers ──────────────────────────────────────────────
   /**
