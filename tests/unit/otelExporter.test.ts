@@ -286,21 +286,85 @@ test("replayLedgerToSpans: emits root → phase → agent tree for a complete fi
 });
 
 test("replayLedgerToSpans: root span carries Gen-AI workflow attributes", async () => {
-  const rig = makeRig();
-  replayLedgerToSpans(makeFixture(), rig.tracer, rig.api);
-  await rig.provider.forceFlush();
-  const root = rig.exporter
-    .getFinishedSpans()
-    .find((s) => s.name === "invoke_workflow audit")!;
-  assert.equal(root.attributes["gen_ai.operation.name"], "invoke_workflow");
-  assert.equal(root.attributes["gen_ai.provider.name"], "pi.workflows");
-  assert.equal(root.attributes["gen_ai.conversation.id"], "wf-test12345678");
-  assert.equal(root.attributes["pi.workflow.name"], "audit");
-  assert.equal(root.attributes["pi.workflow.run_id"], "wf-test12345678");
-  assert.equal(root.attributes["pi.workflow.input"], "fix bugs");
-  assert.equal(root.attributes["pi.workflow.final_state"], "done");
-  // status.code OK (1).
-  assert.equal(root.status.code, 1);
+  // Default mode is 'hash' — raw input must NOT appear on the span.
+  // Snapshot+restore PI_WORKFLOWS_OTEL_INPUT in case the test process
+  // inherited it.
+  const realInputMode = process.env["PI_WORKFLOWS_OTEL_INPUT"];
+  delete process.env["PI_WORKFLOWS_OTEL_INPUT"];
+  try {
+    const rig = makeRig();
+    replayLedgerToSpans(makeFixture(), rig.tracer, rig.api);
+    await rig.provider.forceFlush();
+    const root = rig.exporter
+      .getFinishedSpans()
+      .find((s) => s.name === "invoke_workflow audit")!;
+    assert.equal(root.attributes["gen_ai.operation.name"], "invoke_workflow");
+    assert.equal(root.attributes["gen_ai.provider.name"], "pi.workflows");
+    assert.equal(root.attributes["gen_ai.conversation.id"], "wf-test12345678");
+    assert.equal(root.attributes["pi.workflow.name"], "audit");
+    assert.equal(root.attributes["pi.workflow.run_id"], "wf-test12345678");
+    // Hash + length present, raw input absent (PII default).
+    assert.equal(typeof root.attributes["pi.workflow.input.sha256"], "string");
+    assert.equal((root.attributes["pi.workflow.input.sha256"] as string).length, 64);
+    assert.equal(root.attributes["pi.workflow.input.length"], 8);
+    assert.equal(root.attributes["pi.workflow.input"], undefined);
+    assert.equal(root.attributes["pi.workflow.input.excerpt"], undefined);
+    assert.equal(root.attributes["pi.workflow.final_state"], "done");
+    assert.equal(root.status.code, 1);
+  } finally {
+    if (realInputMode === undefined) delete process.env["PI_WORKFLOWS_OTEL_INPUT"];
+    else process.env["PI_WORKFLOWS_OTEL_INPUT"] = realInputMode;
+  }
+});
+
+test("replayLedgerToSpans: PI_WORKFLOWS_OTEL_INPUT=raw emits full input verbatim", async () => {
+  const realInputMode = process.env["PI_WORKFLOWS_OTEL_INPUT"];
+  process.env["PI_WORKFLOWS_OTEL_INPUT"] = "raw";
+  try {
+    const rig = makeRig();
+    replayLedgerToSpans(makeFixture(), rig.tracer, rig.api);
+    await rig.provider.forceFlush();
+    const root = rig.exporter
+      .getFinishedSpans()
+      .find((s) => s.name === "invoke_workflow audit")!;
+    assert.equal(root.attributes["pi.workflow.input"], "fix bugs");
+    assert.equal(typeof root.attributes["pi.workflow.input.sha256"], "string");
+    assert.equal(root.attributes["pi.workflow.input.length"], 8);
+  } finally {
+    if (realInputMode === undefined) delete process.env["PI_WORKFLOWS_OTEL_INPUT"];
+    else process.env["PI_WORKFLOWS_OTEL_INPUT"] = realInputMode;
+  }
+});
+
+test("replayLedgerToSpans: PI_WORKFLOWS_OTEL_INPUT=excerpt truncates to 64 chars", async () => {
+  const realInputMode = process.env["PI_WORKFLOWS_OTEL_INPUT"];
+  process.env["PI_WORKFLOWS_OTEL_INPUT"] = "excerpt";
+  try {
+    // Build a fixture with a 200-char input, expect 64-char excerpt.
+    const longInput = "x".repeat(200);
+    const fixture: LedgerEntry[] = makeFixture().map((e) => {
+      if (e.type === "init" && "manifest" in e) {
+        const m = e.manifest as Record<string, unknown>;
+        return { ...e, manifest: { ...m, input: longInput } };
+      }
+      return e;
+    });
+    const rig = makeRig();
+    replayLedgerToSpans(fixture, rig.tracer, rig.api);
+    await rig.provider.forceFlush();
+    const root = rig.exporter
+      .getFinishedSpans()
+      .find((s) => s.name === "invoke_workflow audit")!;
+    assert.equal(root.attributes["pi.workflow.input"], undefined);
+    assert.equal(
+      (root.attributes["pi.workflow.input.excerpt"] as string).length,
+      64,
+    );
+    assert.equal(root.attributes["pi.workflow.input.length"], 200);
+  } finally {
+    if (realInputMode === undefined) delete process.env["PI_WORKFLOWS_OTEL_INPUT"];
+    else process.env["PI_WORKFLOWS_OTEL_INPUT"] = realInputMode;
+  }
 });
 
 test("replayLedgerToSpans: agent spans carry Gen-AI usage attributes", async () => {

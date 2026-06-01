@@ -11,8 +11,17 @@
  * --------
  *   - `pi.runs.started`   (workflow_name)
  *   - `pi.runs.completed` (workflow_name, outcome={done|failed|cancelled})
- *   - `pi.agents.invoked` (workflow_name, phase_name, agent_id)
- *   - `pi.agents.errored` (workflow_name, phase_name, agent_id, error_class)
+ *   - `pi.agents.invoked` (workflow_name, phase_name)
+ *   - `pi.agents.errored` (workflow_name, phase_name, error_class)
+ *
+ * Migration note (cardinality fix): the `agent_id` label was REMOVED
+ * from `pi.agents.invoked` and `pi.agents.errored`. Workflows that
+ * mint random agent IDs per run produced unbounded metric series
+ * (one per distinct id, multiplied by every other label combination)
+ * which broke any monitoring backend with cardinality limits. If you
+ * need per-agent attribution, query the trace span attributes
+ * (pi.agent.id) instead — spans carry full per-invocation detail and
+ * are paid-for separately from metric cardinality budgets.
  *
  * Histograms
  * ----------
@@ -342,7 +351,8 @@ export function feedLedgerEntryToMetrics(
       inst.agentsInvoked.add(1, {
         workflow_name: wfName,
         phase_name: entry.phaseName,
-        agent_id: entry.agentId,
+        // agent_id intentionally NOT a label — cardinality blow-up. See
+        // module header migration note. Per-agent detail lives on spans.
       });
       return;
     }
@@ -383,7 +393,7 @@ export function feedLedgerEntryToMetrics(
       inst.agentsErrored.add(1, {
         workflow_name: wfName,
         phase_name: entry.phaseName,
-        agent_id: entry.agentId,
+        // agent_id intentionally NOT a label — cardinality blow-up.
         error_class: typeof errClass === "string" ? errClass : "Unknown",
       });
       return;

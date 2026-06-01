@@ -380,25 +380,22 @@ test("replayLedgerToMetrics: pi.runs.completed records outcome=failed", async (t
   assert.equal(fail!.value, 1);
 });
 
-test("replayLedgerToMetrics: pi.agents.invoked counts each agent_start", async (t) => {
+test("replayLedgerToMetrics: pi.agents.invoked counts each agent_start (collapsed by phase, no agent_id)", async (t) => {
   const rig = makeRig(t);
   replayLedgerToMetrics(makeFixture(), rig.instruments);
   const rm = await collect(rig);
   const points = pointsFor(rm, "pi.agents.invoked");
-  assert.equal(points.length, 2);
-  const d1 = pointMatching(points, {
+  // Cardinality fix: agent_id is no longer a label, so the two
+  // discover-* agent_start entries collapse into a single point
+  // with value 2.
+  assert.equal(points.length, 1);
+  const d = pointMatching(points, {
     workflow_name: "audit",
     phase_name: "discover",
-    agent_id: "discover-1",
   });
-  const d2 = pointMatching(points, {
-    workflow_name: "audit",
-    phase_name: "discover",
-    agent_id: "discover-2",
-  });
-  assert.ok(d1 && d2);
-  assert.equal(d1!.value, 1);
-  assert.equal(d2!.value, 1);
+  assert.ok(d);
+  assert.equal(d!.value, 2);
+  assert.equal(d!.attributes["agent_id"], undefined, "agent_id label must not be emitted");
 });
 
 test("replayLedgerToMetrics: pi.agents.errored counts each agent_error with error_class", async (t) => {
@@ -421,7 +418,7 @@ test("replayLedgerToMetrics: pi.agents.errored counts each agent_error with erro
   assert.equal(points.length, 1);
   assert.equal(points[0]!.attributes["workflow_name"], "x");
   assert.equal(points[0]!.attributes["phase_name"], "p");
-  assert.equal(points[0]!.attributes["agent_id"], "a");
+  assert.equal(points[0]!.attributes["agent_id"], undefined, "agent_id label removed for cardinality");
   assert.equal(points[0]!.attributes["error_class"], "AgentSubprocess");
   assert.equal(points[0]!.value, 1);
 });
@@ -589,7 +586,10 @@ test("tailRunLedgerForMetrics: tails a real ledger.jsonl, exits when terminal tr
     const completed = pointsFor(rm, "pi.runs.completed");
     assert.ok(pointMatching(completed, { workflow_name: "audit", outcome: "done" }));
     const invoked = pointsFor(rm, "pi.agents.invoked");
-    assert.equal(invoked.length, 2);
+    // After cardinality fix: 2 agent_starts in same phase collapse to 1
+    // point with value 2 (no agent_id label to split them).
+    assert.equal(invoked.length, 1);
+    assert.equal(invoked[0]!.value, 2);
     const tokens = pointsFor(rm, "gen_ai.client.token.usage");
     assert.ok(tokens.length >= 1);
   } finally {

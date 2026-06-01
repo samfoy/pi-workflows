@@ -52,6 +52,50 @@ import { promises as fsp } from "node:fs";
 
 import type { LedgerEntry } from "../types/internal.d.ts";
 import { ledgerPath as defaultLedgerPath } from "../util/paths.ts";
+import { sha256 } from "../util/hash.ts";
+
+/**
+ * Mode for emitting `pi.workflow.input` on the root span. Read from
+ * `PI_WORKFLOWS_OTEL_INPUT` at span-creation time so a per-process
+ * change is enough — no daemon restart.
+ *
+ *   - `"hash"` (default) — emit only `pi.workflow.input.sha256` +
+ *     `pi.workflow.input.length`. Sufficient for cardinality grouping
+ *     in dashboards (same input → same hash) without leaking the raw
+ *     argument into the user's tracing backend (Jaeger, Datadog,
+ *     Honeycomb, Splunk, …). This is the safe default.
+ *   - `"excerpt"` — emit the first 64 chars of the raw input plus the
+ *     hash + length. Useful when an operator NEEDS to read the input
+ *     in the trace UI for debugging but is willing to truncate.
+ *   - `"raw"` — emit the full raw input under `pi.workflow.input`.
+ *     Matches the legacy behavior; opt-in only.
+ */
+type OtelInputMode = "hash" | "excerpt" | "raw";
+
+const OTEL_INPUT_EXCERPT_CHARS = 64;
+
+function otelInputMode(): OtelInputMode {
+  const v = process.env["PI_WORKFLOWS_OTEL_INPUT"];
+  if (v === "raw" || v === "excerpt" || v === "hash") return v;
+  return "hash";
+}
+
+function inputAttrs(input: string): Record<string, string | number> {
+  const mode = otelInputMode();
+  const out: Record<string, string | number> = {
+    "pi.workflow.input.sha256": sha256(input),
+    "pi.workflow.input.length": input.length,
+  };
+  if (mode === "raw") {
+    out["pi.workflow.input"] = input;
+  } else if (mode === "excerpt") {
+    out["pi.workflow.input.excerpt"] =
+      input.length <= OTEL_INPUT_EXCERPT_CHARS
+        ? input
+        : input.slice(0, OTEL_INPUT_EXCERPT_CHARS);
+  }
+  return out;
+}
 
 // ─── Optional OTel SDK loader ──────────────────────────────────────────
 
@@ -409,7 +453,7 @@ export function feedLedgerEntry(
             "pi.workflow.name": workflowName,
             "pi.workflow.run_id": runId,
             ...(typeof m["input"] === "string"
-              ? { "pi.workflow.input": m["input"] as string }
+              ? inputAttrs(m["input"] as string)
               : {}),
             ...(typeof m["piVersion"] === "string"
               ? { "pi.version": m["piVersion"] as string }
