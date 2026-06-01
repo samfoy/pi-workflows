@@ -176,9 +176,16 @@ test("extension: PI_WORKFLOWS_RECURSIVE=1 keeps loading but skips per-workflow c
     "utf8",
   );
 
+  // Snapshot every env var loadConfig + the recursion guard read so an
+  // ambient parent-shell value (e.g. PI_DISABLE_WORKFLOWS=1 leftover from
+  // a previous workflow run) doesn't make the extension short-circuit
+  // and skip /workflows registration. The test asserts the recursion
+  // guard branch in isolation; ambient disable-style flags must be off.
   const realRecursive = process.env.PI_WORKFLOWS_RECURSIVE;
+  const realDisable = process.env.PI_DISABLE_WORKFLOWS;
   const realHome = process.env.HOME;
   process.env.PI_WORKFLOWS_RECURSIVE = "1";
+  delete process.env.PI_DISABLE_WORKFLOWS;
   process.env.HOME = home;
   try {
     const pi = makeFakePi();
@@ -200,6 +207,8 @@ test("extension: PI_WORKFLOWS_RECURSIVE=1 keeps loading but skips per-workflow c
     if (realRecursive === undefined)
       delete process.env.PI_WORKFLOWS_RECURSIVE;
     else process.env.PI_WORKFLOWS_RECURSIVE = realRecursive;
+    if (realDisable === undefined) delete process.env.PI_DISABLE_WORKFLOWS;
+    else process.env.PI_DISABLE_WORKFLOWS = realDisable;
     if (realHome === undefined) delete process.env.HOME;
     else process.env.HOME = realHome;
   }
