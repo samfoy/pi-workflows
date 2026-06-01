@@ -937,8 +937,14 @@ export interface Semaphore {
  *
  * All fields default to `0` if the upstream event lacks the field.
  * The dispatcher does not synthesize cost — that's downstream's job.
+ *
+ * Extends `Readonly<Record<string, number>>` so callers that consume
+ * the result via that broader shape (e.g. `AgentResultLike.usage`,
+ * OTel attribute payloads) don't need an `as unknown as Record` cast
+ * — the index signature is satisfied structurally because every
+ * field is a number.
  */
-export interface AgentUsage {
+export interface AgentUsage extends Readonly<Record<string, number>> {
   readonly input: number;
   readonly output: number;
   readonly cacheRead: number;
@@ -975,6 +981,32 @@ export interface AgentResult {
   readonly transcriptPath: string;
   /** Child exit code if a real subprocess was spawned, else `null`. */
   readonly exitCode: number | null;
+}
+
+/**
+ * `AgentResult` + the runtime-attached extras the dispatcher / runCtx
+ * stack tags onto the value before returning it through `ctx.phase`:
+ *
+ *   - `cached` — `true` when the result came from the per-run cache
+ *     (slice 7) or the global cache (slice 8a). The dispatcher itself
+ *     never sets this; runCtx.runOneAgent attaches it on a hit.
+ *   - `output` — the parsed object when `agent.opts.schema` was
+ *     supplied AND `extractJson(text)` + `validateAgainstSchema(…)`
+ *     succeeded. Surfaced on `AgentResult.output` to the workflow
+ *     author. Undefined when no schema was set.
+ *
+ * Defining this once here lets consumers drop
+ * `(r as unknown as { cached?: boolean }).cached` casts and read the
+ * fields directly. Both fields are optional because they're attached
+ * post-hoc, not part of the dispatcher's own return type.
+ */
+export interface SettledAgent extends AgentResult {
+  readonly cached?: boolean;
+  // Not `readonly` — the dispatcher attaches `output` after building the
+  // base result (post-extractJson + validateAgainstSchema). Consumers
+  // SHOULD treat it as read-only at the workflow-author boundary, but
+  // the runtime needs to write it once during runOneAgent.
+  output?: unknown;
 }
 
 /**

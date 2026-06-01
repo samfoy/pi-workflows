@@ -41,6 +41,7 @@ import type {
   RunCtxHost,
   RunMetaData,
   Semaphore,
+  SettledAgent,
 } from "../types/internal.js";
 import { CacheStore } from "./cache.js";
 import { getMemoStore } from "./memoStore.js";
@@ -452,7 +453,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       const allSettled = Promise.allSettled(
         handles.map((h) => runOneAgent(h, nameArg, phaseCtrl, phaseSem)),
       );
-      let settled: PromiseSettledResult<AgentResult>[];
+      let settled: PromiseSettledResult<SettledAgent>[];
       if (phaseTimeoutMs !== undefined) {
         let deadlineTimer: ReturnType<typeof setTimeout>;
         const deadline = new Promise<never>((_, reject) => {
@@ -523,23 +524,21 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
           // failMode: 'null' — return nulls for failed agents, continue.
           const out: Array<AgentResultLike | null> = settled.map((s) => {
             if (s.status !== 'fulfilled') return null;
-            const entry = {
-              agentId: s.value.agentId,
-              text: s.value.text,
-              usage: s.value.usage as unknown as Readonly<Record<string, number>>,
-              durationMs: s.value.durationMs,
-              toolCalls: s.value.toolCalls,
-              transcriptPath: s.value.transcriptPath,
-              cached: (s.value as unknown as { cached?: boolean }).cached === true,
-            } as AgentResultLike;
+            const v = s.value; // SettledAgent
+            const entry: Record<string, unknown> = {
+              agentId: v.agentId,
+              text: v.text,
+              usage: v.usage,
+              durationMs: v.durationMs,
+              toolCalls: v.toolCalls,
+              transcriptPath: v.transcriptPath,
+              cached: v.cached === true,
+            };
             // Preserve schema output if present (mirror the all-success
             // path below). Without this, fulfilled agents lose their
             // parsed structured output whenever a sibling fails.
-            const schemaOut = (s.value as unknown as { output?: unknown }).output;
-            if (schemaOut !== undefined) {
-              (entry as Record<string, unknown>).output = schemaOut;
-            }
-            return entry;
+            if (v.output !== undefined) entry.output = v.output;
+            return entry as AgentResultLike;
           });
           // BUG-057 fix: preserve | null in the bridge result type so the
           // sandbox receives the correct shape and callers can distinguish
@@ -556,9 +555,17 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
         return { ok: false, error: captureError(agg) };
       }
 
-      const results = settled.map((s) =>
-        s.status === "fulfilled" ? s.value : (null as unknown as AgentResult),
-      );
+      const results: SettledAgent[] = settled.map((s) => {
+        if (s.status !== "fulfilled") {
+          // Unreachable in practice: the error branch above returns
+          // before this map runs. Throwing here keeps the array type
+          // honest — better than `null as unknown as SettledAgent`.
+          throw new Error(
+            `runCtx phase "${nameArg}": invariant violated — non-fulfilled settled in success path`,
+          );
+        }
+        return s.value;
+      });
       const phaseEndedAt = nowIso();
       await opts.ledger.append({
         type: "phase_end",
@@ -580,20 +587,19 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       // Strip non-JSON fields, return plain JSON-cloneable agent results.
       const out: AgentResultLike[] = results.map(
         (r): AgentResultLike => {
-          const entry: AgentResultLike = {
+          const entry: Record<string, unknown> = {
             agentId: r.agentId,
             text: r.text,
-            usage: r.usage as unknown as Readonly<Record<string, number>>,
+            usage: r.usage,
             durationMs: r.durationMs,
             toolCalls: r.toolCalls,
             transcriptPath: r.transcriptPath,
             // F6 — slice 8a derives `cached` (dispatcher doesn't).
-            cached: (r as unknown as { cached?: boolean }).cached === true,
+            cached: r.cached === true,
           };
           // Preserve schema output if present.
-          const out = (r as unknown as { output?: unknown }).output;
-          if (out !== undefined) (entry as Record<string, unknown>).output = out;
-          return entry;
+          if (r.output !== undefined) entry.output = r.output;
+          return entry as AgentResultLike;
         },
       );
       return { ok: true, value: out };
@@ -609,7 +615,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     phaseCtrl: AbortController,
     /** Improvement 2: optional per-phase semaphore; overrides run semaphore. */
     phaseSem?: Semaphore | null,
-  ): Promise<AgentResult> {
+  ): Promise<SettledAgent> {
     // Per-run agent cap (PRD §1.2 pin 6).
     if (agentCount >= opts.perRunAgentCap) {
       throw new Error(
@@ -709,9 +715,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
             : null,
       };
       // Tag cached=true for slice-7 ledger.
-      const tagged = { ...result, cached: true } as AgentResult & {
-        cached: boolean;
-      };
+      const tagged: SettledAgent = { ...result, cached: true };
       // BUG-055: release the reservation and record actual spend together so
       // budgetSpent + budgetReserved always equals committed + in-flight.
       // BUG-100: cache hits consume no real tokens — skip budgetSpent
@@ -775,7 +779,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       await opts.cache.setAgentResult(key, {
         agentId: recovered.agentId,
         text: recovered.text,
-        usage: recovered.usage as unknown as Readonly<Record<string, number>>,
+        usage: recovered.usage,
         durationMs: recovered.durationMs,
         toolCalls: recovered.toolCalls,
         transcriptPath: recovered.transcriptPath,
@@ -791,7 +795,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       budgetReserved -= 1;
       // BUG-053 pattern: extract schema BEFORE logging agent_end so that
       // an extractJson failure only writes agent_error, never agent_end.
-      const tagged = { ...recovered, cached: true } as AgentResult & { cached: boolean; output?: unknown };
+      const tagged: SettledAgent = { ...recovered, cached: true };
       try {
         if (schema !== null) {
           const parsed = extractJson(recovered.text);
@@ -1077,7 +1081,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       const cacheEntry = {
         agentId: result.agentId,
         text: result.text,
-        usage: result.usage as unknown as Readonly<Record<string, number>>,
+        usage: result.usage,
         durationMs: result.durationMs,
         toolCalls: result.toolCalls,
         transcriptPath: result.transcriptPath,
@@ -1147,7 +1151,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       } catch {
         /* swallow */
       }
-      const tagged = { ...result, cached: false } as AgentResult & { cached: boolean; output?: unknown };
+      const tagged: SettledAgent = { ...result, cached: false };
       if (schemaOutput !== undefined) tagged.output = schemaOutput;
       return tagged;
     } catch (e) {
