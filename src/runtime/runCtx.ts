@@ -99,6 +99,9 @@ import { MAX_PROMPT_LENGTH } from "../util/limits.js";
 import { renderMermaidSync } from "./visualize.js";
 import { createCacheMethods } from "./ctx/cache.js";
 import { createLogProgressMethods } from "./ctx/logProgress.js";
+import { createGateMethod } from "./ctx/gate.js";
+import { createMemoMethods } from "./ctx/memo.js";
+import { createCheckpointReportMethods } from "./ctx/checkpointReport.js";
 import { isLikeArray, requireString } from "./ctx/utils.js";
 import {
   assertGitRepo,
@@ -268,6 +271,11 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     setFinishPrompt: (p) => {
       finishPrompt = p;
     },
+    nowIso,
+  });
+  const gate = createGateMethod(opts, { nowIso });
+  const memoMethods = createMemoMethods(opts);
+  const checkpointReportMethods = createCheckpointReportMethods(opts, {
     nowIso,
   });
 
@@ -1235,68 +1243,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   const logFn = logProgressMethods.logFn;
 
   // ─── ctx.gate ────────────────────────────────────────────────────
-  async function gate(
-    messageArg: unknown,
-    optsArg?: unknown,
-  ): Promise<RunCtxBridgeResult<boolean>> {
-    try {
-      requireString(messageArg, "ctx.gate: message");
-      const message = messageArg as string;
-      const gateOpts =
-        optsArg !== null && typeof optsArg === "object"
-          ? (optsArg as Record<string, unknown>)
-          : {};
-      const defaultAnswer =
-        typeof gateOpts.default === "boolean" ? gateOpts.default : true;
-
-      // 1. Log the gate request to the ledger.
-      await opts.ledger.append({
-        type: "gate_requested",
-        at: nowIso(),
-        message,
-      });
-
-      // 2. Emit overlay event so the TUI can show the gate prompt.
-      try {
-        opts.emitOverlayEvent?.("pi-workflows.gate.requested", {
-          runId: opts.runMeta.id,
-          message,
-          defaultAnswer,
-        });
-      } catch {
-        /* overlay emission failures must not abort the gate */
-      }
-
-      // 3. Wait for a response (or fall back to the default if no mechanism
-      //    is wired — e.g. running outside the TUI).
-      let approved: boolean;
-      if (opts.waitForGate !== undefined) {
-        approved = await opts.waitForGate(message, opts.signal);
-      } else {
-        approved = defaultAnswer;
-      }
-
-      // 4. Log the gate resolution.
-      await opts.ledger.append({
-        type: "gate_resolved",
-        at: nowIso(),
-        approved,
-      });
-
-      try {
-        opts.emitOverlayEvent?.("pi-workflows.gate.resolved", {
-          runId: opts.runMeta.id,
-          approved,
-        });
-      } catch {
-        /* swallow */
-      }
-
-      return { ok: true, value: approved };
-    } catch (e) {
-      return { ok: false, error: captureError(e) };
-    }
-  }
+  // Implementation in ./ctx/gate.ts — `gate` already bound above.
 
   // ─── ctx.interrupt (ZONE_HITL) ─────────────────────────────────────────
   // Mid-phase pause-and-route. The Nth `ctx.interrupt(...)` call gets a
@@ -1474,59 +1421,9 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   const progressFn = logProgressMethods.progressFn;
 
   // ─── ctx.memo (gap/ctx-memo) ─────────────────────────────────────────
-  // memo_check: check the persistent memo store for a hit.
-  // memo_set:   persist a value after a sandbox-side fn() produces it.
-  // Both operate on ~/ (global) or per-project JSONL stores.
-  const DEFAULT_MEMO_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
-
-  async function memo_check(
-    key: unknown,
-    optsArg?: unknown,
-  ): Promise<RunCtxBridgeResult<{ hit: boolean; value?: unknown }>> {
-    try {
-      requireString(key, "ctx.memo: key");
-      const { scope, ttlMs } = parseMemoOpts(optsArg);
-      const store = await getMemoStore(scope, scope === "project" ? opts.cwd : undefined);
-      const keyHash = sha256(key as string);
-      void ttlMs; // checked at set-time; check here is informational only
-      if (!store.has(keyHash)) {
-        return { ok: true, value: { hit: false } };
-      }
-      const entry = store.get(keyHash);
-      if (entry === null) {
-        return { ok: true, value: { hit: false } };
-      }
-      return { ok: true, value: { hit: true, value: entry.value } };
-    } catch (e) {
-      return { ok: false, error: captureError(e) };
-    }
-  }
-
-  async function memo_set(
-    key: unknown,
-    value: unknown,
-    optsArg?: unknown,
-  ): Promise<RunCtxBridgeResult<null>> {
-    try {
-      requireString(key, "ctx.memo: key");
-      // Eagerly check JSON-cloneability — better error site than disk.
-      try {
-        JSON.stringify(value);
-      } catch (cycErr) {
-        throw new TypeError(
-          `ctx.memo: value is not JSON-serializable (${(cycErr as Error).message})`,
-        );
-      }
-      const { scope, ttlMs } = parseMemoOpts(optsArg);
-      const store = await getMemoStore(scope, scope === "project" ? opts.cwd : undefined);
-      const keyHash = sha256(key as string);
-      const cloned: unknown = JSON.parse(JSON.stringify(value));
-      await store.set(keyHash, cloned, ttlMs);
-      return { ok: true, value: null };
-    } catch (e) {
-      return { ok: false, error: captureError(e) };
-    }
-  }
+  // Implementation in ./ctx/memo.ts.
+  const memo_check = memoMethods.memo_check;
+  const memo_set = memoMethods.memo_set;
 
   // ─── ctx.memory.read / append / compact (gap follow-up #6) ──────
   // Stdlib helpers letting workflow authors read or update a
@@ -1771,122 +1668,10 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   }
 
   // ─── ctx.checkpoint (Improvement 6) ──────────────────────────────
-  async function checkpointFn(
-    label: unknown,
-    data?: unknown,
-  ): Promise<RunCtxBridgeResult<boolean>> {
-    try {
-      if (typeof label !== "string" || label.length === 0) {
-        throw new TypeError(
-          "ctx.checkpoint: label must be a non-empty string",
-        );
-      }
-      if (await opts.cache.hasCheckpoint(label)) {
-        // Already set — checkpoint_hit (resumed run).
-        void opts.ledger.append({
-          type: "checkpoint_hit",
-          at: nowIso(),
-          label,
-        });
-        return { ok: true, value: false };
-      }
-      // First write — persist and record.
-      await opts.cache.setCheckpoint(label, data);
-      void opts.ledger.append({
-        type: "checkpoint_set",
-        at: nowIso(),
-        label,
-      });
-      return { ok: true, value: true };
-    } catch (e) {
-      return { ok: false, error: captureError(e) };
-    }
-  }
+  const checkpointFn = checkpointReportMethods.checkpointFn;
 
   // ─── ctx.report (Improvement 7) ──────────────────────────────────
-  function reportFn(
-    eventTypeOrAccessor: unknown,
-    data?: unknown,
-  ): RunCtxBridgeResult<null | string> {
-    try {
-      // gap/viz: accessor form `ctx.report({format:'mermaid'})` returns
-      // the run's DAG as a Mermaid string. Detected by the first
-      // argument being an object with a `format` field; everything else
-      // falls through to the existing event-emit semantics.
-      if (
-        eventTypeOrAccessor !== null &&
-        typeof eventTypeOrAccessor === "object" &&
-        !Array.isArray(eventTypeOrAccessor) &&
-        "format" in (eventTypeOrAccessor as Record<string, unknown>)
-      ) {
-        const fmt = (eventTypeOrAccessor as Record<string, unknown>)["format"];
-        if (fmt !== "mermaid") {
-          throw new TypeError(
-            `ctx.report: unsupported format ${JSON.stringify(fmt)} (only 'mermaid' is implemented)`,
-          );
-        }
-        const mmd = renderMermaidSync(opts.runDirAbs);
-        return { ok: true, value: mmd };
-      }
-
-      const eventType = eventTypeOrAccessor;
-      if (typeof eventType !== "string" || eventType.length === 0) {
-        throw new TypeError(
-          "ctx.report: eventType must be a non-empty string",
-        );
-      }
-      // JSON-serialize data to catch circular refs.
-      let parsedData: unknown;
-      if (data !== undefined) {
-        try {
-          parsedData = JSON.parse(JSON.stringify(data));
-        } catch (cycErr) {
-          throw new TypeError(
-            `ctx.report: data is not JSON-serializable (${(cycErr as Error).message})`,
-          );
-        }
-      }
-      // Append to ledger (fire-and-forget).
-      void opts.ledger.append({
-        type: "report",
-        at: nowIso(),
-        event: eventType,
-        ...(parsedData !== undefined ? { data: parsedData } : {}),
-      });
-      // Emit to overlay.
-      try {
-        opts.emitOverlayEvent?.("pi-workflows.report", {
-          runId: opts.runMeta.id,
-          event: eventType,
-          ...(parsedData !== undefined ? { data: parsedData as Record<string, unknown> } : {}),
-        });
-      } catch {
-        /* swallow */
-      }
-      return { ok: true, value: null };
-    } catch (e) {
-      return { ok: false, error: captureError(e) };
-    }
-  }
-
-  function parseMemoOpts(optsArg: unknown): { scope: "global" | "project"; ttlMs: number } {
-    const scope: "global" | "project" =
-      optsArg !== null &&
-      typeof optsArg === "object" &&
-      (optsArg as Record<string, unknown>).scope === "project"
-        ? "project"
-        : "global";
-    let ttlMs = DEFAULT_MEMO_TTL_MS;
-    if (
-      optsArg !== null &&
-      typeof optsArg === "object" &&
-      typeof (optsArg as Record<string, unknown>).ttl === "number"
-    ) {
-      const raw = (optsArg as Record<string, unknown>).ttl as number;
-      if (raw > 0) ttlMs = raw;
-    }
-    return { scope, ttlMs };
-  }
+  const reportFn = checkpointReportMethods.reportFn;
 
   /**
    * ZONE_HITL — normalize `ctx.interrupt(opts)` argument shape.
