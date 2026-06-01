@@ -497,6 +497,12 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
   const timeoutMs = opts.timeoutMs ?? 600_000;
   // BUG-068: hoist killTimeoutHandle so every cleanup path can cancel it.
   let killTimeoutHandle: ReturnType<typeof setTimeout> | null = null;
+  // Hoisted so escalateKill can short-circuit when the child has
+  // already exited (e.g. cooperative SIGTERM caused a synchronous
+  // exit). Without this hoist, a pre-aborted signal would TDZ on
+  // `exitCode`/`exitSignal` in the synchronous `onAbort()` call.
+  let exitCode: number | null = null;
+  let exitSignal: NodeJS.Signals | null = null;
 
   /**
    * SIGTERM the child, then escalate to SIGKILL after a 5s grace if
@@ -514,6 +520,12 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
     } catch {
       // ignore
     }
+    // If the child has already exited (e.g. cooperative SIGTERM
+    // caused a synchronous exit, or it crashed earlier), skip the
+    // SIGKILL grace timer entirely — the timer would otherwise fire
+    // against an already-dead process and (under fakeChild in tests)
+    // wrongly record SIGKILL even on the cooperative path.
+    if (exitCode !== null || exitSignal !== null) return;
     if (killTimeoutHandle !== null) return; // already escalating
     const graceMs = opts.killGraceMs ?? 5_000;
     killTimeoutHandle = setTimeout(() => {
@@ -523,9 +535,26 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
         // ignore
       }
     }, graceMs);
-    if (typeof (killTimeoutHandle as { unref?: () => void }).unref === "function") {
-      (killTimeoutHandle as unknown as { unref: () => void }).unref();
-    }
+    // NB: do NOT unref this timer.
+    //
+    // libuv computes the next-wake deadline from REF'D handles only;
+    // unref'd timers fire "in passing" when the loop happens to wake
+    // for some other reason. The grace timer is the only thing keeping
+    // the dispatcher alive between the SIGTERM and the resolution of
+    // exitPromise — if it's unref'd and the only ref'd handle is a
+    // long-tail timer (e.g. node:test's 5000ms test-cancel timer in
+    // unit tests, or a long SDK keep-alive in production), libuv
+    // sleeps past the grace deadline and the kill fires only when
+    // some other event (or the test-cancel timer) wakes the loop.
+    //
+    // This was the root cause of the SIGTERM→SIGKILL escalation flake:
+    // the abort-path test could time out at exactly 5004ms (test
+    // deadline) instead of completing in ~70ms, because the 50ms
+    // grace timer didn't fire until node:test's 5000ms cancel woke
+    // the loop. Keeping the grace timer ref'd costs at most
+    // `killGraceMs` of additional wall-time on the very last hung
+    // dispatch in a process — acceptable, since the dispatcher rejects
+    // immediately after the SIGKILL fires and the loop drains.
   }
 
   // Honor caller AbortSignal. On abort we escalate SIGTERM → SIGKILL
@@ -552,16 +581,32 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
   }
 
   // Track exit eagerly so we can synthesize errors after stream end.
-  let exitCode: number | null = null;
-  let exitSignal: NodeJS.Signals | null = null;
+  // (`exitCode` / `exitSignal` are hoisted above next to
+  // `killTimeoutHandle` so escalateKill can short-circuit when the
+  // child has already exited.)
   const exitPromise = new Promise<void>((resolve) => {
     child.once("exit", (code: number | null, signal: NodeJS.Signals | null) => {
       exitCode = code;
       exitSignal = signal;
+      // Cancel a pending SIGKILL grace timer once the child is
+      // definitively dead. Otherwise a cooperative SIGTERM (or any
+      // exit that occurs after escalateKill scheduled the grace)
+      // would leave the timer pinned in the loop until it fires
+      // against an already-dead child — wasting up to `killGraceMs`
+      // of wall time and (under the test runner) keeping Node alive
+      // long after the dispatch resolved.
+      if (killTimeoutHandle !== null) {
+        clearTimeout(killTimeoutHandle);
+        killTimeoutHandle = null;
+      }
       resolve();
     });
     child.once("error", () => {
       // child failed to spawn — mark as exit so the awaits clear
+      if (killTimeoutHandle !== null) {
+        clearTimeout(killTimeoutHandle);
+        killTimeoutHandle = null;
+      }
       resolve();
     });
   });
@@ -622,10 +667,19 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
       // Unexpected — clean up + rethrow.
       clearTimeout(timeoutHandle);
       if (killTimeoutHandle) { clearTimeout(killTimeoutHandle); killTimeoutHandle = null; }
-      try {
-        child.kill("SIGTERM");
-      } catch {
-        // ignore
+      // Only SIGTERM the child if it hasn't already exited. The
+      // parser commonly throws "Premature close" when the dispatcher
+      // itself killed the child mid-stream (timeout/abort escalation
+      // path); re-issuing SIGTERM in that case is wasted noise that
+      // also corrupts test assertions over `signalsSent`. The exit
+      // handler sets `exitCode`/`exitSignal` synchronously when the
+      // child exits, so we can rely on this check.
+      if (exitCode === null && exitSignal === null) {
+        try {
+          child.kill("SIGTERM");
+        } catch {
+          // ignore
+        }
       }
       await exitPromise;
       await new Promise<void>((resolve) => {

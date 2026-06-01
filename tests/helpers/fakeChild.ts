@@ -130,17 +130,44 @@ export function makeFakeSpawn(scripts: FakeChildSpec[] | (() => FakeChildSpec)):
           record.signalsSent.push(signal);
           if (signal === "SIGTERM" && spec.ignoresSigterm) return true;
           if (signal === "SIGKILL" && spec.ignoresSigkill) return true;
-          // Force-exit immediately on the next tick.
-          setImmediate(() => fireExit(signal));
+          // Fire exit synchronously rather than via `setImmediate`.
+          //
+          // The previous `setImmediate(() => fireExit(signal))` was
+          // racy under `node --test --test-name-pattern=...`: with
+          // only the dispatcher's killGraceMs setTimeout and the
+          // (still-pending) constructor `setTimeout(fireExit,
+          // exitDelayMs)` in the libuv timer queue, the SIGKILL
+          // setImmediate could be starved long enough for node:test
+          // to cancel the test at its 5000ms deadline. The flake
+          // surfaced as the abort-escalation test timing out at
+          // exactly 5004ms even when wall time should be ~70ms.
+          //
+          // Real subprocess `kill()` is async (the kernel posts the
+          // signal; the process exits later), so synchronous exit is
+          // a fidelity loss vs. real spawn. The dispatcher's exit
+          // handler is reentrant-safe (it just records exit code +
+          // resolves a promise), and every fakeChild caller runs
+          // through `dispatchAgent` which sets up the listener
+          // before invoking kill. Synchronous fireExit is safe here.
+          fireExit(signal);
           return true;
         },
       },
     ) as SpawnedChildLike & EventEmitter;
 
     let fired = false;
+    let exitTimer: ReturnType<typeof setTimeout> | null = null;
     const fireExit = (signalOverride?: NodeJS.Signals | null): void => {
       if (fired) return;
       fired = true;
+      // Cancel the natural-exit timer so a kill()-induced exit
+      // doesn't leave a 60s setTimeout pinned in the event loop
+      // (was costing dispatcher.test.ts a full 60s of wall time on
+      // every run because three tests use `exitDelayMs: 60_000`).
+      if (exitTimer !== null) {
+        clearTimeout(exitTimer);
+        exitTimer = null;
+      }
       const code = signalOverride ? null : spec.exitCode ?? 0;
       const signal = signalOverride ?? spec.exitSignal ?? null;
       (child as unknown as { exitCode: number | null }).exitCode = code;
@@ -166,7 +193,12 @@ export function makeFakeSpawn(scripts: FakeChildSpec[] | (() => FakeChildSpec)):
       } catch { /* ignore */ }
       (child as EventEmitter).emit("exit", code, signal);
     };
-    setTimeout(fireExit, spec.exitDelayMs ?? 0);
+    exitTimer = setTimeout(fireExit, spec.exitDelayMs ?? 0);
+    // Defense-in-depth: even if a future test forgets to kill or
+    // exit the child, an unref'd timer won't keep Node alive.
+    if (typeof (exitTimer as { unref?: () => void }).unref === "function") {
+      (exitTimer as unknown as { unref: () => void }).unref();
+    }
 
     return child;
   };

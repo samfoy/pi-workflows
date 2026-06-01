@@ -845,36 +845,123 @@ test("dispatchAgent: rejects path-traversal agentId before any spawn", { timeout
 // SIGTERM, leaving cooperative-stop hung if the agent ignored it.
 // Both paths now route through `escalateKill` which arms a SIGKILL
 // timer after `killGraceMs`.
+//
+// Determinism: the dispatcher's escalation depends on a real-time
+// `setTimeout(killGraceMs)` firing. Under CPU pressure (e.g. another
+// process saturating cores), Node may not be scheduled for tens of
+// milliseconds at a time and a 50-ms grace timer can be delayed past
+// the test's 5000-ms deadline — the original flake. We use
+// `t.mock.timers` to mock `setTimeout` only (real `setImmediate`
+// keeps the parser's `Readable.from(asyncIter())` working) and
+// `tick(graceMs)` to fire the SIGKILL timer synchronously, removing
+// any wall-clock dependency.
+//
+// `setImmediate` is intentionally NOT mocked: tsx's ESM loader and
+// node:test's I/O completion paths do not use `setTimeout`, so
+// mocking only `setTimeout` lets the dispatcher's real I/O (file
+// writes, stream pumps, child stdout iteration) proceed normally.
+// `setInterval` is also unmocked since the dispatcher doesn't use it.
 
-test("abort path: escalates SIGTERM\u2192SIGKILL when child ignores SIGTERM", { timeout: 5000 }, async () => {
+/**
+ * Drain real-`setImmediate`-based async iteration until predicate is
+ * true or the bound is exhausted. Used to advance the parser through
+ * its chunks without relying on real wall-clock progression.
+ */
+async function drainSetImmediate(
+  predicate: () => boolean,
+  maxIterations = 1000,
+): Promise<void> {
+  for (let i = 0; i < maxIterations; i++) {
+    if (predicate()) return;
+    await new Promise<void>((r) => setImmediate(r));
+  }
+}
+
+/**
+ * Wait until `child.stdout` exists AND has been fully consumed
+ * (Readable emitted 'end' or was destroyed). Critical before triggering
+ * an abort under mock setTimeout: the dispatcher's parser-error catch
+ * path used to re-issue SIGTERM if the for-await threw "Premature
+ * close" because fakeChild's synchronous fireExit destroyed the stream
+ * mid-iteration. Letting the parser drain naturally first sidesteps
+ * that race.
+ */
+async function drainUntilStreamEnded(
+  child: { stdout?: NodeJS.ReadableStream | null },
+  maxIterations = 1000,
+): Promise<void> {
+  await drainSetImmediate(() => {
+    const s = child.stdout as (NodeJS.ReadableStream & {
+      readableEnded?: boolean;
+      destroyed?: boolean;
+    }) | null | undefined;
+    if (s == null) return false; // spawn hasn't happened yet — keep draining
+    return s.readableEnded === true || s.destroyed === true;
+  }, maxIterations);
+}
+
+test("abort path: escalates SIGTERM\u2192SIGKILL when child ignores SIGTERM", { timeout: 60_000 }, async (t) => {
+  // Mock setTimeout so the dispatcher's `killGraceMs` SIGKILL timer
+  // fires deterministically via `tick()` regardless of CPU pressure.
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const runDir = tmpRunDir();
   const fake = makeFakeSpawn([
     {
       stdout: ['{"type":"session"}\n', '{"type":"agent_start"}\n'],
       // Long delay so the only way the child exits is via the
-      // dispatcher's escalation.
+      // dispatcher's escalation. With mock setTimeout this timer
+      // never fires (we never `tick(60_000)`); the child exits via
+      // the synchronous `fireExit` inside `kill("SIGKILL")`.
       exitDelayMs: 60_000,
       ignoresSigterm: true, // SIGTERM is recorded but doesn't fire exit
       ignoresSigkill: false, // SIGKILL is what finally exits the child
     },
   ]);
+  let captured: { stdout?: NodeJS.ReadableStream | null } = {};
+  const wrappedSpawn: typeof fake.spawn = (cmd, args, opts) => {
+    const c = fake.spawn(cmd, args, opts);
+    captured = c as unknown as { stdout?: NodeJS.ReadableStream | null };
+    return c;
+  };
   const ctrl = new AbortController();
-  setTimeout(() => ctrl.abort(), 20);
-  await assert.rejects(
-    () =>
-      dispatchAgent({
-        runDir,
-        agentId: "abort-escalate",
-        prompt: "p",
-        promptHash: "h",
-        cwd: runDir,
-        spawn: fake.spawn,
-        signal: ctrl.signal,
-        skipParentDeathGuard: true,
-        timeoutMs: 60_000,
-        killGraceMs: 50, // tight grace so the test runs fast
-      }),
+
+  const dispatchP = assert.rejects(
+    dispatchAgent({
+      runDir,
+      agentId: "abort-escalate",
+      prompt: "p",
+      promptHash: "h",
+      cwd: runDir,
+      spawn: wrappedSpawn,
+      signal: ctrl.signal,
+      skipParentDeathGuard: true,
+      timeoutMs: 60_000,
+      killGraceMs: 50, // tight grace; mock-tick fires it instantly
+    }),
   );
+
+  // Drain real-setImmediate cycles until the parser has fully
+  // consumed the stream (asyncIter exhausted, Readable.from emitted
+  // 'end'). This avoids a race where the synchronous `fireExit`
+  // (called inside fakeChild kill) destroys stdout mid-iteration
+  // and the dispatcher's parser-error path re-issues SIGTERM.
+  await drainUntilStreamEnded(captured);
+
+  // Trigger abort. The dispatcher's onAbort listener runs
+  // synchronously: SIGTERM is sent (ignored), and a SIGKILL grace
+  // setTimeout(50) is scheduled — mocked.
+  ctrl.abort();
+  // Microtask flush so onAbort's synchronous dispatcher callbacks
+  // (escalateKill, schedule grace timer) all complete before we tick.
+  await Promise.resolve();
+
+  // Advance mock time past killGraceMs so the SIGKILL timer fires.
+  // fakeChild's kill() now fires fireExit synchronously, emitting
+  // "exit" before tick() returns; the dispatcher's exit handler
+  // resolves exitPromise and the dispatch unwinds.
+  t.mock.timers.tick(60);
+
+  await dispatchP;
   // Must have sent BOTH signals (SIGTERM first, then SIGKILL).
   assert.deepEqual(
     fake.calls[0]!.signalsSent,
@@ -883,7 +970,8 @@ test("abort path: escalates SIGTERM\u2192SIGKILL when child ignores SIGTERM", { 
   );
 });
 
-test("abort path: SIGTERM alone is sufficient when child cooperates (no SIGKILL fired)", { timeout: 5000 }, async () => {
+test("abort path: SIGTERM alone is sufficient when child cooperates (no SIGKILL fired)", { timeout: 60_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const runDir = tmpRunDir();
   const fake = makeFakeSpawn([
     {
@@ -892,23 +980,43 @@ test("abort path: SIGTERM alone is sufficient when child cooperates (no SIGKILL 
       // Default: child cooperates, SIGTERM fires exit — no SIGKILL needed.
     },
   ]);
+  let captured: { stdout?: NodeJS.ReadableStream | null } = {};
+  const wrappedSpawn: typeof fake.spawn = (cmd, args, opts) => {
+    const c = fake.spawn(cmd, args, opts);
+    captured = c as unknown as { stdout?: NodeJS.ReadableStream | null };
+    return c;
+  };
   const ctrl = new AbortController();
-  setTimeout(() => ctrl.abort(), 20);
-  await assert.rejects(
-    () =>
-      dispatchAgent({
-        runDir,
-        agentId: "abort-cooperative",
-        prompt: "p",
-        promptHash: "h",
-        cwd: runDir,
-        spawn: fake.spawn,
-        signal: ctrl.signal,
-        skipParentDeathGuard: true,
-        timeoutMs: 60_000,
-        killGraceMs: 200, // generous grace; cooperative child should exit first
-      }),
+
+  const dispatchP = assert.rejects(
+    dispatchAgent({
+      runDir,
+      agentId: "abort-cooperative",
+      prompt: "p",
+      promptHash: "h",
+      cwd: runDir,
+      spawn: wrappedSpawn,
+      signal: ctrl.signal,
+      skipParentDeathGuard: true,
+      timeoutMs: 60_000,
+      killGraceMs: 200, // generous grace; cooperative child should exit first
+    }),
   );
+
+  await drainUntilStreamEnded(captured);
+
+  ctrl.abort();
+  // SIGTERM is cooperative: fakeChild fires "exit" synchronously
+  // inside kill(), and the dispatcher's exit handler clears the
+  // SIGKILL grace timer (`killTimeoutHandle`). No tick needed.
+  await Promise.resolve();
+
+  // Tick well past killGraceMs to prove the SIGKILL timer was indeed
+  // cleared (not just deferred): if the cancel didn't take effect, a
+  // tick(>200) would fire it and signalsSent would gain SIGKILL.
+  t.mock.timers.tick(500);
+
+  await dispatchP;
   // Cooperative child: SIGTERM only, SIGKILL timer canceled by exit.
   assert.equal(fake.calls[0]!.signalsSent[0], "SIGTERM");
   assert.ok(
@@ -917,7 +1025,8 @@ test("abort path: SIGTERM alone is sufficient when child cooperates (no SIGKILL 
   );
 });
 
-test("timeout path: escalates SIGTERM\u2192SIGKILL when child ignores SIGTERM", { timeout: 5000 }, async () => {
+test("timeout path: escalates SIGTERM\u2192SIGKILL when child ignores SIGTERM", { timeout: 60_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   const runDir = tmpRunDir();
   const fake = makeFakeSpawn([
     {
@@ -931,20 +1040,29 @@ test("timeout path: escalates SIGTERM\u2192SIGKILL when child ignores SIGTERM", 
       ignoresSigterm: true,
     },
   ]);
-  await assert.rejects(
-    () =>
-      dispatchAgent({
-        runDir,
-        agentId: "timeout-escalate",
-        prompt: "p",
-        promptHash: "h",
-        cwd: runDir,
-        spawn: fake.spawn,
-        skipParentDeathGuard: true,
-        timeoutMs: 30, // fire timeout almost immediately
-        killGraceMs: 50,
-      }),
+  const dispatchP = assert.rejects(
+    dispatchAgent({
+      runDir,
+      agentId: "timeout-escalate",
+      prompt: "p",
+      promptHash: "h",
+      cwd: runDir,
+      spawn: fake.spawn,
+      skipParentDeathGuard: true,
+      timeoutMs: 30, // fire timeout almost immediately (mocked)
+      killGraceMs: 50,
+    }),
   );
+
+  await drainSetImmediate(() => fake.calls.length > 0);
+
+  // Tick past timeoutMs to fire the dispatcher's subprocess timeout.
+  // That schedules the SIGKILL grace timer; tick again past graceMs.
+  t.mock.timers.tick(40);  // fires timeoutHandle → escalateKill → SIGTERM (ignored), schedules SIGKILL(50)
+  await Promise.resolve();
+  t.mock.timers.tick(60);  // fires SIGKILL grace → fireExit → exit
+
+  await dispatchP;
   assert.deepEqual(
     fake.calls[0]!.signalsSent,
     ["SIGTERM", "SIGKILL"],
