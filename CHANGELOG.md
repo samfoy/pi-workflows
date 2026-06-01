@@ -32,6 +32,26 @@ conductor goes idle and then triggering a turn. Older pi builds that reject
 the second arg fall back to the no-options form. See
 `tests/unit/resultDelivery.test.ts` for the regression coverage.
 
+## [0.5.0] - 2026-06-01
+
+### Fixed (automated bug-hunt — 5 passes, ~35 bugs)
+
+- **sandbox**: timer callback throws now abort the run via `_runAbort` — previously logged silently and execution continued
+- **dispatcher**: `tool_execution_start` counted as a tool call; BUG-149 context-overflow recovery (`AgentResult.truncated`); spawn errors preserved; abort listener cleaned on all exit paths
+- **ctx/phase**: `agentCount` decremented on failure — each failed agent was permanently consuming a concurrency slot
+- **runLock**: unlink on write failure; stale-lock process-liveness recovery; `statSync` errors in `ResumeLockedError`; fd guarded
+- **gc**: fork-children filter runs in dry-run mode too (no phantom deletions); `ageDays` floored at 0
+- **cache / memoStore**: `entriesSinceCompaction` compare-and-swap reset; `drainBatchSync` surfaces fs errors
+- **timerTable**: no double-fire of `onTimerError` on successful realm-error reconstruction
+- **stdlib**: `ctx.parallel` fn receives `(item, index, ctx)` like `Array.prototype.map` — BUG-W06
+- **worktree**: LFS support; named-branch flag (`{ mode: 'worktree', branch }`) end-to-end
+- **runManager / resumeRun**: `PauseGate` released after state transition confirmed
+
+### Added
+
+- `run_workflow` LLM tool — model can trigger workflows by name without slash command
+- `AgentResult.truncated` — signals context-overflow synthetic result
+
 ## [0.3.0] - 2026-05-31
 
 ### Added
