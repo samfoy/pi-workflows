@@ -541,3 +541,209 @@ test("[concurrent-resume] second resume of the same runId errors with ResumeLock
   const lockPath = join(env.resolveRunDir("wf-lockedresxxx"), ".resume.lock");
   assert.equal(existsSync(lockPath), false, "lock must be released after settle");
 });
+
+// ─── readManifestStrict error paths ─────────────────────────────
+
+test("resume: missing manifest.json → error names the runDir", async () => {
+  const env = makeTmp();
+  const runDir = env.resolveRunDir("wf-missingmanif");
+  // Just create the dir; don't write manifest.json or anything else.
+  void runDir;
+  await assert.rejects(
+    resumeRun("wf-missingmanif", {
+      resolveRunDir: env.resolveRunDir,
+      resolveLedgerPath: env.resolveLedgerPath,
+      preApproved: true,
+    }),
+    (err: unknown) =>
+      err instanceof Error && /manifest\.json missing/.test(err.message),
+  );
+});
+
+test("resume: empty manifest.json → error reports 'empty'", async () => {
+  const env = makeTmp();
+  const runDir = env.resolveRunDir("wf-emptymanif00");
+  writeFileSync(join(runDir, "manifest.json"), "   \n");
+  await assert.rejects(
+    resumeRun("wf-emptymanif00", {
+      resolveRunDir: env.resolveRunDir,
+      resolveLedgerPath: env.resolveLedgerPath,
+      preApproved: true,
+    }),
+    (err: unknown) =>
+      err instanceof Error && /manifest\.json empty/.test(err.message),
+  );
+});
+
+test("resume: corrupt manifest.json → error reports 'corrupt' + parse detail", async () => {
+  const env = makeTmp();
+  const runDir = env.resolveRunDir("wf-corruptmanif");
+  writeFileSync(join(runDir, "manifest.json"), "{ not valid json,,,");
+  await assert.rejects(
+    resumeRun("wf-corruptmanif", {
+      resolveRunDir: env.resolveRunDir,
+      resolveLedgerPath: env.resolveLedgerPath,
+      preApproved: true,
+    }),
+    (err: unknown) =>
+      err instanceof Error && /manifest\.json corrupt/.test(err.message),
+  );
+});
+
+test("resume: manifest.json that's an array (not object) → error reports 'shape invalid'", async () => {
+  const env = makeTmp();
+  const runDir = env.resolveRunDir("wf-shapemanif00");
+  writeFileSync(join(runDir, "manifest.json"), JSON.stringify(["not", "an", "object"]));
+  await assert.rejects(
+    resumeRun("wf-shapemanif00", {
+      resolveRunDir: env.resolveRunDir,
+      resolveLedgerPath: env.resolveLedgerPath,
+      preApproved: true,
+    }),
+    (err: unknown) =>
+      err instanceof Error && /manifest\.json shape invalid/.test(err.message),
+  );
+});
+
+test("resume: manifest.json missing required slice-8a fields → lists which fields", async () => {
+  const env = makeTmp();
+  const runDir = env.resolveRunDir("wf-incompletemf");
+  // Only runId — missing workflowName / workflowAbsPath / workflowSourceSha256.
+  writeFileSync(
+    join(runDir, "manifest.json"),
+    JSON.stringify({ runId: "wf-incompletemf" }),
+  );
+  await assert.rejects(
+    resumeRun("wf-incompletemf", {
+      resolveRunDir: env.resolveRunDir,
+      resolveLedgerPath: env.resolveLedgerPath,
+      preApproved: true,
+    }),
+    (err: unknown) =>
+      err instanceof Error &&
+      /missing required slice-8a fields/.test(err.message) &&
+      /workflowName/.test(err.message),
+  );
+});
+
+// ─── frozen-script-fallback path ────────────────────────────────
+
+test("resume: missing frozen <runDir>/script.js falls back to live workflowAbsPath", async () => {
+  const env = makeTmp();
+  await buildRunDir({
+    ...env,
+    runId: "wf-nofrozen0000",
+    state: "paused",
+    scriptSource: `return "from-live";`,
+  });
+  // Delete the frozen copy. The live workflowAbsPath still has the
+  // same source so resume should succeed by reading from there.
+  const runDir = env.resolveRunDir("wf-nofrozen0000");
+  const fs = await import("node:fs");
+  fs.unlinkSync(join(runDir, "script.js"));
+  // Confirm: only live file remains.
+  assert.equal(existsSync(join(runDir, "script.js")), false);
+  const handle = await resumeRun("wf-nofrozen0000", {
+    resolveRunDir: env.resolveRunDir,
+    resolveLedgerPath: env.resolveLedgerPath,
+    preApproved: true,
+  });
+  const result = await handle.promise;
+  assert.equal(result, "from-live");
+});
+
+// ─── approval gate paths ─────────────────────────────────────
+
+test("resume: approval gate fires when preApproved=false + approval supplied; allow path runs", async () => {
+  const env = makeTmp();
+  await buildRunDir({
+    ...env,
+    runId: "wf-approvegated",
+    state: "paused",
+    scriptSource: `return "approved";`,
+  });
+  const dialogCalls: string[] = [];
+  const handle = await resumeRun("wf-approvegated", {
+    resolveRunDir: env.resolveRunDir,
+    resolveLedgerPath: env.resolveLedgerPath,
+    // preApproved omitted (defaults false)
+    approval: {
+      dialog: async (prompt) => {
+        dialogCalls.push(prompt.workflowName);
+        return "run-once";
+      },
+      viewer: () => {},
+      trustOverride: {},
+    },
+  });
+  const result = await handle.promise;
+  assert.equal(result, "approved");
+  assert.deepEqual(dialogCalls, ["resumetest"]);
+});
+
+test("resume: approval gate denial throws and does NOT execute the script", async () => {
+  const env = makeTmp();
+  await buildRunDir({
+    ...env,
+    runId: "wf-approvedeny",
+    state: "paused",
+    scriptSource: `throw new Error("should not run");`,
+  });
+  await assert.rejects(
+    resumeRun("wf-approvedeny", {
+      resolveRunDir: env.resolveRunDir,
+      resolveLedgerPath: env.resolveLedgerPath,
+      approval: {
+        dialog: async () => "no",
+        viewer: () => {},
+        trustOverride: {},
+      },
+    }),
+    (err: unknown) => {
+      // RunCancelledError surfaces — message includes 'cancelled' or the dialog's reason.
+      return err instanceof Error && /cancel/i.test(err.message);
+    },
+  );
+});
+
+// ─── fork-lineage cross-check ───────────────────────────────
+
+test("resume: manifest with parentRunId + forkAtPhase appends fork_lineage ledger entry", async () => {
+  const env = makeTmp();
+  await buildRunDir({
+    ...env,
+    runId: "wf-forkresumed",
+    state: "paused",
+    scriptSource: `return "forked";`,
+  });
+  // Patch manifest to add fork-lineage fields.
+  const runDir = env.resolveRunDir("wf-forkresumed");
+  const manifestPath = join(runDir, "manifest.json");
+  const m = JSON.parse(readFileSync(manifestPath, "utf-8"));
+  m.parentRunId = "wf-parentrun000";
+  m.forkAtPhase = "phase-1";
+  writeFileSync(manifestPath, JSON.stringify(m, null, 2));
+  const handle = await resumeRun("wf-forkresumed", {
+    resolveRunDir: env.resolveRunDir,
+    resolveLedgerPath: env.resolveLedgerPath,
+    preApproved: true,
+  });
+  await handle.promise;
+  await handle.terminated;
+  // Inspect the ledger to confirm a fork_lineage entry was appended
+  // post-resume.
+  const ledgerLines = readFileSync(
+    env.resolveLedgerPath("wf-forkresumed"),
+    "utf-8",
+  )
+    .split("\n")
+    .filter((l) => l.length > 0)
+    .map((l) => JSON.parse(l));
+  const forkEntries = ledgerLines.filter(
+    (e: { type: string }) => e.type === "fork_lineage",
+  );
+  assert.equal(forkEntries.length, 1);
+  assert.equal(forkEntries[0].parentRunId, "wf-parentrun000");
+  assert.equal(forkEntries[0].forkAtPhase, "phase-1");
+});
+
