@@ -613,6 +613,40 @@ function isConductorInstalled(cwd: string): boolean {
 export { WorkflowClient } from "./client.js";
 export type { WorkflowClientOptions, ActiveRunsIndex, RunStateSummary } from "./client.js";
 
+// Public author-facing types. Authors writing workflow scripts get
+// these via either `/// <reference types="@samfp/pi-workflows" />`
+// (resolves to dist/index.d.ts → transitive load of these exports) or
+// explicit `import type { WorkflowMain, AgentResult } from "@samfp/pi-workflows"`.
+// `public.d.ts` is hand-authored and copied to dist/types/ at build time;
+// this re-export is what threads it into the package's public surface.
+export type {
+  AgentOpts,
+  AgentHandle,
+  AgentUsage,
+  AgentResult,
+  RunMeta,
+  MemoryScope,
+  MemoryCompactResult,
+  IsolationMode,
+  AggregateMethod,
+  AggregateResult,
+  CritiqueOpts,
+  CritiqueResult,
+  InterruptOpts,
+  InterruptResult,
+  PromoteOpts,
+  PromoteResult,
+  VoteResult,
+  ConsensusResult,
+  ConsensusOpts,
+  ParallelOpts,
+  PhaseOpts,
+  RetryOpts,
+  SleepOpts,
+  WorkflowContext,
+  WorkflowMain,
+} from "./types/public.js";
+
 // ZONE_TIMETRAVEL: time-travel / fork-from-checkpoint API.
 export {
   forkFromCheckpoint,

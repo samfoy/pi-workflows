@@ -20,6 +20,8 @@
 
 import { build } from "esbuild";
 import { pathToFileURL } from "node:url";
+import { copyFile, mkdir } from "node:fs/promises";
+import path from "node:path";
 
 export const config = {
   entryPoints: ["src/index.ts"],
@@ -45,9 +47,31 @@ export const config = {
 // the file (e.g. from a future test that wants to inspect the config)
 // does NOT trigger a build.
 if (import.meta.url === pathToFileURL(process.argv[1]).href) {
-  build(config).catch((err) => {
+  Promise.all([
+    build(config),
+    copyPublicTypes(),
+  ]).catch((err) => {
     // eslint-disable-next-line no-console
     console.error("[pi-workflows] esbuild failed:", err);
     process.exit(1);
   });
+}
+
+// `src/types/public.d.ts` and `src/types/internal.d.ts` are
+// manually-authored declaration files. tsc's `--declaration` does not
+// emit anything from .d.ts inputs, so they never reach `dist/`. We copy
+// them explicitly so consumers' tsc resolves the `./types/public.js`
+// and `../types/internal.js` references that the emitted .d.ts files
+// carry through verbatim from the .ts sources.
+async function copyPublicTypes() {
+  const files = [
+    ["src/types/public.d.ts", "dist/types/public.d.ts"],
+    ["src/types/internal.d.ts", "dist/types/internal.d.ts"],
+  ];
+  for (const [from, to] of files) {
+    const src = path.resolve(from);
+    const dst = path.resolve(to);
+    await mkdir(path.dirname(dst), { recursive: true });
+    await copyFile(src, dst);
+  }
 }
