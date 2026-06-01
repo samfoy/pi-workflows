@@ -1,38 +1,33 @@
 /**
- * pi-workflows — internal type definitions (slice 1+).
+ * pi-workflows — internal type definitions barrel.
  *
- * Per `plan.md` §5.1 these are runtime-internal types. They are extended
- * additively by each slice that adds runtime; no slice ever moves a type
- * out of this file. Author-facing types live in `public.d.ts` and are
- * frozen from slice 8a onward.
+ * Per `plan.md` §5.1 these are runtime-internal types. Author-facing
+ * types live in `public.d.ts` and are frozen from slice 8a onward.
  *
- * Field-ownership comments tag every later-slice field with the slice
- * number that populates it, so cross-slice contracts stay legible.
+ * ─── LAYOUT ────────────────────────────────────────────────
+ * The 2026 audit's god-types finding was addressed in two passes:
  *
- * ─── ARCHITECTURE NOTE ──────────────────────────────────────
- * The 2026 audit flagged this file (1,600+ lines) as a god-types module
- * and recommended a capability-interface-segregation refactor splitting
- * it along its slice boundaries (manifest / extension / sandbox /
- * runCtx-host / cache / agent / ledger / approval). That split is
- * deferred:
+ *   - Targeted in-place fixes (commit dd16d3a + 7c7538d): the
+ *     `as unknown as` cluster in runCtx, the missing `SettledAgent`
+ *     type, and the schema validators (now in src/runtime/schema.ts).
  *
- *   - The cross-file fan-in is high (~50 importers across src/ and
- *     tests/), and a partial split would force a same-PR migration of
- *     every consumer.
- *   - The capability boundaries the audit suggested don't all line up
- *     cleanly with the existing slice headers; the right split needs
- *     a focused design pass to avoid landing on a slightly-better
- *     version of the same problem.
- *   - The actual day-to-day pain points the audit named
- *     (`as unknown as` clusters, AgentUsage<:Record, SettledAgent
- *     missing) have already been fixed in-place — see commit
- *     `dd16d3a refactor(types): replace 'as unknown as' cluster in
- *     runCtx`.
+ *   - Per-slice file split: the type definitions themselves now live
+ *     under src/types/internal/, one file per slice header. This file
+ *     is a barrel that re-exports * from each, so existing
+ *     `import { ... } from "../types/internal.js"` paths keep working
+ *     unchanged. New code SHOULD prefer the specific slice file when
+ *     only one slice's types are needed.
  *
- * Until then, slice headers (// ──── Slice N ────) are the navigation
- * primary key. Editor outline-folding gets you the rest of the way.
+ * Files (size at split-time):
+ *   internal/extension.d.ts    Slice 1   423L  workflows, ExtensionAPI, Tui*
+ *   internal/sandbox.d.ts      Slice 2   382L  sandbox + RunCtxHost bridge
+ *   internal/cache.d.ts        Slice 3    89L  cache record types
+ *   internal/concurrency.d.ts  Slice 4    59L  Semaphore + AcquireToken
+ *   internal/dispatcher.d.ts   Slice 6   216L  Agent*, Dispatcher*, Spawn*
+ *   internal/ledger.d.ts       Slice 7   293L  RunState, LedgerEntry union
+ *   internal/approval.d.ts     Slice 9   143L  Trust*, ApprovalDialog
+ *   internal/result.d.ts       Slice 10  130L  RunOutcome, ResultCard*
  */
-
 
 // ──────────────────────────────────────────────────────────────────────────
 // 2026 audit refactor: per-slice type definitions live in ./internal/ now.
