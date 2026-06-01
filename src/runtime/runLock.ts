@@ -43,20 +43,30 @@ export interface ResumeLockBody {
 
 export class ResumeLockedError extends Error {
   readonly runId: string;
-  readonly holderPid: number;
+  readonly holderPid: number | undefined;
   readonly holderBootId: string;
   readonly acquiredAt: string;
+  /** True when the lock file existed but had an empty body (TOCTOU init window). */
+  readonly uninitialized: boolean;
   constructor(opts: {
     runId: string;
-    holderPid: number;
+    holderPid: number | undefined;
     holderBootId: string;
     acquiredAt: string;
+    uninitialized?: boolean;
   }) {
+    const uninit = opts.uninitialized ?? false;
     super(
-      `run ${opts.runId} is already being resumed by pid=${opts.holderPid} ` +
-        `(acquiredAt=${opts.acquiredAt}). If that pi process is gone, ` +
-        `delete the .resume.lock file in the runDir to clear it.`,
+      uninit
+        ? `run ${opts.runId} has a lock file that is still being initialized ` +
+            `(empty body — another process is mid-acquire). ` +
+            `If no pi process is actively resuming this run, ` +
+            `delete the .resume.lock file in the runDir to clear it.`
+        : `run ${opts.runId} is already being resumed by pid=${opts.holderPid} ` +
+            `(acquiredAt=${opts.acquiredAt}). If that pi process is gone, ` +
+            `delete the .resume.lock file in the runDir to clear it.`,
     );
+    this.uninitialized = uninit;
     this.name = "ResumeLockedError";
     this.runId = opts.runId;
     this.holderPid = opts.holderPid;
@@ -137,9 +147,10 @@ export function acquireResumeLock(opts: {
     if (!isStale) {
       throw new ResumeLockedError({
         runId: opts.runId,
-        holderPid,
+        holderPid: emptyBody ? undefined : holderPid,
         holderBootId,
         acquiredAt: typeof body.acquiredAt === "string" ? body.acquiredAt : "<unknown>",
+        uninitialized: emptyBody,
       });
     }
     // Stale — break it and retry once. If a third process slips in

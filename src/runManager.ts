@@ -970,8 +970,6 @@ export async function startWorkflowRun(
     resumePaused: (reason?: string) =>
       withControlLock(async () => {
         if (sm.state !== "paused") return false;
-        const changed = pauseGate.resume();
-        if (!changed) return false;
         const at = (opts.nowIso ?? (() => new Date().toISOString()))();
         await ledger.append(
           reason !== undefined
@@ -985,9 +983,6 @@ export async function startWorkflowRun(
         // our resume entry on the ledger writeQueue. Without this
         // recheck we'd transition paused→running for a doomed run.
         if (sm.state !== "paused" || ctrl.signal.aborted) {
-          // Roll back the gate so the run isn't left in a half-released
-          // state if a future control op observes it.
-          pauseGate.pause();
           await ledger
             .append({
               type: "log",
@@ -1006,11 +1001,14 @@ export async function startWorkflowRun(
         try {
           await sm.go("running");
         } catch {
-          // Race: state already advanced. Re-engaging the gate would
-          // be wrong (state might be `stopped`/`failed`). Leave
-          // gate released and absorb — caller sees `false`.
+          // Race: state already advanced. Gate not yet released; leave
+          // it closed and absorb — caller sees `false`.
           return false;
         }
+        // Release the gate only after the state transition is confirmed.
+        // This ensures no concurrent observer can see the gate open
+        // while sm.state is still "paused".
+        pauseGate.resume();
         return true;
       }),
     stop: (reason?: string) => {

@@ -163,15 +163,15 @@ test("nested setTimeout-chain: abort breaks the chain", async () => {
   assert.ok(depth >= 1, "but at least one fire happened pre-abort");
 });
 
-test("callback throw: onTimerError sees host-realm error", async () => {
+test("callback throw: onTimerContextError sees reconstructed error", async () => {
   const ctx = vm.createContext({});
   const ctrl = new AbortController();
-  let captured: unknown;
   let captured_ctxErr: Error | undefined;
+  let onTimerErrorFired = false;
   const bridge = installTimerBridge(ctx, {
     signal: ctrl.signal,
-    onTimerError: (e) => {
-      captured = e;
+    onTimerError: () => {
+      onTimerErrorFired = true; // should NOT fire when reconstruction succeeds
     },
     onTimerContextError: (e) => {
       captured_ctxErr = e;
@@ -181,15 +181,10 @@ test("callback throw: onTimerError sees host-realm error", async () => {
     throw new Error("boom");
   }, 5);
   await new Promise((r) => setTimeout(r, 30));
-  assert.ok(captured instanceof Error);
-  assert.equal((captured as Error).message, "boom");
-  // The Context-realm reconstruction also fired. We can't use
-  // `instanceof Error` (that checks against host's Error) — instead
-  // check the realm-agnostic [[Class]] tag.
-  assert.equal(
-    Object.prototype.toString.call(captured_ctxErr),
-    "[object Error]",
-  );
+  // onTimerError must NOT fire when realm reconstruction succeeded (BUG-005 fix).
+  assert.equal(onTimerErrorFired, false, "onTimerError must not fire when reconstruction succeeded");
+  // onTimerContextError receives the realm-reconstructed error.
+  assert.ok(captured_ctxErr, "onTimerContextError should have fired");
   assert.equal(captured_ctxErr!.message, "boom");
   // Reconstructed error is in the Context realm.
   const isCtxRealm = vm.runInContext(`(e) => e instanceof Error`, ctx)(

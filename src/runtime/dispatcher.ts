@@ -24,6 +24,8 @@
  *         array).
  *      g. Aggregate: text from `agent_end.messages[last assistant].content`,
  *         usage from the last `turn_end`, toolCalls from `tool_call`
+ *         or `tool_execution_start` (both event shapes are accepted —
+ *         older pi emits `tool_call`, newer pi emits `tool_execution_start`)
  *         events seen during the stream.
  *      h. On `JsonStreamError`: append the truncated bytes to
  *         `<agentId>.stderr` and reject with `MalformedAgentOutputError`
@@ -195,15 +197,25 @@ export function buildPiArgs(opts: {
 
 interface Aggregator {
   toolCalls: number;
+  /** Completed turns — used by BUG-149 context-overflow recovery heuristic. */
+  turnEnds: number;
   usage: AgentUsage;
   agentEnd: Record<string, unknown> | null;
   /** ZONE_MEMORY: collected `memory_update.text` payloads in order. */
   memoryUpdates: string[];
+  /**
+   * BUG-149: last assistant text from a completed `message_end` event.
+   * Used to synthesise a result when the agent exits cleanly mid-stream
+   * (context-window exhaustion) without writing `agent_end`.
+   */
+  lastAssistantText: string;
 }
 
 function newAggregator(): Aggregator {
   return {
     toolCalls: 0,
+    turnEnds: 0,
+    lastAssistantText: "",
     usage: {
       input: 0,
       output: 0,
@@ -218,7 +230,7 @@ function newAggregator(): Aggregator {
 
 function ingest(agg: Aggregator, ev: Record<string, unknown>): void {
   const type = ev.type;
-  if (type === "tool_call") {
+  if (type === "tool_call" || type === "tool_execution_start") {
     agg.toolCalls += 1;
     return;
   }
@@ -232,9 +244,12 @@ function ingest(agg: Aggregator, ev: Record<string, unknown>): void {
     }
     return;
   }
-  if (type === "turn_end" || type === "message_end") {
-    // Real pi emits `usage` nested inside `message`. Sometimes also
-    // top-level. Latch the most-detailed reading.
+  if (type === "turn_end") {
+    agg.turnEnds += 1;
+    return;
+  }
+  if (type === "message_end") {
+    // Latch usage from the last message_end.
     const msg = (ev.message ?? {}) as Record<string, unknown>;
     const usage = (msg.usage ?? ev.usage) as Record<string, number> | undefined;
     if (usage && typeof usage === "object") {
@@ -245,6 +260,20 @@ function ingest(agg: Aggregator, ev: Record<string, unknown>): void {
         cacheWrite: pickInt(usage, "cacheWrite"),
         totalTokens: pickInt(usage, "totalTokens"),
       };
+    }
+    // BUG-149: track last assistant text for context-overflow recovery.
+    if (msg.role === "assistant") {
+      const content = msg.content;
+      if (Array.isArray(content)) {
+        const parts: string[] = [];
+        for (const c of content) {
+          const cr = c as Record<string, unknown> | null;
+          if (cr && cr.type === "text" && typeof cr.text === "string") {
+            parts.push(cr.text);
+          }
+        }
+        if (parts.length > 0) agg.lastAssistantText = parts.join("");
+      }
     }
     return;
   }
@@ -687,6 +716,12 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
         tee.once("finish", resolve);
         tee.end();
       });
+      stderrTee.end();
+      await new Promise<void>((resolve) => {
+        if (stderrTee.writableFinished) { resolve(); return; }
+        stderrTee.once("close", resolve);
+        stderrTee.once("finish", resolve);
+      }).catch(() => { /* best-effort */ });
       if (wrapperPath) await removeParentDeathWrapper(wrapperPath);
       if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
       throw e;
@@ -753,7 +788,43 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
   }
 
   if (!agg.agentEnd) {
-    // Empty stdout / no agent_end. Differentiate by exit code.
+    // BUG-149: context-overflow recovery. When the agent did real work
+    // (tool calls OR multiple completed turns) and pi exited cleanly
+    // (code 0, no signal), the most likely cause is context-window
+    // exhaustion — pi exits mid-final-response without writing agent_end.
+    // The work (file edits, memory updates) is durable; only the summary
+    // turn was cut. Synthesise a result so the phase doesn't fail.
+    const didRealWork =
+      exitCode === 0 &&
+      exitSignal === null &&
+      (agg.toolCalls > 0 || agg.turnEnds > 2);
+    if (didRealWork) {
+      const truncatedText =
+        agg.lastAssistantText.length > 0
+          ? agg.lastAssistantText +
+            "\n\n[pi-workflows: response truncated — context window exhausted]"
+          : "[pi-workflows: agent completed work but response was truncated due to context window exhaustion]";
+      try {
+        await fs.appendFile(
+          stderrPath,
+          `[pi-workflows] BUG-149: clean exit mid-stream (toolCalls=${agg.toolCalls} turnEnds=${agg.turnEnds}). Synthesising result from last assistant message.\n`,
+          "utf8",
+        );
+      } catch { /* best-effort */ }
+      return {
+        ok: true,
+        agentId: opts.agentId,
+        text: truncatedText,
+        usage: agg.usage,
+        toolCalls: agg.toolCalls,
+        durationMs: now() - t0,
+        transcriptPath,
+        exitCode,
+        truncated: true,
+      } satisfies AgentResult;
+    }
+
+    // No evidence of real work — treat as a genuine failure.
     const reason =
       exitCode === 0 ? "empty-stdout-success" : "empty-stdout-failure";
     let stderrTail = "";
@@ -768,6 +839,7 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
         agentId: opts.agentId,
         exitCode,
         signal: exitSignal,
+        stderrTail,
       });
     }
     throw new MalformedAgentOutputError({

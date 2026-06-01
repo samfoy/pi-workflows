@@ -66,11 +66,13 @@ export class AgentSubprocessError extends Error {
   readonly agentId: string;
   readonly exitCode: number | null;
   readonly signal: NodeJS.Signals | null;
+  readonly stderrTail: string;
 
   constructor(opts: {
     agentId: string;
     exitCode: number | null;
     signal: NodeJS.Signals | null;
+    stderrTail?: string;
     cause?: unknown;
   }) {
     super(
@@ -81,6 +83,7 @@ export class AgentSubprocessError extends Error {
     this.agentId = opts.agentId;
     this.exitCode = opts.exitCode;
     this.signal = opts.signal;
+    this.stderrTail = opts.stderrTail ?? "";
   }
 }
 

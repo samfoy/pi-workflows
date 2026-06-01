@@ -126,6 +126,8 @@ export interface AgentResult {
    * block. Undefined otherwise.
    */
   readonly output?: unknown;
+  /** BUG-149: true when context-window overflow caused a clean exit before agent_end. Work is durable; only the final response was truncated. */
+  readonly truncated?: boolean;
 }
 
 /** Run metadata exposed via `ctx.run`. */

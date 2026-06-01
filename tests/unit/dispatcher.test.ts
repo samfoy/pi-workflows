@@ -335,6 +335,72 @@ test("spawn-spy: empty stdout + zero exit → MalformedAgentOutputError reason=e
   );
 });
 
+test("BUG-149: context-overflow recovery — tool calls + clean exit synthesises result", { timeout: 5000 }, async () => {
+  const runDir = tmpRunDir();
+  const stream = [
+    JSON.stringify({ type: "session", id: "s" }),
+    JSON.stringify({ type: "agent_start" }),
+    JSON.stringify({ type: "turn_start" }),
+    JSON.stringify({ type: "tool_execution_start", name: "bash" }),
+    JSON.stringify({ type: "tool_execution_end" }),
+    JSON.stringify({ type: "turn_end" }),
+    JSON.stringify({ type: "turn_start" }),
+    JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "Work complete." }], usage: { input: 5, output: 3, cacheRead: 0, cacheWrite: 0, totalTokens: 8 } } }),
+    // No agent_end — context overflow
+  ].join("\n") + "\n";
+
+  const fake = makeFakeSpawn([{ stdout: [stream], exitCode: 0 }]);
+  const result = await dispatchAgent({
+    runDir, agentId: "overflow", prompt: "p", promptHash: "h",
+    cwd: runDir, spawn: fake.spawn, skipParentDeathGuard: true, timeoutMs: 1500,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.truncated, true);
+  assert.ok(result.text.startsWith("Work complete."));
+  assert.ok(result.text.includes("[pi-workflows: response truncated"));
+  assert.equal(result.toolCalls, 1);
+});
+
+test("BUG-149: context-overflow recovery — many turns (no tool calls) synthesises result", { timeout: 5000 }, async () => {
+  const runDir = tmpRunDir();
+  // 3 complete turns, no tool calls — triggers turnEnds > 2 path
+  const turns = Array.from({ length: 3 }, (_, i) => [
+    JSON.stringify({ type: "turn_start" }),
+    JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "turn " + i }], usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 } } }),
+    JSON.stringify({ type: "turn_end" }),
+  ]).flat();
+  const stream = [
+    JSON.stringify({ type: "session", id: "s" }),
+    JSON.stringify({ type: "agent_start" }),
+    ...turns,
+  ].join("\n") + "\n";
+
+  const fake = makeFakeSpawn([{ stdout: [stream], exitCode: 0 }]);
+  const result = await dispatchAgent({
+    runDir, agentId: "many-turns", prompt: "p", promptHash: "h",
+    cwd: runDir, spawn: fake.spawn, skipParentDeathGuard: true, timeoutMs: 1500,
+  });
+  assert.equal(result.ok, true);
+  assert.equal(result.truncated, true);
+  assert.ok(result.text.includes("turn 2"), "should have last turn text");
+});
+
+test("BUG-149: does NOT fire for truly empty agents (0 turns, 0 tools)", { timeout: 5000 }, async () => {
+  const runDir = tmpRunDir();
+  const fake = makeFakeSpawn([{ stdout: [], exitCode: 0 }]);
+  await assert.rejects(
+    () => dispatchAgent({
+      runDir, agentId: "silent", prompt: "p", promptHash: "h",
+      cwd: runDir, spawn: fake.spawn, skipParentDeathGuard: true, timeoutMs: 1500,
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof MalformedAgentOutputError);
+      assert.equal((err as MalformedAgentOutputError).reason, "empty-stdout-success");
+      return true;
+    },
+  );
+});
+
 test("spawn-spy: AbortSignal aborts mid-stream", { timeout: 5000 }, async () => {
   const runDir = tmpRunDir();
   // A stream that never finishes (no agent_end + chunks dribble out).

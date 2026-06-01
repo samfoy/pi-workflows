@@ -348,6 +348,8 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   const agentRestartFlags = new Map<string, boolean>();
   // Per-agent restart counts: limit to 3 to prevent infinite loops.
   const agentRestartCounts = new Map<string, number>();
+  // Stops that arrived before the agent was registered in agentAbortMap.
+  const pendingStops = new Set<string>();
 
   // Shared mutable state for ctx.phase + runOneAgent. The same Object
   // is read+mutated by the in-orchestrator helpers below (stopAgent,
@@ -363,6 +365,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     agentAbortMap,
     agentRestartFlags,
     agentRestartCounts,
+    pendingStops,
     memoryOversizeWarned,
     readOnlyMemoryKeys,
   };
@@ -376,7 +379,13 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   const runOneAgent = phaseMethods.runOneAgent;
 
   function stopAgent(agentId: string): void {
-    agentAbortMap.get(agentId)?.abort();
+    const ctrl = agentAbortMap.get(agentId);
+    if (ctrl !== undefined) {
+      ctrl.abort();
+    } else {
+      // Agent not yet registered — record it so runOneAgent() aborts on entry.
+      pendingStops.add(agentId);
+    }
   }
 
   function restartAgent(agentId: string): void {

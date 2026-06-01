@@ -372,6 +372,11 @@ export class CacheStore {
       fd = openSync(this.cachePath, "a", 0o644);
       writeSync(fd, combined);
       fsyncSync(fd);
+    } catch (err) {
+      // Restore records to the front of the buffer so the next drain
+      // can retry — without this, a transient fs error silently drops data.
+      this.batchBuffer.unshift(...lines);
+      throw err;
     } finally {
       if (fd !== undefined) closeSync(fd);
     }
@@ -427,13 +432,20 @@ export class CacheStore {
     // interleave with the rename.  Build the snapshot INSIDE the
     // callback so it captures in-memory state only after all
     // previously-queued writes have completed (fixes BUG-126).
+    //
+    // Capture the counter *before* the async work so that batch-mode
+    // appends that race during the compaction's async gap are not
+    // wiped by the reset.  We subtract the pre-compaction count
+    // rather than zeroing, preserving any increments that arrived
+    // concurrently.
+    const countAtStart = this.entriesSinceCompaction;
     const next = this.writeQueue.then(async () => {
       const snapshot = this.buildSnapshotString();
       await this.writeSnapshotAndRename(snapshot);
     });
     this.writeQueue = next.catch(() => undefined);
     await next;
-    this.entriesSinceCompaction = 0;
+    this.entriesSinceCompaction = Math.max(0, this.entriesSinceCompaction - countAtStart);
     return true;
   }
 

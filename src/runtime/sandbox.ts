@@ -535,9 +535,19 @@ export class Sandbox {
     this.timerBridge = installTimerBridge(context, {
       signal: opts.signal,
       onTimerError: (e) => {
-        // Default sink: log via the SandboxOptions.log channel as an
-        // "error"-level synthetic entry. Slice 8a will route to the
-        // run failure path.
+        // Fires when realm-error reconstruction failed — pass the
+        // SandboxViolationError to the log channel.
+        this.logFn({
+          t: new Date().toISOString(),
+          level: "error",
+          args: [
+            "[sandbox-timer-error] " + safeStringifyThrown(e),
+          ],
+        });
+      },
+      onTimerContextError: (e) => {
+        // Fires on the happy path: realm-error was reconstructed
+        // successfully. Log via the same channel.
         this.logFn({
           t: new Date().toISOString(),
           level: "error",

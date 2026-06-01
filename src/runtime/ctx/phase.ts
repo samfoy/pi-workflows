@@ -82,6 +82,12 @@ export interface PhaseState {
   readonly tokenBudget: number | null;
   /** Per-agent AbortController for stopAgent() targeting. */
   readonly agentAbortMap: Map<string, AbortController>;
+  /**
+   * Agent IDs for which stopAgent() was called before runOneAgent() registered
+   * the agent in agentAbortMap. Checked at registration time so the stop is
+   * not silently dropped.
+   */
+  readonly pendingStops: Set<string>;
   /** Set by restartAgent(); checked in runOneAgent's catch to re-dispatch. */
   readonly agentRestartFlags: Map<string, boolean>;
   /** Per-agent restart counts, capped at 3 to prevent loops. */
@@ -437,6 +443,20 @@ export function createPhaseMethods(
     // see a higher committed+reserved value and are blocked at the check above.
     state.budgetReserved += 1;
     state.agentCount++;
+
+    // BUG-FIX: register early so stopAgent() calls during the pre-dispatch
+    // awaits (cache check, semaphore acquire, ledger append, worktree setup)
+    // are not silently dropped.  The dispatch loop replaces this entry with
+    // its own per-iteration controller but keeps preDispatchCtrl.signal in
+    // AbortSignal.any so any pre-loop abort is still honoured.
+    const preDispatchCtrl = new AbortController();
+    state.agentAbortMap.set(handle.id, preDispatchCtrl);
+    // BUG-829-FIX: honour a stopAgent() call that arrived before runOneAgent()
+    // was invoked (i.e. before the agent was registered in agentAbortMap).
+    if (state.pendingStops.has(handle.id)) {
+      preDispatchCtrl.abort();
+      state.pendingStops.delete(handle.id);
+    }
 
     const t0 = deps.nowMs();
 
@@ -820,6 +840,7 @@ export function createPhaseMethods(
         // AbortSignal.any is available since Node 20.3 (we run Node 25).
         const composedSignal = AbortSignal.any([
           agentCtrl.signal,
+          preDispatchCtrl.signal,
           phaseCtrl.signal,
         ]);
         state.agentAbortMap.set(handle.id, agentCtrl);

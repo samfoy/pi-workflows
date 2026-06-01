@@ -172,6 +172,7 @@ export function installTimerBridge(
       try {
         const ctxErr = rethrowAcrossRealm(hostErr, context);
         opts.onTimerContextError?.(ctxErr);
+        return;
       } catch (reconErr) {
         // Reconstruction itself failed — pass the SandboxViolationError
         // through. Test hook will see it; production wires it to the
@@ -180,7 +181,6 @@ export function installTimerBridge(
         opts.onTimerError?.(violation);
         return;
       }
-      opts.onTimerError?.(hostErr);
     } finally {
       // For one-shots, the table entry is already removed by the
       // node-timer-callback wrapper. For intervals, we keep the entry

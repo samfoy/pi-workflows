@@ -63,6 +63,8 @@ export interface AgentResult {
   readonly transcriptPath: string;
   /** Child exit code if a real subprocess was spawned, else `null`. */
   readonly exitCode: number | null;
+  /** BUG-149: true when context-window overflow caused clean exit before agent_end. */
+  readonly truncated?: boolean;
 }
 
 /**

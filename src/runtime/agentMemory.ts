@@ -182,7 +182,7 @@ export async function readMemoryFileWithMeta(
   dir: string,
 ): Promise<ReadMemoryFileResult | null> {
   const p = join(dir, MEMORY_FILE_NAME);
-  let fh: import("node:fs/promises").FileHandle;
+  let fh: import("node:fs/promises").FileHandle | undefined;
   let totalBytes = 0;
   try {
     const st = await fs.stat(p);
@@ -212,10 +212,12 @@ export async function readMemoryFileWithMeta(
   } catch {
     return null;
   } finally {
-    try {
-      await fh.close();
-    } catch {
-      /* ignore */
+    if (fh) {
+      try {
+        await fh.close();
+      } catch {
+        /* ignore */
+      }
     }
   }
 }

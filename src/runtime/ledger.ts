@@ -49,8 +49,8 @@ import {
   fsyncSync,
   openSync,
   promises as fsp,
-  writeSync,
 } from "node:fs";
+import { writeAllSync } from "../util/writeAllSync.ts";
 
 import { ledgerPath as defaultLedgerPath } from "../util/paths.ts";
 import {
@@ -367,7 +367,7 @@ export class LedgerWriter {
     try {
       // O_WRONLY | O_CREAT | O_APPEND, mode 0644.
       fd = openSync(this.path, "a", 0o644);
-      writeSync(fd, line);
+      writeAllSync(fd, line);
       fsyncSync(fd);
     } finally {
       if (fd !== undefined) closeSync(fd);
