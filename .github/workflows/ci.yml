@@ -29,6 +29,9 @@ jobs:
       - name: Type-check
         run: npm run typecheck
 
+      - name: Build (dist/index.js + dist/testing.js)
+        run: npm run build
+
       - name: Unit tests
         run: npm run test:unit
 
@@ -37,3 +40,52 @@ jobs:
 
       - name: Integration tests
         run: node --import tsx --test --test-force-exit tests/integration/skeleton.smoke.ts && node --import tsx --test tests/integration/*.test.ts
+
+  audit:
+    name: npm audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # Fail only on high+ severities so a moderate transient advisory doesn't
+      # block PRs unrelated to the surface. The `overrides` block in
+      # package.json pins ws; any future moderate advisory shows in `npm audit`
+      # output without blocking the run.
+      - name: Audit dependencies (high+ severity)
+        run: npm audit --audit-level=high
+
+  coverage:
+    name: Coverage report (informational)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run coverage
+        run: npm run coverage
+
+      # The repo declares lines >= 85 / branches >= 70 in coverage:check,
+      # but resumeRun.ts is currently undertested (~63% branches) per the
+      # 2026 audit. Run the gate so the number stays visible in PR logs,
+      # but don't fail the build until that gap is closed. Flip
+      # continue-on-error to false once resumeRun.ts coverage lands.
+      - name: Check thresholds (informational)
+        run: npm run coverage:check
+        continue-on-error: true

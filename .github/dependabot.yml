@@ -1,0 +1,38 @@
+# Dependabot configuration — automated dependency PRs.
+#
+# - npm: weekly group-updated PRs for prod/dev/peer deps. Grouped to keep
+#   PR noise low; security updates always get their own PR regardless.
+# - github-actions: monthly PRs to keep workflow action versions current.
+#
+# Refs: https://docs.github.com/en/code-security/dependabot
+version: 2
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+      timezone: "America/Los_Angeles"
+    open-pull-requests-limit: 5
+    groups:
+      dev-dependencies:
+        dependency-type: "development"
+      production-dependencies:
+        dependency-type: "production"
+    labels:
+      - "dependencies"
+    commit-message:
+      prefix: "chore(deps)"
+      include: "scope"
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "monthly"
+    open-pull-requests-limit: 3
+    labels:
+      - "ci"
+    commit-message:
+      prefix: "ci"
+      include: "scope"
