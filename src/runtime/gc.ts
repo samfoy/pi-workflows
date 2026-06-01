@@ -169,7 +169,7 @@ async function readLastTransition(
 function ageDays(endedAtIso: string, nowMs: number): number {
   const t = Date.parse(endedAtIso);
   if (!Number.isFinite(t)) return 0;
-  return (nowMs - t) / (1000 * 60 * 60 * 24);
+  return Math.max(0, (nowMs - t) / (1000 * 60 * 60 * 24));
 }
 
 /**

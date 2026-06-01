@@ -198,13 +198,14 @@ export class MemoStore {
   }
 
   private async runCompaction(): Promise<boolean> {
+    const countAtStart = this.entriesSinceCompaction;
     const next = this.writeQueue.then(async () => {
       const snapshot = this.buildSnapshotString();
       await this.writeSnapshotAndRename(snapshot);
     });
     this.writeQueue = next.catch(() => undefined);
     await next;
-    this.entriesSinceCompaction = 0;
+    this.entriesSinceCompaction -= countAtStart;
     return true;
   }
 

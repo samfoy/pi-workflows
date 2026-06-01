@@ -179,7 +179,7 @@ export function installTimerBridge(
         // run-failure path.
         const violation = reconErr as SandboxViolationError;
         opts.onTimerError?.(violation);
-        return;
+        throw violation;
       }
     } finally {
       // For one-shots, the table entry is already removed by the

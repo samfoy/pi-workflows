@@ -980,6 +980,10 @@ export function createPhaseMethods(
       // BUG-055: release the reservation on deps.dispatch failure so the budget
       // headroom is correctly restored for subsequent agents.
       state.budgetReserved -= 1;
+      // BUG: agentCount was never decremented on failure, permanently consuming
+      // a slot of the per-run cap. Decrement here so failed agents don't block
+      // future agents from running within the same cap.
+      state.agentCount--;
       // Persist the error before propagating.
       await opts.ledger.append({
         type: "agent_error",

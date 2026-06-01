@@ -532,6 +532,7 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
   // `exitCode`/`exitSignal` in the synchronous `onAbort()` call.
   let exitCode: number | null = null;
   let exitSignal: NodeJS.Signals | null = null;
+  let spawnError: Error | null = null;
 
   /**
    * SIGTERM the child, then escalate to SIGKILL after a 5s grace if
@@ -630,8 +631,9 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
       }
       resolve();
     });
-    child.once("error", () => {
-      // child failed to spawn — mark as exit so the awaits clear
+    child.once("error", (err: Error) => {
+      // child failed to spawn — capture error and mark as exit so the awaits clear
+      spawnError = err;
       if (killTimeoutHandle !== null) {
         clearTimeout(killTimeoutHandle);
         killTimeoutHandle = null;
@@ -654,12 +656,13 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
     // BUG-029 fix: close stderrTee on this early-exit path to avoid leaking
     // the file descriptor when child.stderr is non-null.
     stderrTee.end();
-    if (wrapperPath) await removeParentDeathWrapper(wrapperPath);
     if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+    if (wrapperPath) await removeParentDeathWrapper(wrapperPath);
     throw new AgentSubprocessError({
       agentId: opts.agentId,
       exitCode,
       signal: exitSignal,
+      ...(spawnError !== null ? { cause: spawnError } : {}),
     });
   }
 
@@ -722,8 +725,8 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
         stderrTee.once("close", resolve);
         stderrTee.once("finish", resolve);
       }).catch(() => { /* best-effort */ });
-      if (wrapperPath) await removeParentDeathWrapper(wrapperPath);
       if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+      if (wrapperPath) await removeParentDeathWrapper(wrapperPath);
       throw e;
     }
   }
@@ -738,8 +741,8 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
     tee.once("finish", resolve);
     tee.end();
   });
-  if (wrapperPath) await removeParentDeathWrapper(wrapperPath);
   if (opts.signal) opts.signal.removeEventListener("abort", onAbort);
+  if (wrapperPath) await removeParentDeathWrapper(wrapperPath);
 
   // BUG-115: explicitly end stderrTee so the finish/close sequence
   // is guaranteed to fire even if child.stderr never emitted 'end'
@@ -797,7 +800,7 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
     const didRealWork =
       exitCode === 0 &&
       exitSignal === null &&
-      (agg.toolCalls > 0 || agg.turnEnds > 2);
+      agg.toolCalls > 0;
     if (didRealWork) {
       const truncatedText =
         agg.lastAssistantText.length > 0
@@ -840,6 +843,7 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
         exitCode,
         signal: exitSignal,
         stderrTail,
+        ...(spawnError !== null ? { cause: spawnError } : {}),
       });
     }
     throw new MalformedAgentOutputError({

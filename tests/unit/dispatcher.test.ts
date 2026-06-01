@@ -361,9 +361,10 @@ test("BUG-149: context-overflow recovery — tool calls + clean exit synthesises
   assert.equal(result.toolCalls, 1);
 });
 
-test("BUG-149: context-overflow recovery — many turns (no tool calls) synthesises result", { timeout: 5000 }, async () => {
+test("BUG-149: no recovery without tool calls — many turns alone is not enough", { timeout: 5000 }, async () => {
   const runDir = tmpRunDir();
-  // 3 complete turns, no tool calls — triggers turnEnds > 2 path
+  // 3 complete turns but zero tool calls — BUG-149 recovery must NOT fire
+  // (turnEnds>2 was removed as too broad a heuristic per BUG-149 fix-5 follow-up)
   const turns = Array.from({ length: 3 }, (_, i) => [
     JSON.stringify({ type: "turn_start" }),
     JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "turn " + i }], usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 } } }),
@@ -376,13 +377,17 @@ test("BUG-149: context-overflow recovery — many turns (no tool calls) synthesi
   ].join("\n") + "\n";
 
   const fake = makeFakeSpawn([{ stdout: [stream], exitCode: 0 }]);
-  const result = await dispatchAgent({
-    runDir, agentId: "many-turns", prompt: "p", promptHash: "h",
-    cwd: runDir, spawn: fake.spawn, skipParentDeathGuard: true, timeoutMs: 1500,
-  });
-  assert.equal(result.ok, true);
-  assert.equal(result.truncated, true);
-  assert.ok(result.text.includes("turn 2"), "should have last turn text");
+  await assert.rejects(
+    () => dispatchAgent({
+      runDir, agentId: "many-turns", prompt: "p", promptHash: "h",
+      cwd: runDir, spawn: fake.spawn, skipParentDeathGuard: true, timeoutMs: 1500,
+    }),
+    (err: unknown) => {
+      assert.ok(err instanceof MalformedAgentOutputError);
+      assert.equal((err as MalformedAgentOutputError).reason, "empty-stdout-success");
+      return true;
+    },
+  );
 });
 
 test("BUG-149: does NOT fire for truly empty agents (0 turns, 0 tools)", { timeout: 5000 }, async () => {

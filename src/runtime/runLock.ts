@@ -29,7 +29,7 @@
  * resume of the same run is operator error in the first place.
  */
 
-import { existsSync, openSync, readFileSync, closeSync, unlinkSync, writeSync, fsyncSync } from "node:fs";
+import { existsSync, openSync, readFileSync, statSync, closeSync, unlinkSync, writeSync, fsyncSync } from "node:fs";
 import { join } from "node:path";
 
 import { isParentAlive, readBootId, currentBootId } from "./crashSweep.js";
@@ -135,6 +135,18 @@ export function acquireResumeLock(opts: {
         }
       } else {
         emptyBody = true;
+        // A crashed writer leaves an empty file with no PID to check liveness
+        // against.  If the mtime has exceeded the init window (5 s) the writer
+        // is gone and the lock is permanently leaked.  Treat it as stale so
+        // the caller can break and re-acquire it.
+        try {
+          const { mtimeMs } = statSync(lockPath);
+          if (Date.now() - mtimeMs > 5_000) {
+            emptyBody = false; // stale-empty: holderPid remains 0 → isStale=true below
+          }
+        } catch {
+          emptyBody = false; // can't stat → assume stale
+        }
       }
     } catch {
       // Unreadable lock — treat as stale.
