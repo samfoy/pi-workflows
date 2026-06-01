@@ -1,6 +1,6 @@
 ---
 name: pi-workflows
-description: Author and run dynamic workflow scripts in pi. Use when writing multi-agent pipelines, fan-out tasks, parallel research, or anything that benefits from orchestrating multiple agents. Covers the ctx.agent/phase/vote API, write_workflow tool, /workflows TUI, and resume/GC commands.
+description: Author and run dynamic workflow scripts in pi. Use when writing multi-agent pipelines, fan-out tasks, parallel research, or anything that benefits from orchestrating multiple agents. Covers the ctx.agent/phase/vote API, write_workflow + run_workflow tools, /workflows TUI, and resume/GC commands.
 ---
 
 # pi-workflows skill
@@ -24,6 +24,10 @@ Load this skill when the user asks to:
 
 ## How to invoke a workflow
 
+Three paths, depending on who's driving:
+
+### From the prompt (you, the human)
+
 ```
 /<workflow-name> [argument]
 ```
@@ -34,6 +38,17 @@ Examples:
 /summarize paste your text here
 /my-pipeline
 ```
+
+### From the model (LLM tool call)
+
+The model has two tools:
+
+- **`write_workflow`** — author a new script, save to `.pi/workflows/<name>.js`, register the slash command, and (when wired) start the run.
+- **`run_workflow`** — invoke an existing workflow by name. Same code path as the slash command. Use this when the workflow already exists rather than re-authoring it. Args: `name` (slug, with or without leading `/`) and optional `input` (the slash-command argument string).
+
+A model that knows about a workflow but lacks `run_workflow` can only tell the user to type the slash command. With `run_workflow` it can trigger the run directly and the result still lands as a chat card via `wireRunDelivery`.
+
+### Discovery
 
 pi discovers workflow files from:
 1. `.pi/workflows/` (git root, project scope)

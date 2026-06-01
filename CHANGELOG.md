@@ -7,7 +7,30 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
-No unreleased changes.
+### Added
+
+**`run_workflow` LLM tool.** The model can now trigger an existing workflow
+by name without the user having to type the slash command. Companion to
+`write_workflow`: same `pi.registerTool` plumbing, same `startWorkflowRun`
++ `wireRunDelivery` path the `/<name>` slash-command takes. Closes the gap
+where the model could *list* workflows but couldn't *invoke* one.
+Parameters: `name` (slug, leading `/` tolerated) and optional `input` (the
+slash-command argument). Lookup miss returns the available-workflows list
+so the model can correct the name on retry. `tests/unit/runWorkflowTool.test.ts`
+covers normalisation, registration, lookup, dispatch, and start failures.
+
+### Fixed
+
+**Workflow completions now reliably notify the conductor.** When a workflow
+run terminates while the parent pi session is mid-stream (the common case —
+workflow runs are typically invoked as a tool call), `pi.sendUserMessage`
+was being called without `deliverAs`, which throws when the agent is
+streaming. The thrown error was silently swallowed, so the conductor never
+learned the workflow finished. `deliverRunResult` now passes
+`{ deliverAs: "followUp" }`, queuing the completion message until the
+conductor goes idle and then triggering a turn. Older pi builds that reject
+the second arg fall back to the no-options form. See
+`tests/unit/resultDelivery.test.ts` for the regression coverage.
 
 ## [0.3.0] - 2026-05-31
 

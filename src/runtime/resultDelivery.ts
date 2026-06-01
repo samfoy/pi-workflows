@@ -351,10 +351,26 @@ export async function deliverRunResult(opts: DeliverOptions): Promise<RunResultF
       : `Workflow "${opts.workflowName}" finished with outcome: ${opts.outcome}. The result card above contains the details.`;
 
   if (typeof opts.pi.sendUserMessage === "function") {
+    // Pass `deliverAs: "followUp"` so the message is queued until the
+    // conductor finishes its current turn instead of throwing. Without
+    // this option, pi throws when the agent is mid-stream — which is
+    // ALMOST ALWAYS the case, since workflow runs are usually invoked
+    // by the conductor as a tool call. The error was previously
+    // swallowed by the try/catch, silently dropping the completion
+    // notification. Older pi builds that don't accept the second arg
+    // ignore it harmlessly.
     try {
-      await Promise.resolve(opts.pi.sendUserMessage(triggerPrompt));
+      await Promise.resolve(
+        opts.pi.sendUserMessage(triggerPrompt, { deliverAs: "followUp" }),
+      );
     } catch {
-      /* swallow */
+      // Last-resort fallback: try the no-options form for very old pi
+      // builds where the second arg is rejected outright.
+      try {
+        await Promise.resolve(opts.pi.sendUserMessage(triggerPrompt));
+      } catch {
+        /* swallow — best-effort surface */
+      }
     }
   } else {
     // Fallback for pi builds that don't expose sendUserMessage: use

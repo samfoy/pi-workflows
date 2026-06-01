@@ -46,6 +46,7 @@ import {
   type TailRunMetricsHandle,
 } from "./runtime/otelMetricsExporter.js";
 import { registerWriteWorkflowTool } from "./runtime/writeWorkflowTool.js";
+import { registerRunWorkflowTool } from "./runtime/runWorkflowTool.js";
 import { startWorkflowRun } from "./runManager.js";
 import { wireRunDelivery } from "./runtime/resultDelivery.js";
 import { activeIndexPath, projectWorkflowsDir, workflowsHome } from "./util/paths.js";
@@ -110,30 +111,42 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
   let sessionCwd = process.cwd();
   // registry is set later (session_start); capture by reference via getter.
   let _registry: Map<string, WorkflowFile> | null = null;
+  // Shared startRun closure used by both write_workflow's runNow path and
+  // run_workflow. Both tools authorise via the LLM tool-call boundary, so
+  // both pass `preApproved: true` here. If a stricter posture is needed,
+  // gate this on a real approval block built from the tool's `ctx`.
+  const startRunFromTool = async (
+    workflow: WorkflowFile,
+    input: string,
+    _toolCtx: unknown,
+  ): Promise<void> => {
+    const run = await startWorkflowRun(workflow, input, {
+      cwd: sessionCwd,
+      preApproved: true,
+      activeRuns: getActiveRuns(),
+      enableGlobalCache: true,
+    });
+    // Without this wiring the run completes silently — no result
+    // card, no `pi.sendUserMessage`, so the conversation never
+    // resumes after the workflow finishes. The slash-command path
+    // in `commands/workflowCmd.ts` does the same thing.
+    void wireRunDelivery(pi, run);
+  };
+
   registerWriteWorkflowTool({
     pi,
     getCwd: () => sessionCwd,
     getRegistry: () => _registry ?? new Map(),
-    startRun: async (workflow, input, ctx) => {
-      // When invoked from the write_workflow tool, the user already
-      // confirmed via ctx.ui.confirm inside the tool execute(). We
-      // pass bypassApproval=true so the run doesn't hit a second
-      // (silent-deny) approval gate here.
-      //
-      // If startRun is ever called without prior user confirmation,
-      // wire a real approval dialog here instead of bypassApproval.
-      const run = await startWorkflowRun(workflow, input, {
-        cwd: sessionCwd,
-        preApproved: true,
-        activeRuns: getActiveRuns(),
-        enableGlobalCache: true,
-      });
-      // Without this wiring the run completes silently — no result
-      // card, no `pi.sendUserMessage`, so the conversation never
-      // resumes after the workflow finishes. The slash-command path
-      // in `commands/workflowCmd.ts` does the same thing.
-      void wireRunDelivery(pi, run);
-    },
+    startRun: startRunFromTool,
+  });
+
+  // run_workflow: invoke an existing workflow by name. Mirrors the
+  // `/<name>` slash-command path but driven by the LLM. Without it the
+  // model can list workflows but can't trigger them.
+  registerRunWorkflowTool({
+    pi,
+    getRegistry: () => _registry ?? new Map(),
+    startRun: startRunFromTool,
   });
 
   // ── Keyword trigger ────────────────────────────────────────────────

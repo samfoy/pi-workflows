@@ -64,6 +64,7 @@ export interface FakeAppendEntry {
 
 export interface FakeUserMessage {
   readonly prompt: string;
+  readonly options?: { deliverAs?: "steer" | "followUp" };
 }
 
 export interface FakeContext {
@@ -133,7 +134,10 @@ export interface FakePi {
     message: { customType: string; content: string; display?: boolean; details?: T },
     options?: { triggerTurn?: boolean; deliverAs?: "steer" | "followUp" | "nextTurn" },
   ): void;
-  sendUserMessage(prompt: string): void;
+  sendUserMessage(
+    prompt: string,
+    options?: { deliverAs?: "steer" | "followUp" },
+  ): void;
   appendEntry<T = unknown>(customType: string, data?: T): void;
 
   // ── Inspection ────────────────────────────────────────────────
@@ -265,8 +269,8 @@ export function makeFakePi(_opts: MakeFakePiOpts = {}): FakePi {
         : { ...message };
       messages.push(entry);
     },
-    sendUserMessage(prompt) {
-      userMessages.push({ prompt });
+    sendUserMessage(prompt, options) {
+      userMessages.push(options !== undefined ? { prompt, options } : { prompt });
     },
     appendEntry(customType, data) {
       entries.push({ customType, data });

@@ -157,8 +157,21 @@ export interface ExtensionAPI {
    * Optional in the type because pi versions <0.74.0 may not expose
    * it; result delivery falls back to a plain `sendMessage` card if
    * undefined.
+   *
+   * The optional `deliverAs` option (pi v0.75+) controls how the
+   * message is queued when the conductor is mid-stream:
+   *   - `"steer"` — deliver after the current assistant turn finishes
+   *     its tool calls, before the next LLM call.
+   *   - `"followUp"` — deliver only when the agent has no more tool
+   *     calls. **Required when calling from a workflow-completion
+   *     hook** so the call doesn't throw when the conductor is busy.
+   * When omitted and the agent is streaming, pi throws — which is why
+   * `resultDelivery.ts` always passes `"followUp"`.
    */
-  sendUserMessage?(prompt: string): void;
+  sendUserMessage?(
+    prompt: string,
+    options?: { deliverAs?: "steer" | "followUp" },
+  ): void;
   appendEntry?<T = unknown>(customType: string, data?: T): void;
   /** Register an LLM-invokable tool (pi v0.74+). */
   registerTool?(tool: {

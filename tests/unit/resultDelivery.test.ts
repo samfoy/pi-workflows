@@ -474,6 +474,70 @@ test("deliverRunResult: no finishCallback → default trigger message sent", asy
   assert.match(pi.userMessages[0]!.prompt, /finished with outcome/);
 });
 
+// Regression: when the conductor is mid-stream (the common case — a
+// workflow run is invoked as a tool call), `pi.sendUserMessage(prompt)`
+// without `deliverAs` THROWS. The previous code swallowed that error
+// silently, dropping the completion notification entirely. Result:
+// conductor never knew the workflow finished. Fix: always pass
+// `deliverAs: "followUp"` so the message queues until the agent goes
+// idle, then triggers a turn.
+test("deliverRunResult: sendUserMessage receives deliverAs:'followUp'", async () => {
+  const pi = makeFakePi();
+  const dir = mkdtempSync(join(tmpdir(), "pi-wf-deliver-deliverAs-"));
+  await deliverRunResult({
+    pi,
+    outcome: "done",
+    workflowName: "x",
+    runId: "wf-deliverAs",
+    runDirAbs: dir,
+    startedAt: "2026-05-29T00:00:00.000Z",
+    endedAt: "2026-05-29T00:00:01.000Z",
+    durationMs: 1000,
+    agentCount: 0,
+    result: "ok",
+    error: null,
+    approval: APPROVED_USER_ONCE,
+    finishCallbackPrompt: null,
+  });
+  assert.equal(pi.userMessages.length, 1);
+  assert.deepEqual(pi.userMessages[0]!.options, { deliverAs: "followUp" });
+});
+
+// Regression: if a (very old) pi build rejects the second `options`
+// arg, fall back to the no-options form so the notification still
+// fires. We simulate this by making the first call throw and the
+// second succeed.
+test("deliverRunResult: falls back to no-options sendUserMessage when first call throws", async () => {
+  const pi = makeFakePi();
+  const dir = mkdtempSync(join(tmpdir(), "pi-wf-deliver-fallback-"));
+  const calls: Array<{ prompt: string; options: unknown }> = [];
+  pi.sendUserMessage = ((prompt: string, options?: unknown) => {
+    calls.push({ prompt, options });
+    if (calls.length === 1) {
+      throw new Error("old pi build: options arg not accepted");
+    }
+    // 2nd call: succeed silently.
+  }) as typeof pi.sendUserMessage;
+  await deliverRunResult({
+    pi,
+    outcome: "done",
+    workflowName: "x",
+    runId: "wf-fallback",
+    runDirAbs: dir,
+    startedAt: "2026-05-29T00:00:00.000Z",
+    endedAt: "2026-05-29T00:00:01.000Z",
+    durationMs: 1000,
+    agentCount: 0,
+    result: "ok",
+    error: null,
+    approval: APPROVED_USER_ONCE,
+    finishCallbackPrompt: null,
+  });
+  assert.equal(calls.length, 2, "first call throws, second is the fallback");
+  assert.deepEqual(calls[0]!.options, { deliverAs: "followUp" });
+  assert.equal(calls[1]!.options, undefined);
+});
+
 test("deliverRunResult: persisted result is JSON-stringified for non-string values", async () => {
   const pi = makeFakePi();
   const dir = mkdtempSync(join(tmpdir(), "pi-wf-deliver-obj-"));
