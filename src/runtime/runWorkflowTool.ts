@@ -123,7 +123,7 @@ export function registerRunWorkflowTool(opts: RunWorkflowToolOpts): void {
             "Defaults to empty string when omitted.",
         },
       },
-    } as never,
+    },
 
     async execute(_id, params, ctx) {
       const { name: rawName, input } = params as {

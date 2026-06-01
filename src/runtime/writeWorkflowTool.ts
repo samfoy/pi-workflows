@@ -265,7 +265,7 @@ export default async function (ctx) {
             "`export const meta = { name, description, version };`.",
         },
       },
-    } as never,
+    },
 
     async execute(_id, params, ctx) {
       const { name: paramName, script } = params as { name: string; script: string };
