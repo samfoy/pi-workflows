@@ -37,7 +37,6 @@ import type {
   AgentResult,
   AgentResultLike,
   AgentUsage,
-  CacheRecord,
   RunCtxBridgeResult,
   RunCtxHost,
   RunMetaData,
@@ -2318,7 +2317,3 @@ export function validateAgainstSchema(
     }
   }
 }
-
-// Type-only re-exports kept off the runtime surface; these silence
-// TS6133 warnings for imports the host file needs only for typing.
-void (null as unknown as CacheRecord);

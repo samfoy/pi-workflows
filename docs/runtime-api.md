@@ -564,7 +564,7 @@ Workflow scripts execute inside a `node:vm` Context. The sandbox:
 - **Constructor escape:** `Function.constructor("return process")` returns
   the **Context's** globalThis, not the host's — enforced by
   `allowCodeGeneration: false` + prototype freeze.
-- **v2 deferred:** `crypto.subtle`, worker-thread interrupt on sync loops.
+- **v2 deferred:** worker-thread interrupt on synchronous loops (in-process `vm.Context` still wedges on `while(true)`).
 
 See [`docs/threat-model.md`](./threat-model.md) for the full escape-vector matrix.
 

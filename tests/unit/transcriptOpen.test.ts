@@ -152,3 +152,88 @@ test("returns no-tool when all tools fail", () => {
     `unexpected reason: ${(result as { reason: string }).reason}`,
   );
 });
+
+// ─── mixed-success fallback chain (counter-driven stub) ─────────────
+
+test("copyToClipboard: pbcopy throws, xclip succeeds → tool='xclip'", () => {
+  let calls = 0;
+  const tried: string[] = [];
+  const result = copyToClipboard({
+    text: "payload",
+    _execFileSync: (bin) => {
+      calls += 1;
+      tried.push(bin);
+      // Counter-driven: first call (pbcopy) throws, second (xclip) succeeds.
+      if (calls === 1) throw new Error("pbcopy: spawn ENOENT");
+      return Buffer.alloc(0);
+    },
+  });
+  assert.equal(result.kind, "copied");
+  assert.equal((result as { tool: string }).tool, "xclip");
+  assert.deepEqual(tried, ["pbcopy", "xclip"]);
+  assert.equal(calls, 2, "xsel must NOT be tried after xclip succeeds");
+});
+
+test("copyToClipboard: pbcopy + xclip throw, xsel succeeds (counter)", () => {
+  let calls = 0;
+  const tried: string[] = [];
+  const result = copyToClipboard({
+    text: "payload",
+    _execFileSync: (bin, args) => {
+      calls += 1;
+      tried.push(bin);
+      if (calls < 3) throw new Error(`${bin}: not installed`);
+      // xsel: assert it was invoked with the expected args
+      assert.deepEqual(args, ["--clipboard", "--input"]);
+      return Buffer.alloc(0);
+    },
+  });
+  assert.equal(result.kind, "copied");
+  assert.equal((result as { tool: string }).tool, "xsel");
+  assert.deepEqual(tried, ["pbcopy", "xclip", "xsel"]);
+  assert.equal(calls, 3);
+});
+
+test("copyToClipboard: all three throw → no-tool reason cites every tool", () => {
+  const result = copyToClipboard({
+    text: "payload",
+    _execFileSync: (bin) => {
+      throw new Error(`${bin} unavailable here`);
+    },
+  });
+  assert.equal(result.kind, "no-tool");
+  const { reason } = result as { reason: string };
+  // Every tool name and its error message must appear in the reason.
+  for (const bin of ["pbcopy", "xclip", "xsel"]) {
+    assert.ok(
+      reason.includes(`${bin}:`),
+      `reason missing tool tag '${bin}:' — got: ${reason}`,
+    );
+    assert.ok(
+      reason.includes(`${bin} unavailable here`),
+      `reason missing error message for ${bin} — got: ${reason}`,
+    );
+  }
+});
+
+test("openTranscriptInEditor: EDITOR='code -w /opt/file' splits and forwards every token", () => {
+  const dir = mkdtempSync(join(tmpdir(), "transcript-open-"));
+  const transcriptPath = join(dir, "agent.jsonl");
+  writeFileSync(transcriptPath, "{}");
+
+  const calls: { cmd: string; args: string[] }[] = [];
+  const result = openTranscriptInEditor({
+    transcriptPath,
+    editor: "code -w /opt/file",
+    _spawnSync: (cmd, args) => {
+      calls.push({ cmd, args });
+      return null;
+    },
+  });
+  assert.equal(result.kind, "opened-editor");
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0]!.cmd, "code");
+  // -w and the literal /opt/file token must both be forwarded, in order,
+  // before the transcript path which is appended last.
+  assert.deepEqual(calls[0]!.args, ["-w", "/opt/file", transcriptPath]);
+});

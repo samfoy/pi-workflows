@@ -34,6 +34,7 @@ import type { WorkflowFile } from "./types/internal.js";
 
 // ─── Public API ────────────────────────────────────────────────────────────
 
+/** Options for runWorkflow(). */
 export interface RunWorkflowOptions {
   /** Absolute or relative path to the workflow .js file */
   workflowPath: string;
@@ -60,6 +61,7 @@ export interface RunWorkflowOptions {
   tokenBudget?: number | null;
 }
 
+/** Structured result returned by runWorkflow(), derived from the run's ledger. */
 export interface RunWorkflowResult {
   /** Run ID (e.g. "wf-abc123") */
   runId: string;

@@ -66,6 +66,10 @@ import {
 /** Reserved cache key — `ctx.cache.get('__fork_overrides__')` reads this. */
 export const FORK_OVERRIDES_KEY = "__fork_overrides__";
 
+/**
+ * Thrown when the parent runId in `forkFromCheckpoint(parent, ...)` doesn't
+ * resolve to a run directory.
+ */
 export class ForkRunNotFoundError extends Error {
   readonly parentRunId: string;
   constructor(parentRunId: string) {
@@ -75,6 +79,10 @@ export class ForkRunNotFoundError extends Error {
   }
 }
 
+/**
+ * Thrown when `opts.atPhase` is not present in the parent ledger; carries
+ * `availablePhases` for recovery.
+ */
 export class ForkPhaseNotFoundError extends Error {
   readonly parentRunId: string;
   readonly atPhase: string;
@@ -91,6 +99,10 @@ export class ForkPhaseNotFoundError extends Error {
   }
 }
 
+/**
+ * Options accepted by `forkFromCheckpoint` and
+ * `WorkflowClient.forkFromCheckpoint`.
+ */
 export interface ForkFromCheckpointOptions {
   /**
    * Phase name to fork at. The parent's ledger is truncated BEFORE
