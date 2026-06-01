@@ -116,6 +116,7 @@ export interface TimerBridge {
     readonly outstandingTimeouts: number;
     readonly outstandingIntervals: number;
     readonly outstandingImmediates: number;
+    readonly outstandingMicrotasks: number;
   };
 
   /**
@@ -123,6 +124,13 @@ export interface TimerBridge {
    */
   readonly disposed: boolean;
 }
+
+/**
+ * Maximum total outstanding timer entries (across all types) per bridge.
+ * Prevents unbounded memory growth from adversarial or buggy scripts that
+ * call setTimeout/setInterval/setImmediate in a tight loop.
+ */
+const MAX_OUTSTANDING = 10_000;
 
 /**
  * Construct the bridge for one Context. The bridge object's methods
@@ -139,12 +147,27 @@ export function installTimerBridge(
   context: vm.Context,
   opts: TimerTableOpts,
 ): TimerBridge {
+  /** Build a SandboxViolationError for the timer-table-limit-exceeded case. */
+  function makeTableLimitError(): SandboxViolationError {
+    const e = new Error(
+      `timer table limit exceeded (max ${MAX_OUTSTANDING} outstanding timers)`,
+    ) as Error & {
+      name: "SandboxViolationError";
+      violation: SandboxViolationError["violation"];
+    };
+    e.name = "SandboxViolationError";
+    e.violation = "timer-table-limit-exceeded";
+    return e as SandboxViolationError;
+  }
+
   const callbackTable = new Map<TimerHandle, () => void>();
   const timerIds = new Map<TimerHandle, NodeJS.Timeout>();
   const intervalIds = new Map<TimerHandle, NodeJS.Timeout>();
   const immediateIds = new Map<TimerHandle, NodeJS.Immediate>();
   let nextHandle: TimerHandle = 1;
   let disposed = false;
+  /** Separate counter for outstanding microtasks (no handle/cancellation). */
+  let microtaskCount = 0;
 
   /**
    * Invoke a Context-realm wrapper safely:
@@ -179,7 +202,7 @@ export function installTimerBridge(
         // run-failure path.
         const violation = reconErr as SandboxViolationError;
         opts.onTimerError?.(violation);
-        throw violation;
+        return;
       }
     } finally {
       // For one-shots, the table entry is already removed by the
@@ -201,6 +224,10 @@ export function installTimerBridge(
     intervalIds.clear();
     immediateIds.clear();
     callbackTable.clear();
+    // Queued microtasks can't be cancelled, but zeroing the counter
+    // prevents the already-disposed check from being bypassed and
+    // stops further increments from any re-entrant path.
+    microtaskCount = 0;
   }
 
   if (opts.signal.aborted) {
@@ -216,6 +243,11 @@ export function installTimerBridge(
       if (disposed) return 0;
       if (typeof wrapped !== "function") {
         throw new TypeError("scheduleTimeout: wrapped must be a function");
+      }
+      if (callbackTable.size >= MAX_OUTSTANDING) {
+        dispose();
+        opts.onTimerError?.(makeTableLimitError());
+        return 0;
       }
       const h = nextHandle++;
       callbackTable.set(h, wrapped);
@@ -249,6 +281,11 @@ export function installTimerBridge(
       if (typeof wrapped !== "function") {
         throw new TypeError("scheduleInterval: wrapped must be a function");
       }
+      if (callbackTable.size >= MAX_OUTSTANDING) {
+        dispose();
+        opts.onTimerError?.(makeTableLimitError());
+        return 0;
+      }
       const h = nextHandle++;
       callbackTable.set(h, wrapped);
       const id = setInterval(() => {
@@ -272,6 +309,11 @@ export function installTimerBridge(
       if (disposed) return 0;
       if (typeof wrapped !== "function") {
         throw new TypeError("scheduleImmediate: wrapped must be a function");
+      }
+      if (callbackTable.size >= MAX_OUTSTANDING) {
+        dispose();
+        opts.onTimerError?.(makeTableLimitError());
+        return 0;
       }
       const h = nextHandle++;
       callbackTable.set(h, wrapped);
@@ -298,10 +340,20 @@ export function installTimerBridge(
       if (typeof wrapped !== "function") {
         throw new TypeError("queueMicrotask: wrapped must be a function");
       }
-      // No handle for microtasks — they can't be cancelled. Schedule a
-      // host microtask that invokes the Context-realm wrapper.
-      // `queueMicrotask` doesn't pass `this`, so no realm leak.
+      // Microtasks have no handle and can't be cancelled, so they are
+      // tracked with a separate counter rather than callbackTable.
+      // Gate on the same MAX_OUTSTANDING threshold to prevent an
+      // adversarial script from draining the microtask queue
+      // indefinitely (each microtask can re-queue itself, stalling the
+      // event loop before any AbortSignal or I/O callback can fire).
+      if (microtaskCount >= MAX_OUTSTANDING) {
+        dispose();
+        opts.onTimerError?.(makeTableLimitError());
+        return;
+      }
+      microtaskCount++;
       queueMicrotask(() => {
+        microtaskCount--;
         if (disposed) return;
         invokeWrapped(-1, wrapped);
       });
@@ -316,6 +368,7 @@ export function installTimerBridge(
         outstandingTimeouts: timerIds.size,
         outstandingIntervals: intervalIds.size,
         outstandingImmediates: immediateIds.size,
+        outstandingMicrotasks: microtaskCount,
       };
     },
     get disposed() {

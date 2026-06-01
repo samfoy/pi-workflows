@@ -397,6 +397,14 @@ export interface RunManifest {
    * longer find a usable parent on disk.
    */
   readonly parentDeletedAt?: string;
+
+  // ─── slice 11 (crash sweep) ───────────────────────────────────
+  /**
+   * ISO-8601 UTC timestamp of when the crash-sweep last transitioned
+   * this run to `failed` due to a dead parent process. Set by
+   * `sweepOne`; absent on runs that were never swept.
+   */
+  readonly crashSweepAt?: string;
 }
 
 /**

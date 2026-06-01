@@ -17,6 +17,11 @@ export function writeAllSync(fd: number, data: string): void {
   const buf = Buffer.from(data);
   let offset = 0;
   while (offset < buf.length) {
-    offset += writeSync(fd, buf, offset, buf.length - offset);
+    try {
+      offset += writeSync(fd, buf, offset, buf.length - offset);
+    } catch (err: unknown) {
+      if ((err as NodeJS.ErrnoException).code === "EINTR") continue;
+      throw err;
+    }
   }
 }

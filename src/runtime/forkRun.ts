@@ -47,7 +47,7 @@
  *     surface lineage in error messages — see docs/time-travel.md).
  */
 
-import { existsSync, mkdirSync, promises as fs, readFileSync, writeFileSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, promises as fs, readFileSync, rmSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 import type {
@@ -262,10 +262,14 @@ export async function forkFromCheckpoint(
   // is at-or-after this timestamp belongs to a post-fork phase and
   // must NOT inherit. Below we use it in `_classifyParentCacheLine`.
   const cutPhaseStart = entries[cutIndex];
-  const cutAt =
-    cutPhaseStart && cutPhaseStart.type === "phase_start"
-      ? cutPhaseStart.at
-      : ""; // empty string sorts before any ISO timestamp → never excludes
+  if (!cutPhaseStart || cutPhaseStart.type !== "phase_start") {
+    throw new Error(
+      `forkRun invariant violated: entry at cutIndex ${cutIndex} is not a phase_start ` +
+        `(got ${cutPhaseStart ? cutPhaseStart.type : "undefined"}). ` +
+        "Cannot safely compute cache-filtering boundary — aborting fork.",
+    );
+  }
+  const cutAt = cutPhaseStart.at;
 
   // 3. Mint new runId + create new runDir.
   // We let startWorkflowRun mint the runId via its own factory so
@@ -285,11 +289,19 @@ export async function forkFromCheckpoint(
       // resolveRunDir is sync, so the seed must be sync too. We use
       // the synchronous fs primitives imported at module top.
       mkdirSync(d, { recursive: true });
+      try {
 
       // Pre-seed ledger.jsonl.
       const ledgerLines = inheritedEntries.map((e) => JSON.stringify(e)).join("\n");
       if (ledgerLines.length > 0) {
-        writeFileSync(join(d, "ledger.jsonl"), ledgerLines + "\n", "utf8");
+        let ledgerFd: number | undefined;
+        try {
+          ledgerFd = openSync(join(d, "ledger.jsonl"), "w", 0o644);
+          writeSync(ledgerFd, ledgerLines + "\n");
+          fsyncSync(ledgerFd);
+        } finally {
+          if (ledgerFd !== undefined) closeSync(ledgerFd);
+        }
       }
 
       // Pre-seed cache.jsonl: copy parent's cache + append the
@@ -315,8 +327,36 @@ export async function forkFromCheckpoint(
       // Append the overrides record (always — even when overrides is
       // undefined we record `null` so the workflow can detect it
       // explicitly via `ctx.cache.has(FORK_OVERRIDES_KEY)`).
-      const overridesValue =
-        opts.overrides === undefined ? null : opts.overrides;
+      //
+      // Validate JSON-serializability before the seed write (BUG-166):
+      //   (1) circular refs  — JSON.stringify would throw a raw TypeError
+      //       with no mention of opts.overrides or the callsite.
+      //   (2) function/Symbol values — JSON.stringify silently drops them,
+      //       so ctx.cache.get(FORK_OVERRIDES_KEY) would return a
+      //       structurally different object with no warning to the caller.
+      // Using a custom replacer lets us catch (2) before stringification;
+      // wrapping in try/catch gives a descriptive error for both cases.
+      let overridesValue: unknown = null;
+      if (opts.overrides !== undefined) {
+        let rawOverrides: string;
+        try {
+          rawOverrides = JSON.stringify(opts.overrides, (_key, val: unknown) => {
+            if (typeof val === "function" || typeof val === "symbol") {
+              throw new TypeError(
+                `opts.overrides contains a non-JSON-serializable ${typeof val} value ` +
+                  `which would be silently dropped by JSON.stringify, causing ` +
+                  `ctx.cache.get('${FORK_OVERRIDES_KEY}') to differ from the provided opts.overrides`,
+              );
+            }
+            return val;
+          });
+        } catch (err) {
+          throw new TypeError(
+            `forkFromCheckpoint: opts.overrides is not JSON-serializable (${(err as Error).message})`,
+          );
+        }
+        overridesValue = JSON.parse(rawOverrides) as unknown;
+      }
       const overridesRecord = {
         type: "author_cache" as const,
         key: FORK_OVERRIDES_KEY,
@@ -324,13 +364,23 @@ export async function forkFromCheckpoint(
         at: (opts.nowIso ?? (() => new Date().toISOString()))(),
       };
       lines.push(JSON.stringify(overridesRecord));
-      writeFileSync(
-        join(d, "cache.jsonl"),
-        lines.join("\n") + "\n",
-        "utf8",
-      );
+      let cacheFd: number | undefined;
+      try {
+        cacheFd = openSync(join(d, "cache.jsonl"), "w", 0o644);
+        writeSync(cacheFd, lines.join("\n") + "\n");
+        fsyncSync(cacheFd);
+      } finally {
+        if (cacheFd !== undefined) closeSync(cacheFd);
+      }
 
       seedDone = true;
+      } catch (err) {
+        // Seed write failed — remove the partially-created directory so
+        // it doesn't appear as an orphaned run dir. GC would eventually
+        // collect it, but a prompt cleanup is cleaner.
+        rmSync(d, { recursive: true, force: true });
+        throw err;
+      }
     }
     return d;
   };
@@ -378,7 +428,19 @@ export async function forkFromCheckpoint(
     ...(opts.activeRuns !== undefined ? { activeRuns: opts.activeRuns } : {}),
   };
 
-  const run = await startWorkflowRun(workflow, inputArg, startOpts);
+  // If startWorkflowRun throws (approval denied, hash mismatch, etc.)
+  // after wrappedResolveRunDir has already created and seeded the run
+  // directory, remove the orphan so GC scans and /workflows list stay
+  // clean.
+  let run: Run;
+  try {
+    run = await startWorkflowRun(workflow, inputArg, startOpts);
+  } catch (err) {
+    if (mintedRunId !== null) {
+      await fs.rm(resolveRunDir(mintedRunId), { recursive: true, force: true }).catch(() => {});
+    }
+    throw err;
+  }
   // Post-condition guard: if startWorkflowRun never called our
   // wrapped resolver (e.g. mocked in a test), fail loud — the
   // contract guarantees the seed lands BEFORE the run starts.
@@ -430,6 +492,19 @@ export function _classifyParentCacheLine(
     return "drop";
   const r = parsed as Record<string, unknown>;
   if (typeof r.type !== "string") return "drop";
+  // Checkpoint entries (author_cache with __chk__ key) must be
+  // timestamp-filtered just like agent_result — a post-fork checkpoint
+  // seeded into the fork's cache would cause ctx.checkpoint() to return
+  // true and silently skip re-execution of the guarded block.
+  if (
+    r.type === "author_cache" &&
+    typeof r.key === "string" &&
+    r.key.startsWith("__chk__")
+  ) {
+    if (cutAt.length === 0) return "keep"; // filtering disabled
+    if (typeof r.at !== "string") return "drop"; // malformed; drop defensively
+    return r.at < cutAt ? "keep" : "drop";
+  }
   if (r.type !== "agent_result") return "keep";
   // agent_result without an `at` field is malformed; drop defensively.
   if (typeof r.at !== "string") return "drop";

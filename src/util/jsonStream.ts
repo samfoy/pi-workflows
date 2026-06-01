@@ -58,8 +58,26 @@ import type { Readable } from "node:stream";
 /** Default tee cap, in bytes, when `opts.maxTeeBytes` is not provided. */
 export const DEFAULT_MAX_TEE_BYTES = 16 * 1024 * 1024;
 
+/**
+ * Default maximum bytes for a single NDJSON line (between newlines).
+ * A subprocess that never emits a newline will be rejected once
+ * `pending` grows past this threshold, preventing unbounded OOM growth.
+ */
+export const DEFAULT_MAX_LINE_BYTES = 4 * 1024 * 1024; // 4 MiB
+
 /** Maximum truncated-region length carried on `JsonStreamError`. */
 export const TRUNCATED_REGION_MAX = 256;
+
+/**
+ * Hard cap on the in-memory line buffer. A subprocess emitting a line
+ * with no newline (e.g. a multi-hundred-MB payload or deliberate
+ * garbage) would otherwise grow `pending` without bound until the
+ * Node.js heap is exhausted. When the accumulated buffer reaches this
+ * limit without encountering a newline we throw `JsonStreamError`
+ * rather than silently consuming all available memory.
+ * Default: 64 MiB — large enough for any realistic pi JSON event.
+ */
+export const MAX_LINE_BYTES = 64 * 1024 * 1024;
 
 /**
  * Marker line written to the tee file when the cap is exceeded. The
@@ -101,6 +119,16 @@ export interface ParseJsonStreamOptions {
    * `getResult()`. Default: `event.type === "result"`.
    */
   readonly isResultEvent?: (event: JsonStreamEvent) => boolean;
+
+  /**
+   * Maximum bytes allowed for a single NDJSON line (the in-flight
+   * `pending` buffer between two consecutive newlines). If a line
+   * grows beyond this limit a `JsonStreamError` with `reason='parse'`
+   * is thrown immediately, preventing unbounded memory growth from a
+   * subprocess that never emits a newline. Default 4 MiB. Set to `0`
+   * to disable.
+   */
+  readonly maxLineBytes?: number;
 
   /**
    * Aborts parsing. The generator throws the abort reason on the
@@ -164,6 +192,14 @@ export interface JsonStreamParse extends AsyncIterable<JsonStreamEvent> {
 
   /** True once the cap has been hit and the marker line written. */
   teeTruncated(): boolean;
+
+  /**
+   * Total bytes dropped due to the tee cap. Includes the partial bytes
+   * from the triggering chunk **plus** every subsequent chunk that was
+   * silently discarded. Zero until the cap is hit; accumulates across
+   * the entire stream lifetime.
+   */
+  teeDroppedBytes(): number;
 }
 
 // ───────────────────────────────────────────────────────────────────────
@@ -183,6 +219,7 @@ export function parseJsonStream(
   opts: ParseJsonStreamOptions = {},
 ): JsonStreamParse {
   const maxTeeBytes = opts.maxTeeBytes ?? DEFAULT_MAX_TEE_BYTES;
+  const maxLineBytes = opts.maxLineBytes ?? DEFAULT_MAX_LINE_BYTES;
   const isResultEvent =
     opts.isResultEvent ?? ((event: JsonStreamEvent) => event.type === "result");
   const tee = opts.tee;
@@ -192,6 +229,7 @@ export function parseJsonStream(
   let totalBytesRead = 0;
   let teeBytesWritten = 0;
   let teeTruncated = false;
+  let teeDroppedBytes = 0;
 
   // Use Buffer concat semantics on the byte side so multi-byte UTF-8
   // characters that straddle a chunk boundary don't get corrupted by
@@ -202,7 +240,11 @@ export function parseJsonStream(
   let lineStartByteOffset = 0;
 
   const writeTee = (bytes: Buffer): void => {
-    if (!tee || teeTruncated) return;
+    if (!tee) return;
+    if (teeTruncated) {
+      teeDroppedBytes += bytes.length;
+      return;
+    }
     if (maxTeeBytes <= 0) {
       tee.write(bytes);
       teeBytesWritten += bytes.length;
@@ -222,8 +264,9 @@ export function parseJsonStream(
       teeBytesWritten += remaining;
     }
     const dropped = bytes.length - Math.max(remaining, 0);
+    teeDroppedBytes += dropped;
     const marker =
-      `{"type":"${TEE_TRUNCATED_MARKER_TYPE}","capBytes":${maxTeeBytes},"droppedBytes":${dropped}}\n`;
+      `{"type":"${TEE_TRUNCATED_MARKER_TYPE}","capBytes":${maxTeeBytes},"droppedBytesAtCap":${dropped}}\n`;
     tee.write(marker);
     teeTruncated = true;
   };
@@ -267,6 +310,20 @@ export function parseJsonStream(
       writeTee(buf);
       totalBytesRead += buf.length;
 
+      if (pending.length + buf.length > MAX_LINE_BYTES) {
+        const excerpt = pending
+          .subarray(0, TRUNCATED_REGION_MAX)
+          .toString("utf8");
+        throw new JsonStreamError(
+          `line buffer exceeded ${MAX_LINE_BYTES} bytes at line ${lineNumber + 1} — no newline found`,
+          {
+            truncatedRegion: excerpt,
+            lineNumber: lineNumber + 1,
+            byteOffset: lineStartByteOffset,
+            reason: "parse",
+          },
+        );
+      }
       pending = pending.length === 0 ? buf : Buffer.concat([pending, buf]);
 
       // Process every complete line in `pending`. We scan for `\n` byte
@@ -281,6 +338,26 @@ export function parseJsonStream(
           if (searchFrom > 0) {
             pending = pending.subarray(searchFrom);
           }
+          // Guard against unbounded pending growth when a subprocess
+          // never emits a newline (OOM protection).
+          if (maxLineBytes > 0 && pending.length > maxLineBytes) {
+            const truncated = pending
+              .subarray(0, TRUNCATED_REGION_MAX)
+              .toString("utf8");
+            throw new JsonStreamError(
+              `line too long at line ${
+                lineNumber + 1
+              } (offset ${lineStartByteOffset}): ${
+                pending.length
+              } bytes exceeds maxLineBytes (${maxLineBytes})`,
+              {
+                truncatedRegion: truncated,
+                lineNumber: lineNumber + 1,
+                byteOffset: lineStartByteOffset,
+                reason: "parse",
+              },
+            );
+          }
           break;
         }
         let lineEnd = nlIdx;
@@ -289,7 +366,7 @@ export function parseJsonStream(
           lineEnd = lineEnd - 1;
         }
         const lineBytes = pending.subarray(searchFrom, lineEnd);
-        const lineStr = lineBytes.toString("utf8");
+        let lineStr = lineBytes.toString("utf8");
         const lineByteOffset = lineStartByteOffset;
         // Advance counters for the line PLUS its terminator (1 byte for
         // \n; 2 if CRLF was stripped).
@@ -300,6 +377,9 @@ export function parseJsonStream(
 
         // Skip whitespace-only / empty lines.
         if (lineStr.trim() === "") continue;
+
+        // Strip UTF-8 BOM (U+FEFF) that some writers prepend to the first line.
+        if (lineStr.charCodeAt(0) === 0xfeff) lineStr = lineStr.slice(1);
 
         let event: unknown;
         try {
@@ -340,9 +420,11 @@ export function parseJsonStream(
       const tailOffset = lineStartByteOffset;
       lineStartByteOffset += Buffer.byteLength(tailStr, "utf8");
       if (tailStr.trim() === "") return;
+      // Strip UTF-8 BOM (U+FEFF) on the tail path as well.
+      const parseTail = tailStr.charCodeAt(0) === 0xfeff ? tailStr.slice(1) : tailStr;
       let event: unknown;
       try {
-        event = JSON.parse(tailStr);
+        event = JSON.parse(parseTail);
       } catch (cause) {
         const truncated =
           tailStr.length > TRUNCATED_REGION_MAX
@@ -388,5 +470,6 @@ export function parseJsonStream(
     getResult: () => result,
     bytesRead: () => totalBytesRead,
     teeTruncated: () => teeTruncated,
+    teeDroppedBytes: () => teeDroppedBytes,
   };
 }

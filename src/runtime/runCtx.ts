@@ -261,6 +261,8 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   readonly stopAgent: (agentId: string) => void;
   /** Abort + restart a single in-flight agent (up to 3 times). */
   readonly restartAgent: (agentId: string) => void;
+  /** Drain all in-flight ctx.log ledger writes before the run settles. */
+  readonly drainPendingLog: () => Promise<void>;
 } {
   const dispatch = opts.dispatch ?? dispatchAgent;
   const nowIso = opts.nowIso ?? (() => new Date().toISOString());
@@ -493,6 +495,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     getAgentCount: () => phaseState.agentCount,
     stopAgent,
     restartAgent,
+    drainPendingLog: logProgressMethods.drainPendingLog,
   };
 }
 

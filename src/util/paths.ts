@@ -19,6 +19,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { isRunId } from "./runId.js";
 
 const PI_AGENT_HOME = ".pi";
 const AGENT_DIR_SEGMENT = "agent";
@@ -33,6 +34,38 @@ export function workflowsHome(): string {
 /** `~/.pi/agent/workflows/runs/` — per-run state goes under this tree. */
 export function runsHome(): string {
   return join(workflowsHome(), RUNS_SEGMENT);
+}
+
+/**
+ * Thrown by `assertSafeRunId` when a runId is rejected as a potential
+ * path-traversal vector. Any caller that feeds a runId from user-controlled
+ * input (CLI resume, run_workflow tool, TUI keybind) into path helpers MUST
+ * validate first — otherwise an id like `../../../../etc/passwd` escapes the
+ * runs home directory.
+ */
+export class InvalidRunIdError extends Error {
+  readonly runId: string;
+  constructor(runId: string) {
+    super(
+      `invalid runId ${JSON.stringify(runId)}: must match wf-<12 lowercase hex chars>`,
+    );
+    this.name = "InvalidRunIdError";
+    this.runId = runId;
+  }
+}
+
+/**
+ * Assert that `runId` is a well-formed `wf-<12 hex>` id.
+ *
+ * Throws `InvalidRunIdError` if the value doesn't match — blocking
+ * path-traversal attacks (e.g. `../../../../etc/passwd`) from any
+ * caller that feeds a user-controlled runId into `runDir()` and its
+ * derivatives (`ctrlPath`, `cachePath`, `manifestPath`, …).
+ */
+export function assertSafeRunId(runId: unknown): asserts runId is string {
+  if (!isRunId(runId)) {
+    throw new InvalidRunIdError(typeof runId === "string" ? runId : String(runId));
+  }
 }
 
 /** `~/.pi/agent/workflows/runs/<runId>/`. Caller handles mkdir. */
@@ -179,6 +212,12 @@ export function assertSafeAgentId(agentId: unknown): asserts agentId is string {
   // `writeParentDeathWrapper` can be coerced into injecting shell — the
   // generated wrapper interpolates the agentId into a comment line, and a
   // newline would let a malicious id break out of the comment.
+  if (agentId.length > 128) {
+    throw new InvalidAgentIdError(
+      agentId,
+      `exceeds maximum length of 128 characters (got ${agentId.length})`,
+    );
+  }
   if (!/^[A-Za-z0-9._-]+$/.test(agentId)) {
     throw new InvalidAgentIdError(
       agentId,
@@ -255,18 +294,36 @@ export function memoPathTmp(scope: 'global' | 'project', projectRoot?: string): 
 // ─── Global cache paths ──────────────────────────────────────────────────────
 
 /**
+ * Assert that `scriptSha256` is a valid 64-character lowercase hex string
+ * (the expected shape of a SHA-256 digest). Throws if the input is anything
+ * else, preventing path-traversal via a crafted value.
+ */
+function assertValidScriptSha256(scriptSha256: unknown): asserts scriptSha256 is string {
+  if (typeof scriptSha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(scriptSha256)) {
+    throw new Error(
+      `invalid scriptSha256 ${JSON.stringify(scriptSha256)}: must be a 64-char hex string`,
+    );
+  }
+}
+
+/**
  * `~/.pi/agent/workflows/global-cache/<scriptSha256[0:16]>/cache.jsonl`
  *
  * Cross-run agent result cache. Partitioned by the first 16 hex chars of
  * the workflow source sha256 — a script change produces a different
  * directory, giving natural invalidation without complex version tracking.
+ *
+ * `scriptSha256` is validated via `assertValidScriptSha256` to prevent
+ * path-traversal through a crafted input.
  */
 export function globalCachePath(scriptSha256: string): string {
+  assertValidScriptSha256(scriptSha256);
   return join(workflowsHome(), "global-cache", scriptSha256.slice(0, 16), "cache.jsonl");
 }
 
 /** Tmp path used during atomic compaction of the global cache. */
 export function globalCachePathTmp(scriptSha256: string): string {
+  assertValidScriptSha256(scriptSha256);
   return join(workflowsHome(), "global-cache", scriptSha256.slice(0, 16), "cache.jsonl.tmp");
 }
 

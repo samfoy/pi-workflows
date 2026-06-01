@@ -101,7 +101,7 @@ export class PauseGate {
         throw signal.reason ?? new Error("aborted");
       }
       const p = this.#resumePromise;
-      if (p === null) break;
+      if (p === null) throw new Error("PauseGate invariant violation: #paused=true but #resumePromise=null");
       if (signal === undefined) {
         await p;
         continue;

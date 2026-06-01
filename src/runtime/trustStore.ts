@@ -350,11 +350,11 @@ async function addTrustUnlocked(
 // ─── helpers ──────────────────────────────────────────────────────
 
 async function readScope(path: string): Promise<TrustStore> {
-  if (!existsSync(path)) return {};
   let raw: string;
   try {
     raw = await fs.readFile(path, "utf-8");
-  } catch {
+  } catch (e: unknown) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return {};
     return {};
   }
   if (raw.trim().length === 0) return {};

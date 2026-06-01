@@ -218,7 +218,7 @@ export type LedgerEntry =
       readonly at: string;
       readonly key: string;
       readonly value: unknown;
-      readonly source: "ipc" | "default" | "replay";
+      readonly source: "ipc" | "default" | "replay" | "abort";
     }
   | {
       /**

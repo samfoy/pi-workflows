@@ -59,7 +59,7 @@
  * Refs: gap/viz, plan.md §4 Slice 7 (ledger reader contract).
  */
 
-import { promises as fs, readFileSync } from "node:fs";
+import { promises as fs, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -190,7 +190,7 @@ export function renderMermaidFromData(input: RenderMermaidInput): string {
       case "agent_cache_hit": {
         const p = ensurePhase(entry.phaseName);
         const a = ensureAgent(p, entry.agentId);
-        a.status = "cache-hit";
+        if (a.status !== "error") a.status = "cache-hit";
         break;
       }
       case "transition": {
@@ -312,9 +312,25 @@ export function renderMermaidSync(runDirAbs: string): string {
   } catch {
     /* fall through with empty manifest */
   }
+  /** 32 MiB guard — prevents event-loop block and unbounded allocation on large ledgers. */
+  const MAX_LEDGER_BYTES = 32 * 1024 * 1024;
   const entries: LedgerEntry[] = [];
   try {
-    const text = readFileSync(join(runDirAbs, "ledger.jsonl"), "utf8");
+    const lPath = ledgerPath(runDirAbs, true);
+    let fileSize = 0;
+    try {
+      fileSize = statSync(lPath).size;
+    } catch {
+      /* file absent — fall through to empty entries */
+    }
+    if (fileSize > MAX_LEDGER_BYTES) {
+      // Ledger too large to read synchronously; return a stub diagram.
+      return [
+        "flowchart TD",
+        `  warn["⚠️ ledger too large to render (${(fileSize / 1024 / 1024).toFixed(1)} MiB > 32 MiB limit)"]`,
+      ].join("\n");
+    }
+    const text = readFileSync(lPath, "utf8");
     if (text.length > 0) {
       const endsWithNewline = text.endsWith("\n");
       const parts = text.split("\n");
@@ -346,6 +362,11 @@ export function renderMermaidSync(runDirAbs: string): string {
 
 // ─── Mermaid emission ──────────────────────────────────────────────────
 
+/** Hard cap on rendered phases to prevent O(P×A) blowup. */
+const MAX_PHASES = 100;
+/** Hard cap on rendered agents per phase to prevent O(P×A) blowup. */
+const MAX_AGENTS_PER_PHASE = 50;
+
 interface EmitInput {
   readonly manifest: VizManifestLike;
   readonly phases: ReadonlyArray<PhaseRow>;
@@ -360,16 +381,16 @@ function emitMermaid(input: EmitInput): string {
   // Header comment carries non-graph metadata so consumers can grep
   // for it without parsing the diagram.
   const headerBits: string[] = [];
-  if (manifest.runId) headerBits.push(`run=${manifest.runId}`);
-  if (manifest.workflowName) headerBits.push(`workflow=${manifest.workflowName}`);
-  if (manifest.input) headerBits.push(`input=${truncate(manifest.input, 60)}`);
+  if (manifest.runId) headerBits.push(`run=${escapeLabel(String(manifest.runId))}`);
+  if (manifest.workflowName) headerBits.push(`workflow=${escapeLabel(String(manifest.workflowName))}`);
+  if (manifest.input) headerBits.push(`input=${escapeLabel(truncate(String(manifest.input), 60))}`);
   if (headerBits.length > 0) {
     lines.push(`  %% ${headerBits.join(" · ")}`);
   }
 
   // Start node — always.
   const startLabel = manifest.workflowName
-    ? `Start: ${escapeLabel(manifest.workflowName)}`
+    ? `Start: ${escapeStadiumLabel(manifest.workflowName)}`
     : "Start";
   lines.push(`  Start([${startLabel}])`);
 
@@ -378,38 +399,56 @@ function emitMermaid(input: EmitInput): string {
     // renders. Useful for runs that errored before phase 1.
     const endLabel = finalState ?? "no phases";
     lines.push(`  Start --> End`);
-    lines.push(`  End([${escapeLabel(endLabel)}])`);
+    lines.push(`  End([${escapeStadiumLabel(endLabel)}])`);
     return lines.join("\n") + "\n";
   }
 
-  // Edges + subgraphs.
+  // Edges + subgraphs — capped to prevent O(P×A) blowup.
+  const renderedPhaseCount = Math.min(phases.length, MAX_PHASES);
+  const phasesTruncated = phases.length > MAX_PHASES;
+
   lines.push(`  Start --> P0`);
-  for (let i = 0; i < phases.length; i++) {
+  for (let i = 0; i < renderedPhaseCount; i++) {
     const p = phases[i]!;
     const phaseLabel = phaseLabelFor(p);
     lines.push(`  subgraph P${i} ["${escapeLabel(phaseLabel)}"]`);
+    const renderedAgentCount = Math.min(p.agentsByOrder.length, MAX_AGENTS_PER_PHASE);
+    const agentsTruncated = p.agentsByOrder.length > MAX_AGENTS_PER_PHASE;
     if (p.agentsByOrder.length === 0) {
       // Empty phase — emit a single placeholder so the subgraph isn't
       // syntactically empty (some Mermaid renderers reject empty
       // subgraphs).
       lines.push(`    P${i}_empty[" "]`);
     } else {
-      for (let j = 0; j < p.agentsByOrder.length; j++) {
+      for (let j = 0; j < renderedAgentCount; j++) {
         const a = p.agentsByOrder[j]!;
         lines.push(`    P${i}_A${j}["${escapeLabel(agentLabelFor(a))}"]`);
       }
+      if (agentsTruncated) {
+        lines.push(
+          `    P${i}_trunc["… ${p.agentsByOrder.length - MAX_AGENTS_PER_PHASE} more agents (truncated)"]`,
+        );
+      }
     }
     lines.push(`  end`);
-    if (i + 1 < phases.length) {
+    if (i + 1 < renderedPhaseCount) {
       lines.push(`  P${i} --> P${i + 1}`);
     }
   }
 
-  // Final edge to End.
-  const endIdx = phases.length - 1;
+  // Final edge to End — route through truncation node when phases were capped.
+  const endIdx = renderedPhaseCount - 1;
   const endLabel = finalState ?? "in-progress";
-  lines.push(`  P${endIdx} --> End`);
-  lines.push(`  End([${escapeLabel(endLabel)}])`);
+  if (phasesTruncated) {
+    lines.push(`  P${endIdx} --> PTrunc`);
+    lines.push(
+      `  PTrunc["… ${phases.length - MAX_PHASES} more phases (truncated)"]`,
+    );
+    lines.push(`  PTrunc --> End`);
+  } else {
+    lines.push(`  P${endIdx} --> End`);
+  }
+  lines.push(`  End([${escapeStadiumLabel(endLabel)}])`);
 
   return lines.join("\n") + "\n";
 }
@@ -444,6 +483,16 @@ function agentLabelFor(a: AgentRow): string {
 function escapeLabel(s: string): string {
   // eslint-disable-next-line no-control-regex
   return s.replace(/[\u0000-\u001F]/g, " ").replace(/"/g, "'");
+}
+
+/**
+ * Escape a label for use inside a Mermaid stadium-shape node `([...])`.
+ * The closing delimiter is `])`, so `]` must be escaped to prevent
+ * premature node termination. Also strips control chars.
+ */
+function escapeStadiumLabel(s: string): string {
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\u0000-\u001F]/g, " ").replace(/\]/g, "&#93;");
 }
 
 function truncate(s: string, max: number): string {

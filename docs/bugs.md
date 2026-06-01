@@ -4,6 +4,29 @@ Tracked bugs that haven't been filed as GitHub issues yet. Fixed bugs are marked
 
 ---
 
+## BUG-W10 ✅ FIXED — `jsonStream`: pending buffer has no size cap — OOM on very long line from subprocess
+
+**Discovered:** 2026-06-01  
+**Severity:** Medium — Node.js heap exhaustion on subprocess emitting a line with no newline (multi-hundred-MB payload or deliberate garbage)
+
+### Description
+
+`pending = pending.length === 0 ? buf : Buffer.concat([pending, buf])` grew the in-memory
+line buffer without bound until a `0x0A` byte was found. `TRUNCATED_REGION_MAX` only capped
+error-message excerpts, not the accumulation itself. A subprocess emitting a huge line (or
+never emitting a newline at all) could consume all available heap before `JSON.parse` was
+ever called.
+
+### Fix
+
+Added `MAX_LINE_BYTES = 64 MiB` constant. Before each `Buffer.concat` the guard checks
+`pending.length + buf.length > MAX_LINE_BYTES`; if exceeded it throws a `JsonStreamError`
+with `reason: "parse"`, the line number, byte offset, and a 256-byte excerpt of the start
+of the oversized line. This stops accumulation at a safe threshold without affecting any
+realistic pi JSON event.
+
+---
+
 ## BUG-001 ✅ FIXED — `await ctx.agent()` silently returns a handle without spawning
 
 **Discovered:** 2026-05-30  
@@ -3056,6 +3079,49 @@ Added `lastEntryTime: Date | null` to `ReplayState`. `feedLedgerEntry` updates i
 entry (`state.lastEntryTime = t`). `endOpenSpans` now uses `state.lastEntryTime ?? new Date()`
 so abandoned spans are capped at the last observed ledger timestamp instead of wall-clock now.
 
+## BUG-W10 ✅ FIXED — `schedule` setTimeout callback calls `handleEvent` without try/catch — uncaught exception crashes host process
+
+**Discovered:** 2026-06-01  
+**Severity:** Medium — any synchronous throw inside a hot-reload handler propagates as an uncaught timer exception, triggering `uncaughtException` and crashing the host pi process
+
+### Description
+
+`handleAdd`, `handleChange`, and `handleUnlink` (all reachable via `handleEvent`) call
+`registerCommand`, `pi.registerCommand`, and `pi.unregisterCommand`. These calls are
+synchronous and can throw (e.g. invalid command name, registry corruption, null dereference).
+They ran inside the `setTimeout` callback in `schedule` without any try/catch wrapper.
+Node.js timer callbacks are outside the normal async stack; an unhandled throw there emits
+`uncaughtException`, which by default terminates the process and kills all active workflow runs.
+
+### Fix
+
+Wrapped the `handleEvent(absPath, event)` call in the `setTimeout` callback with a
+`try/catch` block that logs the error at `"error"` level (via the `log` sink) and swallows
+the exception, preventing crash propagation to the host process.
+
+```typescript
+// Before
+const timer = setTimeout(() => {
+  debounceTimers.delete(absPath);
+  if (closed) return;
+  handleEvent(absPath, event);
+}, debounceMs);
+
+// After
+const timer = setTimeout(() => {
+  debounceTimers.delete(absPath);
+  if (closed) return;
+  try {
+    handleEvent(absPath, event);
+  } catch (err) {
+    log("error", `hot-reload: unhandled error in ${event} handler`, {
+      absPath,
+      error: String(err),
+    });
+  }
+}, debounceMs);
+```
+
 ## BUG-150 ✅ FIXED — TOCTOU race in checkpointFn — concurrent agents with same label both return true
 
 **Discovered:** 2026-06-01
@@ -3173,6 +3239,34 @@ Added `opts.onTimerError?.(ctxErr)` immediately before `opts.onTimerContextError
 `rethrowAcrossRealm` success branch, so the run-failure hook fires unconditionally on any caught
 timer error. `onTimerContextError` is retained (test sink) but now always accompanies `onTimerError`.
 
+## BUG-152 ✅ FIXED — `runDir()` passes `runId` directly to `path.join` without validation — path traversal into arbitrary directories
+
+**File:** `src/util/paths.ts`
+**Severity:** High
+
+### Description
+
+`runDir(runId)` returned `join(runsHome(), runId)` with no validation. `path.join` normalises
+`..` segments, so `runDir('../../../../etc/passwd')` resolved to `/etc/passwd` on a typical
+system. Every derived helper — `ctrlPath`, `cachePath`, `cachePathTmp`, `manifestPath`,
+`fixturesPath`, `ledgerPath`, `agentsDir` — inherited the bug because they all call
+`runDir()`. Any code path that accepts a `runId` from user-controlled input (CLI resume,
+`run_workflow` tool, TUI `r` keybind) and passes it to these functions without prior
+validation exposed arbitrary file read/write.
+
+The contrast with `agentTranscriptPath`/`agentStderrPath` (which call `assertSafeAgentId`
+before building the path) shows the pattern was known and intentionally applied for
+`agentId` but omitted for `runId`.
+
+### Fix
+
+Added `InvalidRunIdError` class and `assertSafeRunId(runId: unknown)` function to
+`src/util/paths.ts`, mirroring `InvalidAgentIdError`/`assertSafeAgentId`. `assertSafeRunId`
+delegates to the existing `isRunId()` regex (`wf-[0-9a-f]{12}`) imported from `./runId.js`
+and throws `InvalidRunIdError` on any non-matching value. `runDir()` now calls
+`assertSafeRunId(runId)` as its first statement, so all downstream path helpers are
+automatically protected.
+
 ## BUG-W07 — ctx.parallel with large agent count silently fails all agents (unresolved)
 
 **Discovered:** 2026-06-01  
@@ -3231,3 +3325,1154 @@ if (manifest.runId) headerBits.push(`run=${escapeLabel(String(manifest.runId))}`
 if (manifest.workflowName) headerBits.push(`workflow=${escapeLabel(String(manifest.workflowName))}`);
 if (manifest.input) headerBits.push(`input=${escapeLabel(truncate(String(manifest.input), 60))}`);
 ```
+
+## BUG-W10 ✅ FIXED — Gate fallback branch ignores already-aborted signal — gate auto-approves during cancellation
+
+**Discovered:** 2026-06-01
+**Severity:** Medium — cancelled run continues executing after abort signal fires
+
+### Description
+
+In `ctx/gate.ts`, when `opts.waitForGate` is undefined (headless / no TUI), the `else`
+fallback branch assigned `approved = defaultAnswer` without first checking
+`opts.signal?.aborted`. If cancellation fired between the initial pre-ledger guard and this
+point, the gate would write `gate_requested`, then immediately auto-approve with
+`defaultAnswer` (true by default) and write `gate_resolved`, causing the workflow to
+continue executing a run the host intended to stop.
+
+The same issue existed in `ctx/interrupt.ts`: the `else` branch (reached when
+`waitForInterrupt` is undefined or the signal was already aborted) fell through to
+`value = cfg.defaultValue ?? null` without an abort check, so an in-flight interrupt
+auto-resolved with its default answer instead of propagating the abort.
+
+### Fix
+
+In both `else` fallback branches, added an abort guard immediately before the default
+assignment:
+
+```ts
+// gate.ts
+} else {
+  if (opts.signal?.aborted)
+    throw opts.signal.reason ?? new DOMException('Run was aborted', 'AbortError');
+  approved = defaultAnswer;
+}
+
+// interrupt.ts
+} else {
+  if (opts.signal?.aborted)
+    throw opts.signal.reason ?? new DOMException('Run was aborted', 'AbortError');
+  value = cfg.hasDefault ? cfg.defaultValue : null;
+  source = "default";
+}
+```
+
+In `gate.ts` the throw is caught by the surrounding `try/catch (waitErr)` block, which
+already writes `gate_resolved(approved: false)` on abort — so the ledger remains balanced.
+
+## BUG-153 ✅ FIXED — MemoStore cross-process compaction race: fixed tmp path + non-atomic rename loses concurrent appends
+
+**File:** `src/runtime/memoStore.ts` — `writeSnapshotAndRename()`
+**Discovered:** 2026-06-01
+**Severity:** High — two processes sharing memo.jsonl can silently lose appended entries during compaction
+
+### Description
+
+`writeSnapshotAndRename` wrote every compaction snapshot to the same fixed
+`memo.jsonl.tmp` path (resolved once at construction time from `resolveMemoPathTmp`).
+When two processes sharing the same `memo.jsonl` both trigger compaction concurrently:
+
+1. Process A builds its snapshot and opens `memo.jsonl.tmp` with `O_WRONLY|O_CREAT|O_TRUNC`.
+2. Process B opens the same path — the `O_TRUNC` flag truncates Process A's in-flight snapshot.
+3. One process's `renameSync(memo.jsonl.tmp → memo.jsonl)` wins; the surviving `memo.jsonl`
+   contains only one process's snapshot, potentially at an earlier logical time.
+4. O_APPEND entries the other process wrote to the live file between its snapshot build and
+   the rename are permanently lost.
+
+`writeQueue` serializes writes within a single process but provides no cross-process protection.
+
+### Fix
+
+Generate a per-compaction unique tmp path inside `writeSnapshotAndRename` by appending
+`.<pid>.<4-random-hex-bytes>` to the base `memoPathTmp`:
+
+```ts
+const uniqueTmp =
+  `${this.memoPathTmp}.${process.pid}.${Math.random().toString(16).slice(2, 10)}`;
+```
+
+Each process writes its snapshot to an exclusively-owned tmp file, eliminating the
+truncation collision. The final `renameSync` remains atomic (same directory, same
+filesystem). Added `unlinkSync` best-effort cleanup if the rename throws.
+Also added `unlinkSync` to the import list.
+
+**Files changed:** `src/runtime/memoStore.ts`
+
+## BUG-W11 ✅ FIXED — No cap on concurrent timer registrations — timer table unbounded growth
+
+**Discovered:** 2026-06-01
+**Severity:** Medium — host OOM risk from adversarial or buggy workflow scripts
+
+### Description
+
+`scheduleTimeout`, `scheduleInterval`, and `scheduleImmediate` each push entries
+into `callbackTable` and their respective ID maps with no upper bound. A sandboxed
+script could call `setTimeout(fn, 1e12)` in a tight loop, growing all four maps
+indefinitely until host OOM. The `disposed` guard only activates after the
+`AbortSignal` fires, which can be arbitrarily delayed.
+
+### Fix
+
+1. Added `MAX_OUTSTANDING = 10_000` module-level constant in `timerTable.ts`.
+2. Added `makeTableLimitError()` local factory producing a `SandboxViolationError`
+   with `violation: "timer-table-limit-exceeded"`.
+3. Added `"timer-table-limit-exceeded"` to the `SandboxViolationError["violation"]`
+   union in `src/types/internal/sandbox.d.ts`.
+4. In each `schedule*` method, checked `callbackTable.size >= MAX_OUTSTANDING`
+   before inserting: on breach, calls `dispose()` (cancels all outstanding timers
+   and marks the bridge disposed) then invokes `opts.onTimerError?.(makeTableLimitError())`.
+   Returns handle `0` (same as the already-disposed path).
+
+---
+
+## BUG-153 ✅ FIXED — progressFn: NaN passes the [0,100] range guard and is emitted as a progress value
+**File:** `src/runtime/ctx/logProgress.ts`, `progressFn()`
+**Discovered:** 2026-06-01
+**Severity:** Low — NaN silently emitted as progress value to overlay consumers
+
+### Description
+
+The guard `typeof pct !== 'number' || pct < 0 || pct > 100` does not reject `NaN`.
+`typeof NaN === 'number'` is `true`, and both `NaN < 0` and `NaN > 100` are `false`, so
+`ctx.progress(NaN)` passes validation and emits `{ pct: NaN }` to the overlay. Any consumer
+performing arithmetic on the value silently propagates `NaN`.
+
+### Fix
+
+Added `!isFinite(pct)` as the second condition in the guard:
+`typeof pct !== 'number' || !isFinite(pct) || pct < 0 || pct > 100`.
+`isFinite` rejects both `NaN` and `±Infinity`, closing the gap.
+
+## BUG-W12 ✅ FIXED — Unbounded `pending` buffer growth on lines with no newline — OOM on adversarial input
+
+**Discovered:** 2026-06-01  
+**Severity:** Medium — Node process OOM-killed or swapped under adversarial/broken subprocess output
+
+### Description
+
+`pending = Buffer.concat([pending, buf])` accumulated every incoming chunk unconditionally
+until a `0x0A` byte was found. There was no line-length cap anywhere in the parser, so a
+subprocess that writes a continuous stream with no newlines would grow `pending` without
+bound until the Node process was OOM-killed or the OS began swapping.
+`TRUNCATED_REGION_MAX=256` limits only error-message content, not the in-flight buffer.
+
+### Fix
+
+Added `DEFAULT_MAX_LINE_BYTES = 4 * 1024 * 1024` (4 MiB) constant and a `maxLineBytes`
+option to `ParseJsonStreamOptions` (defaults to `DEFAULT_MAX_LINE_BYTES`; set to `0` to
+disable). After the inner while loop exhausts all complete lines, if `pending` (the
+in-flight partial line) exceeds the cap, a `JsonStreamError` with `reason='parse'` is thrown
+immediately, carrying the first 256 bytes of the offending region as `truncatedRegion`.
+
+---
+
+## BUG-155 ✅ FIXED — clipMessage compares code-unit length against MAX_BYTES — over-emits for multibyte Unicode
+
+**File:** `src/runtime/otelExporter.ts`, `clipMessage()`
+**Discovered:** 2026-06-01
+**Severity:** Low — OTLP payloads up to 3× larger than intended for CJK/emoji-heavy messages
+
+### Description
+
+`LOG_MESSAGE_MAX_BYTES = 4096` but the guard `s.length <= LOG_MESSAGE_MAX_BYTES` compared UTF-16
+code units, not bytes. A message of 4,096 CJK characters passed the guard yet encoded to ~12,288
+UTF-8 bytes in the OTLP protobuf payload — 3× the intended limit. The truncation path had the
+same flaw: `s.slice(0, LOG_MESSAGE_MAX_BYTES)` sliced by character count rather than byte budget.
+
+### Fix
+
+Replaced `s.length` guard with `Buffer.byteLength(s, "utf8") <= LOG_MESSAGE_MAX_BYTES`.
+Replaced the character-based `s.slice(...)` truncation with
+`Buffer.from(s, "utf8").slice(0, LOG_MESSAGE_MAX_BYTES).toString("utf8")`, which truncates at a
+UTF-8 byte boundary (Node.js handles any incomplete trailing sequence gracefully).
+
+## BUG-W10 ✅ FIXED — `memoryOversizeWarned` keyed by name only, not scope:name — warning dedup leaks across scopes
+
+**Discovered:** 2026-06-01  
+**Severity:** Low — incorrect dedup suppresses oversize warnings when two scopes share the same agent name
+
+### Description
+
+`memoryOversizeWarned` used only `safeName` as its key. Two scopes with identically-named
+agents (e.g. `user:agent1` and `project:agent1`) shared the same dedup slot. A warning fired
+for one scope would suppress the warning for the other. Symmetrically, `memoryCompact`
+called `memoryOversizeWarned.delete(safeName)`, which cleared the flag for *all* scopes
+sharing that name rather than just the one that was compacted. `readOnlyMemoryKeys` already
+used the `scope:name` composite via `memoryReadOnlyKey`; `memoryOversizeWarned` was
+inconsistently keyed.
+
+### Fix
+
+In `memoryRead`: destructure `scope: parsedScope` from `resolveMemoryArgs`, compute
+`const oversizeKey = memoryReadOnlyKey(parsedScope, safeName)`, and use `oversizeKey` for
+`.has` / `.add` instead of bare `safeName`.
+
+In `memoryCompact`: destructure `scope: parsedScope` from `resolveMemoryArgs` and use
+`memoryReadOnlyKey(parsedScope, safeName)` for `.delete` instead of bare `safeName`.
+
+Updated the `MemoryDeps` interface JSDoc and the file-header comment to reflect
+`Set<scope:name>` rather than `Set<name>`.
+
+## BUG-154 ✅ FIXED — readMemoryFileWithMeta: TOCTOU between fs.stat and fs.open produces wrong truncated flag
+
+**File:** `src/runtime/agentMemory.ts` — `readMemoryFileWithMeta`  
+**Discovered:** 2026-06-01  
+**Severity:** Low — spurious or missed `truncated` flag; no data loss
+
+### Description
+
+`readMemoryFileWithMeta` called `fs.stat(p)` to capture `totalBytes`, then separately
+called `fs.open(p, "r")`. A concurrent `compactMemoryFile` rename between those two
+awaits could cause the fd to refer to the post-compaction file while `totalBytes` still
+held the pre-compaction size (or vice versa), producing a spurious `truncated: true` (or
+a missed `truncated: true`) on an otherwise correctly-read buffer.
+
+### Fix
+
+Removed the pre-open `fs.stat(p)` call. After `fs.open`, `fh.stat()` is called on the
+open file handle — this stats the already-open inode, so `totalBytes` and the
+subsequent `fh.read` are guaranteed to refer to the same file regardless of concurrent
+renames on the path.
+
+---
+
+## BUG-155 ✅ FIXED — appendMemoryUpdate concurrent writes unserialised — stat/read-tail/appendFile sequence not atomic
+
+**File:** `src/runtime/agentMemory.ts` — `appendMemoryUpdate`  
+**Discovered:** 2026-06-01  
+**Severity:** Low — double blank separators between entries; no data loss
+
+### Description
+
+Multiple concurrent `appendMemoryUpdate` calls for the same `dir` were not serialised. The
+sequence — (1) `fs.stat(p)` to get size, (2) `fs.open(p,'r')` and read the last byte, (3)
+decide on `needsLeadingNewline`, (4) `fs.appendFile(p, payload)` — could be interleaved. Two
+concurrent callers could both execute steps 1–3, both see the same non-newline tail byte, both
+set `needsLeadingNewline = true`, and both prepend `\n`, producing double blank separators.
+
+### Fix
+
+Already resolved prior to this audit. The entire stat/read-tail/append sequence runs inside
+`await enqueueWrite(dir, async () => { ... })`, which serialises all calls per-directory
+through the `writeQueues: Map<string, Promise<void>>` promise chain. The `enqueueWrite`
+helper uses the same write-queue pattern as `compactMemoryFile`. No code change required.
+
+## BUG-W13 ✅ FIXED — `globalCachePath` uses unvalidated `scriptSha256` slice as a path segment — path traversal
+
+**File:** `src/util/paths.ts` — `globalCachePath()` / `globalCachePathTmp()`
+**Discovered:** 2026-06-01
+**Severity:** Medium — limited path traversal within the home tree
+
+### Description
+
+`globalCachePath(scriptSha256)` and `globalCachePathTmp(scriptSha256)` passed
+`scriptSha256.slice(0, 16)` directly to `path.join` with no validation. A caller
+supplying a value beginning with `'../'` (e.g. `'../../malicious/x' + 'a'.repeat(50)`)
+would produce a traversal: `join(workflowsHome(), 'global-cache', '../../malicious', 'cache.jsonl')`
+normalizes to a path outside `workflowsHome()`. The legitimate value is always a
+64-char SHA-256 hex string, but the function did not enforce this.
+`agentTranscriptPath` and `runDir` both validate their inputs via `assertSafe*`
+helpers; `globalCachePath` was inconsistent.
+
+### Fix
+
+Added `assertValidScriptSha256(scriptSha256: unknown)` — same pattern as the
+existing `assertSafeRunId` / `assertSafeAgentId` guards — that throws if the input
+doesn't match `/^[0-9a-f]{64}$/i`. Called at the top of both `globalCachePath` and
+`globalCachePathTmp` before any slice/join:
+
+```ts
+function assertValidScriptSha256(scriptSha256: unknown): asserts scriptSha256 is string {
+  if (typeof scriptSha256 !== 'string' || !/^[0-9a-f]{64}$/i.test(scriptSha256)) {
+    throw new Error(
+      `invalid scriptSha256 ${JSON.stringify(scriptSha256)}: must be a 64-char hex string`,
+    );
+  }
+}
+```
+
+## BUG-155 ✅ FIXED — `readManifest` reads manifest.json with no size cap — OOM on large/crafted file
+
+**File:** `src/runtime/crashSweep.ts` — `readManifest`  
+**Discovered:** 2026-06-01  
+**Severity:** Medium — unbounded memory load from corrupted or crafted manifest.json
+
+### Description
+
+`readManifest()` called `readFileSync(path, 'utf-8')` with no prior size check. A
+corrupted or adversarially crafted `manifest.json` of arbitrary size would be loaded
+entirely into memory before any parsing occurred. The analogous `recoverFromTranscript`
+path in `dispatcher.ts` was already guarded with `TRANSCRIPT_RECOVERY_MAX_BYTES`
+(64 MiB); manifest reads had no equivalent guard.
+
+### Fix
+
+Added `MANIFEST_MAX_BYTES = 1 * 1024 * 1024` (1 MiB) constant immediately before
+`readManifest`. The function now calls `statSync(path).size` before reading; if the file
+exceeds the cap it returns `null` immediately (same treatment as a corrupt manifest), so
+the sweep treats the run as unreadable and skips it. `statSync` was already imported.
+
+## BUG-156 ✅ FIXED — `writeAllSync` does not retry on EINTR — partial write on signal-interrupted fd
+
+**File:** `src/util/writeAllSync.ts`  
+**Discovered:** 2026-06-01  
+**Severity:** Low — only affects callers writing to stdout, pipes, or sockets; regular files on Linux are unaffected
+
+### Description
+
+The `while` loop correctly retried short writes, but if `writeSync` threw a system error
+with `code === 'EINTR'` (possible when the process receives a signal mid-syscall on a
+pipe/socket fd) the exception propagated immediately with `offset < buf.length`, leaving
+a torn JSONL line on the fd.
+
+### Fix
+
+Wrapped the `writeSync` call in a `try/catch`. On `EINTR` the loop body is retried via
+`continue`; all other errors are rethrown unchanged.
+
+---
+
+## BUG-W13 ✅ FIXED — parseMemoOpts silently coerces any non-'project' scope to 'global' — invalid scope values misrouted without error
+
+**File:** `src/runtime/ctx/memo.ts`, `parseMemoOpts()`
+**Discovered:** 2026-06-01
+**Severity:** Low — invalid scope values (e.g. `'local'`, `'user'`) stored/retrieved from wrong global store with no error
+
+### Description
+
+`parseMemoOpts` resolved `scope` as `"project"` only when `optsArg.scope === "project"`,
+and fell through to `"global"` for everything else. A caller passing `{ scope: 'local' }`
+or `{ scope: 'user' }` silently had their memo entries routed to the global store. No
+`TypeError`, no warning — the invalid scope was treated as a valid alias for `"global"`.
+
+### Fix
+
+Replaced the ternary with an explicit allowlist: if `rawScope` is present and is neither
+`"global"` nor `"project"`, a `TypeError` is thrown immediately:
+
+```ts
+if (rawScope !== "global" && rawScope !== "project") {
+  throw new TypeError(
+    `ctx.memo: invalid scope "${String(rawScope)}" — must be "global" or "project"`,
+  );
+}
+```
+
+`undefined` scope (opts omitted or `scope` key absent) still defaults to `"global"`.
+Updated the JSDoc to match the new contract. Matches the strict validation pattern used
+by `resolveMemoryArgs` in `memory.ts`.
+
+---
+
+## BUG-155 ✅ FIXED — logFn fires-and-forgets async ledger write — errors silently discarded while caller sees success
+
+**File:** `src/runtime/ctx/logProgress.ts` — `logFn`  
+**Discovered:** 2026-06-01  
+**Severity:** Low — ledger write failures (disk full, closed handle) silently dropped; caller always sees `{ ok: true }`
+
+### Description
+
+`void ledgerLog(...).catch(() => undefined)` unconditionally swallowed all ledger write
+errors. Every other ctx method (`interrupt`, `gate`) awaits its ledger append and
+propagates failures. If the ledger began failing, all `ctx.log()` entries would be lost
+with no signal to the user or TUI.
+
+### Fix
+
+Replaced `.catch(() => undefined)` with a `.catch` handler that emits a
+`pi-workflows.agent.log.error` overlay event carrying the error message. This matches
+the pattern used elsewhere in the file (overlay failures are still swallowed, but ledger
+failures are now surfaced to the TUI rather than silently discarded).
+
+## BUG-156 ✅ FIXED — `memoryOversizeWarned` set keyed by name only in auto-injection path — same-name different-scope agents share warn-dedup slot
+
+**File:** `src/runtime/ctx/phase.ts` — auto-injection block  
+**Discovered:** 2026-06-01  
+**Severity:** Low — incorrect dedup suppresses or incorrectly re-arms oversize warnings when two scopes share the same memory name
+
+### Description
+
+In the auto-injection block in `phase.ts`, `state.memoryOversizeWarned` was checked and
+populated using bare `memoryName` rather than the composite `scope:name` key. Two memory
+mounts with identical names but different scopes (e.g. `user:planner` and
+`project:planner`) shared the same dedup slot: a warning fired for `user:planner` would
+suppress the warning for `project:planner`, and vice versa. `readOnlyMemoryKeys` in the
+same block already used `memoryReadOnlyKey(memoryScope, memoryName)` as the composite key;
+`memoryOversizeWarned` was inconsistently keyed. The explicit `ctx.memory.read` and
+`ctx.memory.compact` paths in `memory.ts` were fixed separately (see the earlier
+BUG-W10 entry); this is the missed auto-injection site.
+
+### Fix
+
+Replaced both bare `memoryName` references in the auto-injection block with
+`memoryReadOnlyKey(memoryScope, memoryName)` — the same composite-key helper already
+imported and used on the adjacent `readOnlyMemoryKeys` line:
+
+```ts
+// Before
+!state.memoryOversizeWarned.has(memoryName)
+) {
+  state.memoryOversizeWarned.add(memoryName);
+
+// After
+!state.memoryOversizeWarned.has(memoryReadOnlyKey(memoryScope, memoryName))
+) {
+  state.memoryOversizeWarned.add(memoryReadOnlyKey(memoryScope, memoryName));
+```
+
+## BUG-157 ✅ FIXED — Unbounded Mermaid output size — no phase or agent cap
+
+**File:** `src/runtime/visualize.ts` — `emitMermaid`  
+**Discovered:** 2026-06-01  
+**Severity:** Low — potential OOM / blocked renderer for large runs
+
+### Description
+
+`emitMermaid()` iterated all phases and all agents within each phase with no output size
+limit. A run with P phases × A agents/phase produces O(P×A) Mermaid lines. At 200×200
+that's ~40 k lines (~2–3 MB), which can block the TUI card renderer or OOM
+`writeMermaidToTmp` consumers.
+
+### Fix
+
+Added two module-level constants:
+
+```ts
+const MAX_PHASES = 100;
+const MAX_AGENTS_PER_PHASE = 50;
+```
+
+Both loops are now capped to those limits. When agents are truncated within a phase, a
+placeholder node `P${i}_trunc["… N more agents (truncated)"]` is appended inside the
+subgraph. When phases are truncated, a `PTrunc["… N more phases (truncated)"]` node is
+inserted between the last rendered phase and the `End` node so the diagram remains
+syntactically valid and visually signals the truncation. The inter-phase edge condition
+`i + 1 < phases.length` was updated to `i + 1 < renderedPhaseCount` to avoid a dangling
+edge to a non-existent subgraph when truncation is active.
+
+## BUG-153 ✅ FIXED — `jsonStream`: UTF-8 BOM not stripped — `JSON.parse` throws `SyntaxError` on first line of BOM-prefixed stream
+
+**File:** `src/util/jsonStream.ts`, `parseJsonStream()`
+**Discovered:** 2026-06-01
+**Severity:** Low — first NDJSON line of any BOM-prefixed stream throws `JsonStreamError(reason:'parse')`
+
+### Description
+
+`lineBytes.toString('utf8')` preserves any leading UTF-8 BOM (EF BB BF), producing a `lineStr`
+starting with `\uFEFF`. `JSON.parse` does not accept a leading BOM, so the very first line of a
+BOM-prefixed stream threw a `JsonStreamError` with `reason:'parse'`. The BOM-strip guard
+(`lineStr = lineStr.slice(1)`) had already been added, but `lineStr` was declared `const`,
+making the assignment a TypeScript compile error (TS2588) that prevented the fix from taking effect.
+
+### Fix
+
+Changed `const lineStr` to `let lineStr` so the BOM-strip assignment on the next line compiles
+and executes correctly.
+
+## BUG-W13 ✅ FIXED — Orphaned fork directory on seed write failure — no cleanup on exception path
+
+**File:** `src/runtime/forkRun.ts` — `wrappedResolveRunDir`  
+**Discovered:** 2026-06-01  
+**Severity:** Low — orphaned directories accumulate until GC collects them; no data loss
+
+### Description
+
+`mkdirSync(d, { recursive: true })` in `wrappedResolveRunDir` created the fork directory
+before the `openSync`/`writeSync` calls that seed `ledger.jsonl` and `cache.jsonl`. If
+either write threw (disk full, permissions error, etc.), the exception propagated out of
+the resolver while the partially-created directory — containing no manifest — remained on
+disk. GC would eventually collect it, but until then it appeared as an orphaned run
+directory.
+
+### Fix
+
+Added `rmSync` to the `node:fs` import. Wrapped the entire block from `mkdirSync` through
+`seedDone = true` in a `try/catch`: on any thrown error, `rmSync(d, { recursive: true,
+force: true })` removes the directory before re-throwing, ensuring no orphaned directories
+are left behind on the failure path.
+
+## BUG-W11 ✅ FIXED — Missing fsync on seed writeFileSync calls — durability gap inconsistent with rest of persistence layer
+
+**Discovered:** 2026-06-01  
+**Severity:** Low — OS crash between manifest fsync and page-cache flush leaves seed files zero-length/corrupt; fork appears valid but all pre-fork agents re-dispatch instead of cache-hitting
+
+### Description
+
+`wrappedResolveRunDir` in `forkRun.ts` used `writeFileSync` for both seed files
+(`ledger.jsonl` at line 292, `cache.jsonl` at line 327). `startWorkflowRun` subsequently
+writes and fsyncs the manifest, making the fork run "officially valid". If the OS crashes
+between that manifest fsync and the OS flushing the seed page-cache buffers, the manifest
+exists but the seed files are zero-length or corrupt. The fork then re-dispatches all
+pre-fork agents instead of cache-hitting, defeating the entire purpose of forking from a
+checkpoint. The rest of the persistence layer (`cache.ts appendLineSync`) already uses
+`openSync` / `writeSync` / `fsyncSync` / `closeSync` to guarantee durability.
+
+### Fix
+
+Replaced both `writeFileSync` calls with explicit `openSync` / `writeSync` / `fsyncSync` /
+`closeSync` sequences wrapped in try/finally (matching the `cache.ts` pattern). Updated the
+`node:fs` import to drop `writeFileSync` and add `closeSync`, `fsyncSync`, `openSync`, and
+`writeSync`.
+
+## BUG-159 ✅ FIXED — checkpointFn TOCTOU: concurrent callers can both return true for the same label
+
+**Discovered:** 2026-06-01
+**Severity:** Medium — checkpoint-gated work executes twice when parallel agents race on the same label
+
+### Description
+
+`checkpointFn` in `src/runtime/ctx/checkpointReport.ts` performed
+`await opts.cache.hasCheckpoint(label)` and `await opts.cache.setCheckpoint(label, data)`
+as two separate async steps with no synchronisation between them. Two concurrent callers
+(e.g. parallel `ctx.phase` agents or `Promise.all` in a workflow) could both observe
+`hasCheckpoint=false` before either write completed, both fall through to `setCheckpoint`,
+and both return `{ok:true, value:true}` — each believing it was the first writer. The
+checkpoint-gated work would then execute twice.
+
+### Fix
+
+Added a per-label async mutex (`cpLocks: Map<string, Promise<void>>`) in the closure of
+`createCheckpointReportMethods`. Each `checkpointFn` call chains onto the previous in-flight
+ticket for the same label (`await previous`) before executing the has→set sequence,
+serialising concurrent callers. The `finally` block resolves the current ticket and removes
+the map entry when no further callers are queued (checked via identity:
+`cpLocks.get(label) === ticket`), preventing unbounded map growth.
+
+## BUG-158 ✅ FIXED — ctrl.jsonl rotation silently drops commands appended between readFileSync and renameSync
+
+**File:** `src/runManager.ts` (`startCtrlWatcher`)
+**Discovered:** 2026-06-01
+**Severity:** Low — ctrl commands (pause/resume/stop/resume-interrupt) appended in the narrow window between `readFileSync` and `renameSync` are silently lost
+
+### Description
+
+In `processNewLines`, `buf = readFileSync(ctrlFile)` captures the file contents, then after
+dispatching commands, `maybeRotate()` calls `renameSync(ctrlFile, archivedFile)`. If a
+supervisor appends a command to `ctrl.jsonl` between the `readFileSync` and `renameSync`,
+that command lands in the archived file but was never in `buf`. After the rename, `bytesRead`
+resets to 0 and a fresh `ctrl.jsonl` is created on the next write; the command in
+`.archived` is never read again and is permanently lost.
+
+### Fix
+
+Extracted the command-dispatch loop into a `dispatchLines(data: string): void` helper.
+`processNewLines` now calls `dispatchLines(newData)` instead of inlining the loop.
+In `maybeRotate`, the prior `bytesRead` offset is saved before the rename; after
+`renameSync`, the archived file is read from that offset and any trailing bytes are
+passed to `dispatchLines` to drain commands that raced in during the window. The drain
+read is best-effort (failures are swallowed) — a failure to read the archived file is
+non-fatal and never affects the live run.
+
+## BUG-160 ✅ FIXED — tailEvents may silently break without yielding the terminal transition entry
+
+**File:** `src/client.ts` (`tailEvents`)
+**Discovered:** 2026-06-01
+**Severity:** Medium — callers relying on `ev.type === 'transition' && ev.to === 'done'` to detect completion silently see the generator exit with no terminal event
+
+### Description
+
+In the poll loop's anti-spin secondary check, `bytesRead` is set to `buf.length` **before**
+the inner for-loop, so `buf.length === bytesRead` is always true by the time the check runs
+— the guard was a no-op. `getRunState()` then performs its own independent `readFile` on the
+ledger. If a terminal transition entry is appended between the `fsp.readFile(ledgerFile)` at
+the top of the iteration and the `getRunState()` call, `getRunState` observes the terminal
+state while `buf` does not contain that entry. The always-true `buf.length === bytesRead`
+condition lets the break fire, exiting the loop before the terminal entry is ever yielded.
+
+### Fix
+
+Replaced the no-op `buf.length === bytesRead` guard with `freshBuf.length === bytesRead`
+where `freshBuf` is a new `fsp.readFile(ledgerFile)` call made immediately before the
+`getRunState` check. If new bytes have landed since `buf` was read (i.e. the terminal
+transition arrived between the two reads), `freshBuf.length > bytesRead` and the break is
+skipped; the next iteration reads and yields those bytes normally. When
+`freshBuf.length === bytesRead` the file has not grown since the current iteration's `buf`
+read, so `getRunState` is reading from the same data and the break is safe.
+
+## BUG-161 ✅ FIXED — logFn backpressure and error surfacing incomplete — no drain path, overlay-only error channel
+
+**File:** `src/runtime/ctx/logProgress.ts` — `logFn()`
+**Discovered:** 2026-06-01
+**Severity:** Low — ctx.log write failures not visible outside TUI overlay; callers have no explicit drain point
+
+### Description
+
+BUG-155 added error surfacing via `opts.emitOverlayEvent?.('pi-workflows.agent.log.error', ...)`
+but that channel is optional and unwired in most environments (unit tests, direct process
+spawns without a TUI). Write failures remained invisible in production when no overlay was
+attached. Additionally, `void ledgerLog(...).catch(...)` still left writes in-flight with no
+caller-accessible drain point — unlike `ctx.gate` and `ctx.interrupt` which await their
+ledger writes before resolving.
+
+### Fix
+
+1. Replaced the overlay-only `.catch` with a `pendingWrite` serialisation chain:
+   ```ts
+   let pendingWrite: Promise<void> = Promise.resolve();
+   // inside logFn:
+   const write = ledgerLog(opts.ledger, level, msg, deps.nowIso);
+   pendingWrite = pendingWrite.then(() => write).catch((err: unknown) => {
+     console.error('[pi-workflows] ctx.log ledger write failed:', err);
+   });
+   ```
+   Write failures now always reach `console.error`. Writes are FIFO-serialised through the
+   chain so ordering is preserved.
+2. Added `drainPendingLog(): Promise<void>` to the factory return, resolving when all
+   queued writes have settled.
+3. Exposed `drainPendingLog` from `createRunCtxHost`'s return type and body (`runCtx.ts`).
+4. In `resumeRun.ts`, added `await ctxHost.drainPendingLog().catch(() => undefined)`
+   immediately after `await ledger.flush()` so in-flight log writes are drained before the
+   run's terminal resolve fires.
+
+## BUG-162 ✅ FIXED — createOtelMetricsExporter registers no beforeExit/SIGTERM flush hooks — all metrics silently dropped on short-lived process exit
+
+**File:** `src/runtime/otelMetricsExporter.ts`
+**Severity:** High — metrics (pi.runs.started, token usage, operation duration, etc.) silently discarded for any workflow completing in under 60 s (the default exportIntervalMillis)
+
+### Description
+
+`createOtelExporter` (traces) was fixed by BUG-W07 to register `process.on('beforeExit', forceFlush)` and `process.on('SIGTERM', shutdown→exit)`. `createOtelMetricsExporter` never received the same fix. The `PeriodicExportingMetricReader` defaults to `exportIntervalMillis=60000`; any workflow completing in under 60 s exits before the reader's first scheduled export fires, silently dropping all accumulated counter/histogram values.
+
+### Fix
+
+Mirrored the hooks from `otelExporter.ts` lines 1115–1123 into `createOtelMetricsExporter`, inserted immediately before the `return { enabled: true, … }` block:
+
+```ts
+const onBeforeExit = (): void => {
+  void sdk.provider.forceFlush?.();
+};
+const onSigterm = (): void => {
+  void sdk.provider.shutdown?.().finally(() => process.exit(0));
+};
+process.on("beforeExit", onBeforeExit);
+process.on("SIGTERM", onSigterm);
+```
+
+## BUG-163 ✅ FIXED — WorkflowClient.#runDir bypasses assertSafeRunId when runsHomeOverride is set — path traversal
+
+**File:** `src/client.ts`
+**Severity:** High — path traversal via attacker-controlled runId when `runsHomeOverride` is set
+
+### Description
+
+`#runDir` returned `join(this.#runsHomeOverride, runId)` without calling `assertSafeRunId()`. The else-branch delegated to `runDirFor(runId)` which calls `assertSafeRunId` internally, but the override branch skipped it entirely. A runId of `../../../../etc/passwd` would resolve outside the intended directory. Every caller of `#runDir` (`sendControl`, `getRunState`, `tailEvents`, `resume`) inherited the traversal. The `forkFromCheckpoint` inline `resolveRunDir` closure had the identical pattern.
+
+### Fix
+
+1. Added `assertSafeRunId` to the import from `./util/paths.js` in `client.ts`.
+2. Moved `assertSafeRunId(runId)` to the top of `#runDir` (before the branch), so both the override path and the default path are guarded uniformly.
+3. Updated the `forkFromCheckpoint` `resolveRunDir` closure to call `assertSafeRunId(id)` before joining with `runsHomeOverride`.
+
+## BUG-164 ✅ FIXED — assertSafeMemoryName allows control characters (\n, \r) — prompt injection in defaultCompactSummarize
+
+**File:** `src/runtime/agentMemory.ts`
+**Severity:** Medium — prompt injection via control characters in memory name
+
+### Description
+
+`assertSafeMemoryName` rejected NUL, `/`, `\`, `..`, and leading `.`, but did not reject newlines (`\n`), carriage returns (`\r`), or other ASCII control characters. These are valid Linux directory/file name characters and passed validation unchallenged. In `defaultCompactSummarize` (`ctx/memory.ts`), the name is embedded verbatim as `` `Agent name: ${name}` `` inside an LLM prompt. A name like `"agent\n\nIgnore previous instructions…"` injects arbitrary lines into the prompt, allowing workflow authors who control the `name` parameter to manipulate the compact-memory agent's behavior.
+
+### Fix
+
+Added a control-character check after the leading-dot check in `assertSafeMemoryName`:
+
+```ts
+if (/[\x00-\x1f\x7f]/.test(name)) {
+  throw new InvalidMemoryNameError(name, "contains control character");
+}
+```
+
+This covers the full C0 control range (0x00–0x1F, including `\n` and `\r`) plus DEL (0x7F). The NUL check above it is now redundant but kept for documentation clarity.
+
+---
+
+## BUG-165 ✅ FIXED — `memoryCompact` has no concurrent-call guard — duplicate LLM agents and non-deterministic MEMORY.md
+
+**File:** `src/runtime/ctx/memory.ts`  
+**Severity:** Medium — wasted LLM calls and non-deterministic compaction output under concurrent access
+
+### Description
+
+`memoryCompact` called `compactMemoryFile` without any per-`(scope, name)` in-flight guard.
+If two workflow coroutines concurrently called `ctx.memory.compact('agent', 'user')`:
+
+1. Both read the same original file before either write landed.
+2. Both called `defaultCompactSummarize(name, original)`, each spawning a separate pi sub-agent at LLM cost.
+3. Both queued writes sequentially. The second call's tail-rescue saw `current` (= first summary) did not `startsWith(original)`, so `tail = ''` and it wrote `summarize(original)` again, overwriting the first result.
+
+Two LLM calls wasted, final MEMORY.md non-deterministic.
+
+### Fix
+
+Added a `compactInFlight: Map<string, Promise<RunCtxBridgeResult<...>>>` closure variable
+inside `createMemoryMethods`, keyed by `memoryReadOnlyKey(scope, name)`. Before spawning
+a new compaction, `memoryCompact` checks whether a promise for that key already exists and
+returns it directly if so — both callers await the same promise and receive the same result.
+The map entry is removed in a `finally` block when the work settles, so subsequent calls
+(after the first completes) start a fresh compaction as normal.
+
+---
+
+## BUG-166 ✅ FIXED — `forkFromCheckpoint`: `opts.overrides` not validated for JSON-serializability before seed write
+
+**File:** `src/runtime/forkRun.ts`, `wrappedResolveRunDir` seed block  
+**Severity:** Medium — silent behavioral divergence (functions/Symbols dropped) or unhelpful TypeError (circular refs)
+
+### Description
+
+`wrappedResolveRunDir` appended `JSON.stringify(overridesRecord)` where `overridesRecord.value` was
+`opts.overrides` with no prior serializability guard. Two failure modes:
+
+1. **Silent drop**: `opts.overrides` contains `function` or `Symbol` values — `JSON.stringify` silently
+   omits them, so `ctx.cache.get('__fork_overrides__')` returns a structurally different object
+   (e.g. `{fn:()=>{}}` becomes `{}`) with no error or warning to the caller.
+2. **Unhelpful TypeError**: `opts.overrides` is circular — `JSON.stringify` throws
+   `TypeError: Converting circular structure to JSON` from inside the synchronous seed closure;
+   the outer catch cleans up the run dir and re-throws the raw error with no mention of
+   `opts.overrides` or the callsite.
+
+`checkpointReport.ts` applies `JSON.parse(JSON.stringify(data))` with a descriptive error for the
+identical pattern (BUG-W07 fix); `forkFromCheckpoint` never received the same treatment.
+
+### Fix
+
+Replaced the bare `opts.overrides` assignment with an explicit validation block using a custom
+`JSON.stringify` replacer that throws on `function` or `symbol` values (catching silent drops
+before they happen), wrapped in a `try/catch` that re-throws a descriptive
+`TypeError: forkFromCheckpoint: opts.overrides is not JSON-serializable (...)` for both cases.
+The seed uses `JSON.parse(rawOverrides)` — the round-tripped clone — as the stored value,
+matching the defensive pattern used in `checkpointReport.ts` and `ctx/cache.ts`.
+
+---
+
+## BUG-167 ✅ FIXED — `createOtelExporter` accumulates `beforeExit`/`SIGTERM` listeners — listener leak and redundant shutdowns
+
+**File:** `src/runtime/otelExporter.ts`, `createOtelExporter`  
+**Severity:** Medium — `MaxListenersExceededWarning` in test suites; redundant concurrent provider shutdowns on SIGTERM
+
+### Description
+
+Every call to `createOtelExporter` unconditionally registered two new process-level listeners
+(`process.on('beforeExit', onBeforeExit)` and `process.on('SIGTERM', onSigterm)`) as new closure
+objects. The SDK is globally cached (`_cachedSdk`), so multiple callers sharing the same endpoint
+reuse the same provider — but each call captured independent closure references. The per-handle
+`shutdown()` only removed its own closures; earlier registrations from other handles persisted.
+
+After N calls, N `beforeExit` and N `SIGTERM` listeners were live on the process. When SIGTERM
+fired, all N `onSigterm` closures ran concurrently, each calling `sdk.provider.shutdown()` on the
+same (shared) provider and all N scheduling `process.exit(0)` in `.finally()`. In test suites
+that called `createOtelExporter` per test without resetting process listeners, this triggered
+`MaxListenersExceededWarning` after 10 calls.
+
+### Fix
+
+Replaced the per-call closure approach with three module-level singletons:
+- `_processListenersRegistered: boolean` — guards registration to happen at most once.
+- `_moduleOnBeforeExit` — calls `_cachedSdk?.provider.forceFlush?.()` via the module-level cache ref.
+- `_moduleOnSigterm` — calls `_cachedSdk?.provider.shutdown?.().finally(() => process.exit(0))`.
+
+`_ensureProcessListeners()` registers both listeners on first call and is a no-op on subsequent
+calls. `createOtelExporter` calls `_ensureProcessListeners()` instead of `process.on(...)` directly.
+`shutdown()` deregisters via `process.off(...)` against the stable module-level references and resets
+`_processListenersRegistered`. `_resetOtelSdkCacheForTests()` also deregisters the listeners
+and resets the flag so tests get a clean slate between calls.
+
+## BUG-168 ✅ FIXED — Concurrent `readChunk()` from `loopOnce` and `dispose()` — duplicate ledger line processing, phantom spans, double-incremented metrics
+
+**File:** `src/runtime/otelExporter.ts`, `tailRunLedger`; `src/runtime/otelMetricsExporter.ts`, `tailRunLedgerForMetrics`  
+**Severity:** Medium — duplicate OTel spans / corrupted trace, double-incremented counters, OTel span lifecycle violation
+
+### Description
+
+Both `tailRunLedger` and `tailRunLedgerForMetrics` share the closure variables `pos` and `buffer`
+across two async callers of `readChunk()`. Race: (1) `loopOnce` is suspended inside `await readChunk()`
+at the file-read await; (2) the abort signal fires, `onAbort` calls `void dispose()`; (3) `dispose()`
+sets `stopped = true` then immediately calls `await readChunk()`. Both invocations concurrently read
+the same `pos` value, stat the same file size, allocate the same `len`, issue `fh.read` from the
+same byte offset, advance `pos` to the same value, and process the exact same lines.
+
+Every `feedLedgerEntry` / `feedLedgerEntryToMetrics` call fires twice: spans are started and ended
+twice, `agent_start` creates a duplicate span with no matching end, and counters are incremented
+twice. The second `span.end()` on an already-closed span violates the OTel span lifecycle and
+corrupts the exported trace.
+
+### Fix
+
+Added a promise-chain mutex (`readLock`) in each closure. Each call to `readChunk()` appends to the
+chain and waits for the previous call to finish before running the body (extracted to
+`_readChunkImpl()`). Concurrent callers are serialized — the second caller processes only bytes
+appended after the first caller advanced `pos`, so no line is processed twice.
+
+## BUG-169 ✅ FIXED — gate: orphaned gate_requested when waitForGate throws for non-abort reason
+
+**File:** `src/runtime/ctx/gate.ts`
+**Severity:** Medium
+
+### Description
+
+The `catch` block around `waitForGate` (introduced by BUG-W07 to handle the abort case) only wrote
+`gate_resolved(false)` when `opts.signal?.aborted` was true. If `waitForGate` rejected for any
+other reason — IPC failure, network timeout, or an internal error — the condition was false, the
+`gate_resolved` append was skipped, and the ledger was left with an orphaned `gate_requested` entry
+with no matching `gate_resolved`. Any ledger consumer that expects paired entries would see an
+unresolved gate.
+
+### Fix
+
+Removed the `if (opts.signal?.aborted)` guard. `gate_resolved(false)` is now written
+unconditionally on any throw from the `waitForGate` block, covering abort, IPC failures, network
+timeouts, and all other error paths.
+
+---
+
+## BUG-170 ✅ FIXED — interrupt: orphaned interrupt_requested when signal is pre-aborted
+
+**File:** `src/runtime/ctx/interrupt.ts`
+**Severity:** Medium
+
+### Description
+
+`interruptFn` had no early `opts.signal?.aborted` guard before touching state. When the signal was
+already aborted at call time, `nextInterruptIdx()` still burned a counter slot and
+`ledger.append(interrupt_requested)` still fired. The abort was only detected later at the
+`waitForInterrupt` condition, causing a throw that exited through the outer catch with no
+`interrupt_resolved` written. Result: an orphaned `interrupt_requested` entry with no paired
+resolution, and a wasted `int-N` key. `gate.ts` guarded this with an early return before any
+ledger write; `interrupt.ts` had no equivalent.
+
+### Fix
+
+Added a pre-state-mutation abort guard (step 0) after `parseInterruptOpts` but before
+`nextInterruptIdx()`. When `opts.signal?.aborted` is true at entry, the function returns
+`{ ok: false, error: captureError(signal.reason ?? AbortError) }` immediately — no counter
+increment, no ledger write. Mirrors the identical guard in `gate.ts` lines 44–51.
+
+## BUG-172 ✅ FIXED — timerTable: invokeWrapped rethrows SandboxViolationError from timer callbacks — uncaught exception in event loop
+
+**File:** `src/runtime/timerTable.ts`
+**Severity:** Medium
+
+### Description
+
+In `invokeWrapped()`, the `catch(reconErr)` block (handling failed `rethrowAcrossRealm`
+reconstruction) called `opts.onTimerError?.(violation)` then executed `throw violation`. This throw
+escaped the host arrow wrappers (`() => { invokeWrapped(h, wrapped); }`) passed to
+`setTimeout`/`setInterval`/`setImmediate` — nothing wrapped those callbacks with try/catch. Node.js
+treats such throws as uncaughtExceptions, crashing the process if no handler is registered. For
+`setInterval` the situation was worse: if `onTimerError` did not call `dispose()` (e.g. a test
+sink), the interval kept firing, producing an uncaught exception on every tick. BUG-151 fixed the
+missing `onTimerError` call on the normal path; the exceptional-path `throw` remained.
+
+### Fix
+
+Replaced `throw violation` with `return` in the `catch(reconErr)` block of `invokeWrapped()`.
+`opts.onTimerError` is the correct escalation boundary; rethrowing from an async timer callback
+achieves nothing useful and is process-crashing. The hook is responsible for failing the run.
+
+---
+
+## BUG-171 ✅ FIXED — interrupt: waitForInterrupt rejection mid-wait leaves interrupt_requested orphaned in ledger
+
+**File:** `src/runtime/ctx/interrupt.ts`
+**Severity:** Medium
+
+### Description
+
+When `waitForInterrupt` rejected mid-wait (signal fires after the call started, or IPC error), the
+exception propagated directly to the outer `catch` which returned `{ ok: false }` without writing
+`interrupt_resolved`. The ledger was left with an `interrupt_requested` entry permanently unpaired.
+`gate.ts` already handled this by wrapping `waitForGate` in a dedicated try/catch that writes
+`gate_resolved(approved: false)` before re-throwing; `interrupt.ts` had no equivalent wrapper.
+
+### Fix
+
+Wrapped the step-4 `waitForInterrupt` block in a try/catch. On any throw, writes
+`interrupt_resolved` with `value: null` and `source: "abort"` before re-throwing, ensuring every
+`interrupt_requested` entry is always paired with a resolution regardless of how the wait
+terminates. Also added `"abort"` to the `source` union in `src/types/internal/ledger.d.ts` to
+type the new cleanup entry. Mirrors the gate.ts BUG-169 pattern.
+
+## BUG-172 ✅ FIXED — queueMicrotask has no MAX_OUTSTANDING cap — unlimited microtask scheduling starves event loop
+
+**File:** `src/runtime/timerTable.ts`
+**Severity:** Medium
+
+### Description
+
+BUG-W11's fix added `callbackTable.size >= MAX_OUTSTANDING` guards to `scheduleTimeout`,
+`scheduleInterval`, and `scheduleImmediate`, but `queueMicrotask` was skipped. Microtasks are not
+stored in `callbackTable` and have no cancellable handle. An adversarial sandbox script could call
+`queueMicrotask` in a tight loop — each microtask re-queuing itself — filling the microtask queue
+unboundedly. Because the microtask checkpoint drains to empty before the next event-loop tick, this
+permanently stalls the host event loop: no I/O, no timers, and no AbortSignal callbacks can fire to
+trigger `dispose()`.
+
+### Fix
+
+Added a separate `microtaskCount` counter (not backed by `callbackTable`). `queueMicrotask` now
+gates on `microtaskCount >= MAX_OUTSTANDING` using the same threshold — on breach it calls
+`dispose()` and `opts.onTimerError?.(makeTableLimitError())`. The counter increments before
+scheduling and decrements inside the host microtask wrapper (before the early-exit `disposed`
+check, so the count stays accurate even when the bridge is already disposed). `dispose()` resets
+`microtaskCount = 0` to prevent re-entrant paths from bypassing the guard after teardown. Also
+added `outstandingMicrotasks` to the `stats` getter and `TimerBridge.stats` interface for
+test observability.
+
+## BUG-173 ✅ FIXED — sendControl and resume write durably to terminated-run directories without detecting liveness
+
+**File:** `src/client.ts`
+**Severity:** Medium
+
+### Description
+
+`sendControl` verified liveness with `fsp.access(dir)` (F_OK), which only confirms the run
+directory exists on disk. Terminated run directories persist until GC, so the check passed for
+already-finished runs. After termination, `startCtrlWatcher` tears down the poll timer and
+`fs.watcher` (`runManager.ts:1323`), so `ctrl.jsonl` is no longer monitored. Any command written
+after that point — including `resume()` answers to pending interrupts — was fsynced durably and
+silently discarded. Callers had no way to detect this; `resume()` in particular would return
+successfully while the workflow was already gone.
+
+### Fix
+
+Added a terminal-state guard in `sendControl` immediately after the directory existence check.
+After `fsp.access(dir)` passes, `getRunState(runId)` is called to replay the ledger and derive
+the current state. If the state is in `{"done", "failed", "stopped", "cancelled-pre-run"}`, an
+`Error` is thrown before any write occurs, with a message identifying the run ID and its terminal
+state. Because `resume()` delegates to `sendControl`, it inherits the guard at no extra cost.
+
+## BUG-174 ✅ FIXED — compactMemoryFile: TOCTOU between fs.stat and fs.readFile allows beforeBytes to describe a different inode than original
+
+**File:** `src/runtime/agentMemory.ts`
+**Severity:** Low
+
+### Description
+
+Lines 529–531 captured `beforeBytes` via `fs.stat(target)` and then read `original` via
+`fs.readFile(target, 'utf8')` as two separate awaited calls, both outside the per-directory write
+queue. A concurrent `compactMemoryFile` call (same process or another process) could rename a new
+summary file over `target` between these two awaits. When that happened, `beforeBytes` held the
+old inode's size while `original` contained the new (already-summarised) file's content. The
+rescue logic inside the queue then saw `current.startsWith(original) === false` (summary ≠
+original), set `tail = ''`, and called `summarize(original)` on the already-compacted content,
+producing a summary-of-a-summary and overwriting the concurrent call's result. BUG-154 applied
+the fd-open-then-stat fix to `readMemoryFileWithMeta` but the same TOCTOU was not fixed in
+`compactMemoryFile`.
+
+### Fix
+
+Replaced the separate `fs.stat(target)` + `fs.readFile(target, 'utf8')` calls with a single
+`fs.open(target, 'r')` that returns a `FileHandle`, followed by `fh.stat()` and
+`fh.readFile({ encoding: 'utf8' })` through the same handle (with a `finally` close). Both
+operations now refer to the same inode, eliminating the TOCTOU window. Pattern mirrors the
+BUG-154 fix in `readMemoryFileWithMeta`.
+
+---
+
+## BUG-175 ✅ FIXED — memoStore replay() does not validate value field — corrupt JSONL entries stored with undefined value
+
+### Location
+
+`src/runtime/memoStore.ts` — `replay()` method, guard block near line 288.
+
+### Description
+
+`replay()` validated `key` (string), `writtenAt` (number), and `ttlMs` (number) on each parsed
+JSONL line, but never checked that the `value` field was present. A corrupt or crafted line such
+as `{"key":"k","writtenAt":1,"ttlMs":60000}` (no `value` field) passed all guards and was stored
+via `this.entries.set(r.key, parsed as MemoEntry)`. `get()` then returned the entry with
+`entry.value === undefined`, and `memo_check` returned `{ hit: true, value: undefined }`.
+
+This state is unreachable through normal `set()` calls because `JSON.stringify(undefined)` returns
+`undefined` (not a string), causing `set()` to throw before any write. Only a corrupt JSONL file
+can produce it. Callers that branch on `result.hit` and then use `result.value` receive
+`undefined` unexpectedly.
+
+### Fix
+
+Added `!("value" in r)` to the guard that already checks `key`, `writtenAt`, and `ttlMs`.
+Entries missing the `value` field are now silently skipped like other malformed lines.
+
+## BUG-176 ✅ FIXED — reportFn: parsedData spread to overlay cast as Record<string,unknown> is unsound for primitive data arguments
+
+**File:** `src/runtime/ctx/checkpointReport.ts` — `reportFn`, overlay emit block.
+
+### Description
+
+The overlay event was built with `{ data: parsedData as Record<string, unknown> }`. The
+`as`-cast is TypeScript-only and has no runtime effect. `parsedData` is the result of
+`JSON.parse(JSON.stringify(data))`, which is valid for any JSON-serializable value including
+strings, numbers, and arrays. If a workflow author called `ctx.report('event', 'some string')`
+or `ctx.report('event', [1,2,3])`, the overlay event received `data: 'string'` or
+`data: [1,2,3]` typed as `Record<string,unknown>`. Overlay consumers doing `Object.keys(event.data)`,
+`event.data.someField`, or `Object.entries(event.data)` received character-index entries,
+`undefined`, or array-index entries respectively. The surrounding try/catch swallowed any
+resulting consumer errors silently. The ledger `append` call was unaffected — it always
+stored `parsedData` without casting.
+
+### Fix
+
+Added a runtime plain-object guard before building the overlay payload. `overlayData` is set
+only when `parsedData` is a non-null, non-array object; otherwise it is `undefined` and the
+`data` key is omitted from the overlay event entirely. The `as Record<string,unknown>` cast
+is now only applied after the shape check, making it sound.
+
+---
+
+## BUG-156
+
+**File:** `src/runtime/otelExporter.ts`
+**Severity:** low
+
+### Description
+
+`_moduleOnSigterm` contained `void _cachedSdk?.provider.shutdown?.().finally(() => process.exit(0))`.
+When `sdk.provider.shutdown` is `undefined`, the optional chain `shutdown?.()` short-circuits
+to `undefined`. The immediately-following `.finally(...)` is then called on `undefined`,
+throwing `TypeError: Cannot read properties of undefined (reading 'finally')` synchronously
+inside the SIGTERM handler. This uncaught exception causes the process to exit via
+`uncaughtException` rather than the controlled `process.exit(0)`, skipping the intended
+shutdown path.
+
+### Fix
+
+Added a second `?.` to chain the `.finally` call: `shutdown?.()?.finally(() => process.exit(0))`.
+If `shutdown` is undefined the entire expression short-circuits to `undefined` without
+invoking `.finally`, and the `void` operand silently discards it.
+
+---
+
+## BUG-177 ✅ FIXED — Token histogram records Infinity — > 0 guard passes for Infinity, Number.isFinite guard absent on token counts
+
+**File:** `src/runtime/otelMetricsExporter.ts` — `feedLedgerEntryToMetrics`, `agent_end` case.
+**Severity:** low
+
+### Description
+
+The `agent_end` case guarded token recording with `if (entry.usage.input > 0)` and
+`if (entry.usage.output > 0)`. The `> 0` check correctly rejects `NaN` (`NaN > 0` is
+`false`) but passes for `Infinity` (`Infinity > 0` is `true`). A ledger entry with
+`usage.input = Infinity` would call `inst.tokenUsage.record(Infinity, ...)`. OTel SDK
+behaviour for `Infinity` histogram values is unspecified; most OTLP backends silently
+drop or error on the data point. The sibling `durationMs` check at the same site already
+used `Number.isFinite(entry.durationMs)` correctly — the same guard was simply missing
+from the two token fields.
+
+### Fix
+
+Changed both token guards from `entry.usage.X > 0` to
+`Number.isFinite(entry.usage.X) && entry.usage.X > 0`, matching the pattern already
+used for `durationMs`.
+
+---
+
+## BUG-178 ✅ FIXED — Tailer buffer string accumulation has no size cap — OOM on large or adversarially crafted ledger line
+
+**Files:** `src/runtime/otelExporter.ts` — `_readChunkImpl`; `src/runtime/otelMetricsExporter.ts` — `_readChunkImpl`.
+**Severity:** low
+
+### Description
+
+Both OTel tailers accumulated file bytes into a closure-captured `buffer` string via
+`buffer += buf.toString("utf8")` with no upper bound before scanning for newlines.
+A ledger entry missing a newline terminator (corrupted or adversarially written) caused
+`buffer` to grow to the full file size before any line was emitted, risking Node.js
+heap exhaustion. BUG-W12 applied a `DEFAULT_MAX_LINE_BYTES` (4 MiB) guard to
+`jsonStream.ts`'s `pending` buffer; the same protection was absent from the two OTel
+tailers.
+
+### Fix
+
+Added `MAX_TAILER_BUFFER_BYTES = 4 * 1024 * 1024` (4 MiB) to each file. In
+`_readChunkImpl`, immediately before `buffer += buf.toString("utf8")`, checks
+`if (buffer.length + buf.length > MAX_TAILER_BUFFER_BYTES)`: logs a `warn`, resets
+`buffer = ""`, then continues — allowing the fresh chunk to be appended and scanned
+for complete lines rather than silently losing all future events.
+
+---
+
+## BUG-179 ✅ FIXED — logFn log level not validated at runtime — invalid levels silently stored in ledger
+
+**File:** `src/runtime/ctx/logProgress.ts` — `logFn`.
+**Severity:** low
+
+### Description
+
+The `level` variable was built from `levelArg` with an `as "info" | "warn" | "error"`
+TypeScript cast — a compile-time annotation only. A caller passing `"debug"`,
+`"verbose"`, or any arbitrary string bypassed the type system; the invalid level
+propagated to `ledgerLog` and the OTel exporter. Downstream consumers that enumerate
+exactly the three valid levels (e.g. switch/if chains in ledger readers or alert rules)
+would silently miss those entries.
+
+### Fix
+
+Extracted a module-level `VALID_LOG_LEVELS = new Set(["info", "warn", "error"])` and a
+`coerceLevel(raw)` helper that returns the candidate string when it is a member of the
+set, falling back to `"info"` otherwise. `logFn` now calls `coerceLevel(levelArg)`
+instead of performing the unsafe cast, ensuring only the three valid levels ever reach
+`ledgerLog` and the overlay event.
+
+## BUG-181 ✅ FIXED — pause() missing W2 abort recheck before SM transition; orphan ledger entry when concurrent stop() fires in the gap
+`pause()` performed a single guard (`sm.state !== "running" || ctrl.signal.aborted`) at
+entry, then called `pauseGate.pause()` and proceeded directly to `sm.go("paused")`.
+Because `stop()` is synchronous and not serialised through `withControlLock`, it can
+call `ctrl.abort()` in the window between that guard and the SM transition. If the abort
+fires after the SM transition succeeds (state briefly reaches `paused`), the subsequent
+`ledger.append` records a pause entry for a run that is already stopping — an orphan
+event that misleads trace replay. `resumePaused` already had an analogous W2 recheck
+(`sm.state !== "paused" || ctrl.signal.aborted`) before its SM transition; `pause()` had
+no equivalent.
+
+### Fix
+Added a W2 recheck immediately after `const at = ...` and before `sm.go("paused")`:
+```ts
+if (sm.state !== "running" || ctrl.signal.aborted) {
+  pauseGate.resume();
+  return false;
+}
+```
+If `stop()` has fired `ctrl.abort()` in the gap, the gate is rolled back and `pause()`
+returns `false` cleanly without writing the ledger, preventing the orphan entry.
+
+## BUG-180 ✅ FIXED — renderMermaidSync reads entire ledger.jsonl with no file-size guard — event loop blocked, unbounded allocation on large ledgers
+`renderMermaidSync` called `readFileSync` on `ledger.jsonl` with no size check; for
+large/long-running parallel workflows the synchronous read could block the event loop
+for the entire I/O duration and allocate a proportionally large `entries[]` before any
+entries were discarded by the downstream `MAX_PHASES`/`MAX_AGENTS_PER_PHASE` caps.
+Added a 32 MiB guard via `statSync` before `readFileSync`: if the ledger exceeds the
+limit the function returns a stub Mermaid diagram with a human-readable warning instead
+of blocking on the read. Also added `statSync` to the `node:fs` import.
+
+## BUG-181 ✅ FIXED — tee marker `droppedBytes` undercounts total data loss — only captures triggering chunk
+In `writeTee`, the truncation marker was written with `droppedBytes` equal only to the
+bytes from the chunk that triggered the cap. After `teeTruncated = true`, all subsequent
+chunks were silently discarded in the early-return path with no byte accounting, so a
+forensic reader of the tee file would believe only the chunk-local byte count was lost
+when the actual total could be orders of magnitude higher. Fixed by: (1) renaming the
+marker field to `droppedBytesAtCap` to make the chunk-local scope explicit; (2) splitting
+the early-return on `!tee` vs `teeTruncated` so post-cap chunks accumulate into a new
+`teeDroppedBytes` variable; (3) initializing `teeDroppedBytes` with the triggering chunk's
+drop on first truncation; (4) exposing `teeDroppedBytes(): number` on the `JsonStreamParse`
+interface so callers can retrieve the true total after iteration completes.
+
+## BUG-182 ✅ FIXED — `assertSafeAgentId` imposes no maximum length — agentId > 255 bytes causes OS-level ENAMETOOLONG
+The allowlist regex `^[A-Za-z0-9._-]+$` had no length quantifier and there was no
+explicit length check. An agentId of 300+ characters passed every validation gate but
+triggered ENAMETOOLONG at the OS level when the runtime tried to create
+`agents/<agentId>.jsonl` (Linux NAME_MAX = 255 bytes). Callers received an opaque
+syscall error rather than the descriptive `InvalidAgentIdError` they would get for any
+other invalid input. Added an explicit `agentId.length > 128` check before the regex
+gate that throws `InvalidAgentIdError` with a clear message including the actual length.
+128 characters covers all realistic agentId shapes and leaves headroom well below
+NAME_MAX once the `.jsonl` suffix and any path prefix are added.

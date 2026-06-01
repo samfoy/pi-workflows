@@ -73,6 +73,7 @@ import { sha256 } from "../util/hash.ts";
 type OtelInputMode = "hash" | "excerpt" | "raw";
 
 const OTEL_INPUT_EXCERPT_CHARS = 64;
+const OTEL_INPUT_RAW_MAX_CHARS = 4096;
 
 function otelInputMode(): OtelInputMode {
   const v = process.env["PI_WORKFLOWS_OTEL_INPUT"];
@@ -87,7 +88,10 @@ function inputAttrs(input: string): Record<string, string | number> {
     "pi.workflow.input.length": input.length,
   };
   if (mode === "raw") {
-    out["pi.workflow.input"] = input;
+    out["pi.workflow.input"] =
+      input.length <= OTEL_INPUT_RAW_MAX_CHARS
+        ? input
+        : input.slice(0, OTEL_INPUT_RAW_MAX_CHARS);
   } else if (mode === "excerpt") {
     out["pi.workflow.input.excerpt"] =
       input.length <= OTEL_INPUT_EXCERPT_CHARS
@@ -189,6 +193,23 @@ const TRACER_VERSION = "0.2.0";
 let _cachedSdk: LoadedOtelSdk | null = null;
 let _cachedSdkEndpoint: string | null = null;
 
+// Module-level singleton process listeners — registered at most once across all
+// createOtelExporter calls. Because _cachedSdk is a module global, these
+// closures always reference the live SDK without needing per-call registration.
+let _processListenersRegistered = false;
+const _moduleOnBeforeExit = (): void => {
+  void _cachedSdk?.provider.forceFlush?.();
+};
+const _moduleOnSigterm = (): void => {
+  void _cachedSdk?.provider.shutdown?.()?.finally(() => process.exit(0));
+};
+function _ensureProcessListeners(): void {
+  if (_processListenersRegistered) return;
+  _processListenersRegistered = true;
+  process.on("beforeExit", _moduleOnBeforeExit);
+  process.on("SIGTERM", _moduleOnSigterm);
+}
+
 export async function loadOtelSdk(opts: {
   readonly endpoint: string;
   readonly serviceName?: string;
@@ -277,6 +298,9 @@ export async function loadOtelSdk(opts: {
 
 /** Test seam — clear the SDK cache between tests. */
 export function _resetOtelSdkCacheForTests(): void {
+  process.off("beforeExit", _moduleOnBeforeExit);
+  process.off("SIGTERM", _moduleOnSigterm);
+  _processListenersRegistered = false;
   _cachedSdk = null;
   _cachedSdkEndpoint = null;
 }
@@ -305,6 +329,13 @@ export interface ReplayState {
   workflowName: string | null;
   /** Set once the run has emitted a terminal transition or `result`. */
   rootEnded: boolean;
+  /**
+   * Timestamp of the most-recently processed ledger entry. Used by
+   * {@link endOpenSpans} to cap abandoned span end-times at the last
+   * observed ledger time, preserving the OTel parent-child timing
+   * invariant (child end ≤ parent end).
+   */
+  lastEntryTime: Date | null;
 }
 
 export function createReplayState(): ReplayState {
@@ -317,6 +348,7 @@ export function createReplayState(): ReplayState {
     runId: null,
     workflowName: null,
     rootEnded: false,
+    lastEntryTime: null,
   };
 }
 
@@ -360,12 +392,14 @@ const KIND_INTERNAL = 0;
  * 4 KiB to bound OTLP payload size on chatty workflows.
  */
 const LOG_MESSAGE_MAX_BYTES = 4096;
+/** Maximum bytes allowed in the tailer's partial-line buffer before discarding. Mirrors BUG-W12's cap in jsonStream.ts. */
+const MAX_TAILER_BUFFER_BYTES = 4 * 1024 * 1024; // 4 MiB
 
 /** Clip a string at LOG_MESSAGE_MAX_BYTES, marking truncation. */
 function clipMessage(s: string): string {
   if (typeof s !== "string") return String(s);
-  if (s.length <= LOG_MESSAGE_MAX_BYTES) return s;
-  return s.slice(0, LOG_MESSAGE_MAX_BYTES) + "…[truncated]";
+  if (Buffer.byteLength(s, "utf8") <= LOG_MESSAGE_MAX_BYTES) return s;
+  return Buffer.from(s, "utf8").slice(0, LOG_MESSAGE_MAX_BYTES).toString("utf8") + "…[truncated]";
 }
 
 /**
@@ -422,6 +456,7 @@ export function feedLedgerEntry(
   api: OtelApi,
 ): void {
   const t = entryDate(entry.at);
+  state.lastEntryTime = t;
   const SpanKind = api.SpanKind ?? { INTERNAL: KIND_INTERNAL, CLIENT: 2 };
   const SpanStatusCode = api.SpanStatusCode ?? {
     UNSET: 0,
@@ -766,7 +801,10 @@ export function replayLedgerToSpans(
  */
 export function endOpenSpans(state: ReplayState, api: OtelApi): void {
   const SpanStatusCode = api.SpanStatusCode ?? { ERROR: STATUS_ERROR };
-  const now = new Date();
+  // Use the last ledger-entry timestamp so abandoned child spans don't
+  // get an end time that exceeds their already-closed parent's end time,
+  // which would violate the OTel parent-child timing invariant.
+  const now = state.lastEntryTime ?? new Date();
   for (const [, span] of state.agentSpans) {
     span.setStatus({ code: SpanStatusCode.ERROR, message: "abandoned" });
     span.end(now);
@@ -840,6 +878,8 @@ export function tailRunLedger(opts: TailRunLedgerOptions): TailRunLedgerHandle {
   let resolveDone: () => void;
   const done = new Promise<void>((r) => (resolveDone = r));
   let timer: NodeJS.Timeout | null = null;
+  // Serializes concurrent readChunk() calls (loopOnce vs dispose race).
+  let readLock: Promise<void> = Promise.resolve();
 
   const onAbort = (): void => {
     if (stopped) return;
@@ -854,6 +894,18 @@ export function tailRunLedger(opts: TailRunLedgerOptions): TailRunLedgerHandle {
   }
 
   async function readChunk(): Promise<void> {
+    let unlock!: () => void;
+    const prev = readLock;
+    readLock = new Promise<void>((r) => (unlock = r));
+    await prev;
+    try {
+      await _readChunkImpl();
+    } finally {
+      unlock();
+    }
+  }
+
+  async function _readChunkImpl(): Promise<void> {
     let st: { size: number };
     try {
       st = await fsp.stat(path);
@@ -871,6 +923,10 @@ export function tailRunLedger(opts: TailRunLedgerOptions): TailRunLedgerHandle {
       const buf = Buffer.alloc(len);
       await fh.read(buf, 0, len, pos);
       pos = st.size;
+      if (buffer.length + buf.length > MAX_TAILER_BUFFER_BYTES) {
+        log("warn", `[pi-workflows] otel: tailer buffer exceeded ${MAX_TAILER_BUFFER_BYTES} bytes — discarding partial line`);
+        buffer = "";
+      }
       buffer += buf.toString("utf8");
     } catch (err) {
       log("warn", `[pi-workflows] otel: read ledger failed: ${(err as Error).message}`);
@@ -1094,6 +1150,13 @@ export async function createOtelExporter(
       shutdown: async () => {},
     };
   }
+  // Drain the BatchSpanProcessor before the process exits.  Without these
+  // hooks a short-lived workflow can exit before the processor's 5-second
+  // periodic flush fires, silently dropping every span.
+  // Listeners are registered at module level (singleton) so that multiple
+  // createOtelExporter calls don't accumulate unbounded beforeExit/SIGTERM
+  // registrations on the same provider.
+  _ensureProcessListeners();
   return {
     enabled: true,
     tailRun(runId, signal) {
@@ -1118,6 +1181,9 @@ export async function createOtelExporter(
       await sdk.provider.forceFlush?.();
     },
     async shutdown() {
+      process.off("beforeExit", _moduleOnBeforeExit);
+      process.off("SIGTERM", _moduleOnSigterm);
+      _processListenersRegistered = false;
       await sdk.provider.shutdown?.();
     },
   };

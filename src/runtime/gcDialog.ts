@@ -127,7 +127,7 @@ export async function loadGcCandidates(
         .filter((c) => !safeCandidates.includes(c))
         .map((c) => ({
           runId: c.runId,
-          reason: "non-terminal" as const,
+          reason: "protected-restart-source" as const,
           details: "restartedFrom active run (F4)",
         }))),
     ],
@@ -147,7 +147,7 @@ export async function applyGc(
   opts: GcDialogOpts = {},
 ): Promise<{ deleted: string[]; errors: { runId: string; message: string }[] }> {
   // We already have the candidates — delete each one directly.
-  const { rmSync } = await import("node:fs");
+  const fs = await import("node:fs");
   const deleted: string[] = [];
   const errors: { runId: string; message: string }[] = [];
   for (const c of candidates) {
@@ -158,7 +158,7 @@ export async function applyGc(
       continue;
     }
     try {
-      rmSync(c.runDir, { recursive: true, force: true });
+      await fs.promises.rm(c.runDir, { recursive: true, force: true });
       deleted.push(c.runId);
       opts.log?.("info", `gc: deleted ${c.runId}`);
     } catch (err) {

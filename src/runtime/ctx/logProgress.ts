@@ -13,6 +13,19 @@ import type { RunCtxHostOptions } from "../runCtx.js";
 import { captureError } from "../realmError.js";
 import { log as ledgerLog } from "../ledger.js";
 
+const VALID_LOG_LEVELS = new Set<string>(["info", "warn", "error"]);
+
+function coerceLevel(raw: unknown): "info" | "warn" | "error" {
+  const candidate =
+    typeof raw === "string"
+      ? raw
+      : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        ((raw as any)?.level ?? "info");
+  return VALID_LOG_LEVELS.has(candidate)
+    ? (candidate as "info" | "warn" | "error")
+    : "info";
+}
+
 export interface LogProgressDeps {
   /** Sandbox-side callback that sets the host-realm `finishPrompt`. */
   setFinishPrompt(prompt: string): void;
@@ -27,18 +40,18 @@ export function createLogProgressMethods(
   logFn: (message: unknown, levelArg: unknown) => RunCtxBridgeResult<null>;
   finishCallback: (prompt: unknown) => RunCtxBridgeResult<null>;
   progressFn: (pct: unknown, message?: unknown) => RunCtxBridgeResult<null>;
+  /** Await all in-flight ledger writes queued by `logFn` calls. */
+  drainPendingLog: () => Promise<void>;
 } {
+  // Serialises in-flight ledger writes; awaited by `drainPendingLog`.
+  let pendingWrite: Promise<void> = Promise.resolve();
+
   function logFn(
     message: unknown,
     levelArg: unknown,
   ): RunCtxBridgeResult<null> {
     try {
-      const level: "info" | "warn" | "error" = (
-        (typeof levelArg === "string"
-          ? levelArg
-          : // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            (levelArg as any)?.level) ?? "info"
-      ) as "info" | "warn" | "error";
+      const level = coerceLevel(levelArg);
       const msg =
         typeof message === "string"
           ? message
@@ -56,9 +69,14 @@ export function createLogProgressMethods(
       // confusing. The `log` entry is the canonical one; readers that
       // want agent attribution can correlate via the surrounding
       // `agent_start`/`agent_end` events.
-      void ledgerLog(opts.ledger, level, msg, deps.nowIso).catch(
-        () => undefined,
-      );
+      // Writes are serialised through `pendingWrite` to give callers a
+      // drain point (`drainPendingLog`). Errors are surfaced via
+      // console.error so they are never silently discarded, and also
+      // forwarded to the overlay when it is wired.
+      const write = ledgerLog(opts.ledger, level, msg, deps.nowIso);
+      pendingWrite = pendingWrite.then(() => write).catch((err: unknown) => {
+        console.error("[pi-workflows] ctx.log ledger write failed:", err);
+      });
       // Overlay event: lets the TUI agent-detail view show ctx.log lines.
       try {
         opts.emitOverlayEvent?.("pi-workflows.agent.log", {
@@ -95,7 +113,7 @@ export function createLogProgressMethods(
     message?: unknown,
   ): RunCtxBridgeResult<null> {
     try {
-      if (typeof pct !== "number" || pct < 0 || pct > 100) {
+      if (typeof pct !== "number" || !isFinite(pct) || pct < 0 || pct > 100) {
         throw new TypeError(
           `ctx.progress: pct must be a number in [0, 100], got ${JSON.stringify(pct)}`,
         );
@@ -117,5 +135,9 @@ export function createLogProgressMethods(
     }
   }
 
-  return { logFn, finishCallback, progressFn };
+  function drainPendingLog(): Promise<void> {
+    return pendingWrite;
+  }
+
+  return { logFn, finishCallback, progressFn, drainPendingLog };
 }

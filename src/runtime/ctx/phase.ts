@@ -756,9 +756,9 @@ export function createPhaseMethods(
           if (
             memoryRead !== null &&
             memoryRead.truncated &&
-            !state.memoryOversizeWarned.has(memoryName)
+            !state.memoryOversizeWarned.has(memoryReadOnlyKey(memoryScope, memoryName))
           ) {
-            state.memoryOversizeWarned.add(memoryName);
+            state.memoryOversizeWarned.add(memoryReadOnlyKey(memoryScope, memoryName));
             void opts.ledger
               .append({
                 type: "log",

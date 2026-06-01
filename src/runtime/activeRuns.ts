@@ -340,7 +340,20 @@ export class ActiveRunsRegistry {
         const prior = this.#summaries.get(d.runId);
         // BUG-071: guard against duplicate/out-of-order entries overwriting
         // a correct terminal summary, consistent with the started/transitioned cases.
-        if (prior && isTerminalState(prior.state)) return;
+        // Exception: if run.transitioned already set the terminal state, still merge
+        // endedAt/durationMs — run.ended is the sole carrier of those fields.
+        if (prior && isTerminalState(prior.state)) {
+          const updates: Partial<RunSummary> = {
+            ...(d.endedAt !== undefined ? { endedAt: d.endedAt } : {}),
+            ...(d.durationMs !== undefined ? { durationMs: d.durationMs } : {}),
+          };
+          if (Object.keys(updates).length > 0) {
+            this.#summaries.set(d.runId, { ...prior, ...updates });
+            this.#handles.delete(d.runId);
+            this.#notify();
+          }
+          return;
+        }
         const next: RunSummary = {
           runId: d.runId,
           workflowName: d.workflowName ?? prior?.workflowName ?? "<unknown>",

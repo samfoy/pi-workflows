@@ -32,7 +32,8 @@
  * exact same staleness rules.
  */
 
-import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, fsyncSync, openSync, promises as fs, readdirSync, readFileSync, statSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { join } from "node:path";
 
@@ -260,9 +261,13 @@ interface ManifestPartial {
   readonly parentStartTime?: string;
 }
 
+/** Maximum manifest.json size accepted before the read is aborted (1 MiB). */
+const MANIFEST_MAX_BYTES = 1 * 1024 * 1024;
+
 function readManifest(path: string): ManifestPartial | null {
   if (!existsSync(path)) return null;
   try {
+    if (statSync(path).size > MANIFEST_MAX_BYTES) return null;
     const raw = readFileSync(path, "utf-8");
     if (raw.trim().length === 0) return null;
     const parsed = JSON.parse(raw) as unknown;
@@ -386,6 +391,41 @@ export async function sweepCrashedRuns(
   return result;
 }
 
+/**
+ * Atomically merge `crashSweepAt` into the manifest at `manifPath`.
+ * Uses temp-file + rename for atomicity (same pattern as manifestWriter.ts).
+ */
+async function writeCrashSweepAt(
+  manifPath: string,
+  nowIso: string,
+): Promise<void> {
+  let existing: Record<string, unknown> = {};
+  try {
+    const buf = await fs.readFile(manifPath, "utf8");
+    if (buf.trim().length > 0) {
+      const parsed = JSON.parse(buf) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        existing = parsed as Record<string, unknown>;
+      }
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT") {
+      // Corrupt manifest — overwrite with merged fields.
+    }
+  }
+  const merged = { ...existing, crashSweepAt: nowIso };
+  const dir = manifPath.replace(/\/[^/]+$/, "");
+  const tmpName = join(
+    dir,
+    `manifest.json.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`,
+  );
+  await fs.writeFile(tmpName, JSON.stringify(merged, null, 2) + "\n", "utf8");
+  const fd = openSync(tmpName, "r+");
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+  await fs.rename(tmpName, manifPath);
+}
+
 async function sweepOne(args: {
   runId: string;
   runDir: string;
@@ -445,7 +485,18 @@ async function sweepOne(args: {
     return;
   }
 
-  // Parent is dead. Append a `transition <finalState> → failed` entry
+  // Parent is dead. Re-read the ledger immediately before writing to guard
+  // against a TOCTOU race: the workflow may have completed legitimately
+  // between the first read above and this point.  If the state is now
+  // terminal, skip the write so we don't append a stale from→failed entry
+  // on top of a legitimate done/cancelled/etc transition.
+  const { finalState: currentState } = await reader.read();
+  if (TERMINAL_STATES.has(currentState)) {
+    args.result.skippedTerminal.push(args.runId);
+    return;
+  }
+
+  // Parent is dead. Append a `transition <currentState> → failed` entry
   // with reason: parent-crash.
   const writer = new LedgerWriter({
     runId: args.runId,
@@ -454,16 +505,18 @@ async function sweepOne(args: {
   const entry: LedgerEntry = {
     type: "transition",
     at: args.nowIso(),
-    from: finalState,
+    from: currentState,
     to: "failed",
     reason: "parent-crash",
   };
   await writer.append(entry);
   await writer.flush();
-  args.result.transitioned.push({ runId: args.runId, fromState: finalState });
+  // Step 3: update manifest's crashSweepAt field (spec § module header line 18).
+  await writeCrashSweepAt(manifPath, entry.at);
+  args.result.transitioned.push({ runId: args.runId, fromState: currentState });
   args.log?.("warn", `sweep: ${args.runId} transitioned to failed: parent-crash`, {
     runId: args.runId,
-    fromState: finalState,
+    fromState: currentState,
     parentPid,
   });
 }

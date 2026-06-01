@@ -22,19 +22,26 @@ const DEFAULT_MEMO_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
 /**
  * Parse `ctx.memo.{check,set}` opts: scope ("global" | "project") and
- * ttl (positive number; defaults to 24h). Tolerates missing/invalid
- * input and silently falls back to the defaults — the worst case is
- * a longer-lived entry, never a thrown error.
+ * ttl (positive number; defaults to 24h). Tolerates missing/undefined
+ * opts and missing/undefined scope (both default to "global"), but
+ * throws TypeError for any explicit scope value that is neither
+ * "global" nor "project".
  */
 function parseMemoOpts(
   optsArg: unknown,
 ): { scope: "global" | "project"; ttlMs: number } {
-  const scope: "global" | "project" =
-    optsArg !== null &&
-    typeof optsArg === "object" &&
-    (optsArg as Record<string, unknown>).scope === "project"
-      ? "project"
-      : "global";
+  let scope: "global" | "project" = "global";
+  if (optsArg !== null && typeof optsArg === "object") {
+    const rawScope = (optsArg as Record<string, unknown>).scope;
+    if (rawScope !== undefined) {
+      if (rawScope !== "global" && rawScope !== "project") {
+        throw new TypeError(
+          `ctx.memo: invalid scope "${String(rawScope)}" — must be "global" or "project"`,
+        );
+      }
+      scope = rawScope;
+    }
+  }
   let ttlMs = DEFAULT_MEMO_TTL_MS;
   if (
     optsArg !== null &&
@@ -70,12 +77,17 @@ export function createMemoMethods(opts: RunCtxHostOptions): {
         scope === "project" ? opts.cwd : undefined,
       );
       const keyHash = sha256(key as string);
-      void ttlMs; // checked at set-time; check here is informational only
       if (!store.has(keyHash)) {
         return { ok: true, value: { hit: false } };
       }
       const entry = store.get(keyHash);
       if (entry === null) {
+        return { ok: true, value: { hit: false } };
+      }
+      // Apply caller-supplied TTL as a maximum-age gate at check-time.
+      // This allows stricter freshness requirements than the TTL baked in
+      // at set-time (e.g. set with default 24h but checked with ttl: 3600000).
+      if (Date.now() - entry.writtenAt > ttlMs) {
         return { ok: true, value: { hit: false } };
       }
       return { ok: true, value: { hit: true, value: entry.value } };

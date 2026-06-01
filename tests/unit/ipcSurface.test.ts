@@ -150,12 +150,12 @@ describe("WorkflowClient.listActiveRuns", () => {
 describe("WorkflowClient.getRunState", () => {
   it("returns null for unknown run ID", async () => {
     const client = new WorkflowClient({ runsHome: runsDir });
-    const state = await client.getRunState("wf-nonexistent");
+    const state = await client.getRunState("wf-7945bc2d6e4f");
     assert.equal(state, null);
   });
 
   it("reads state from ledger.jsonl", async () => {
-    const runId = "wf-test01";
+    const runId = "wf-678e82d907d3";
     const dir = makeRunDir(runId);
     const writer = new LedgerWriter({
       runId,
@@ -183,7 +183,7 @@ describe("WorkflowClient.getRunState", () => {
   });
 
   it("extracts phases and agent counts", async () => {
-    const runId = "wf-phases01";
+    const runId = "wf-903f28128206";
     const dir = makeRunDir(runId);
     const writer = new LedgerWriter({
       runId,
@@ -215,7 +215,7 @@ describe("WorkflowClient.getRunState", () => {
 
 describe("WorkflowClient.sendControl", () => {
   it("writes a valid JSON line to ctrl.jsonl", async () => {
-    const runId = "wf-ctrl01";
+    const runId = "wf-c968fe9efce4";
     makeRunDir(runId);
     const client = new WorkflowClient({ runsHome: runsDir });
     await client.sendControl(runId, { type: "pause" });
@@ -228,7 +228,7 @@ describe("WorkflowClient.sendControl", () => {
   });
 
   it("appends multiple commands as separate lines", async () => {
-    const runId = "wf-ctrl02";
+    const runId = "wf-62414fbc19b6";
     makeRunDir(runId);
     const client = new WorkflowClient({ runsHome: runsDir });
     await client.sendControl(runId, { type: "pause" });
@@ -249,7 +249,7 @@ describe("WorkflowClient.sendControl", () => {
   });
 
   it("creates run directory if missing", async () => {
-    const runId = "wf-ctrl03";
+    const runId = "wf-a4f63476940b";
     // Don't call makeRunDir — sendControl should create it
     const client = new WorkflowClient({ runsHome: runsDir });
     await assert.doesNotReject(() => client.sendControl(runId, { type: "stop" }));
@@ -260,7 +260,7 @@ describe("WorkflowClient.sendControl", () => {
 
 describe("WorkflowClient.tailEvents", () => {
   it("yields entries from an existing ledger and stops at terminal state", async () => {
-    const runId = "wf-tail01";
+    const runId = "wf-1cb1667458ad";
     const dir = makeRunDir(runId);
     const writer = new LedgerWriter({
       runId,
@@ -297,7 +297,7 @@ describe("WorkflowClient.tailEvents", () => {
   });
 
   it("yields appendEntry events written to the ledger", async () => {
-    const runId = "wf-tail02";
+    const runId = "wf-cfbb5c782916";
     const dir = makeRunDir(runId);
     // Manually write an appendEntry entry (simulating what bindRegistryToFeed does)
     const ledgerFile = join(dir, "ledger.jsonl");

@@ -98,6 +98,9 @@ export function assertSafeMemoryName(
   if (name.startsWith(".")) {
     throw new InvalidMemoryNameError(name, "starts with '.' (hidden file)");
   }
+  if (/[\x00-\x1f\x7f]/.test(name)) {
+    throw new InvalidMemoryNameError(name, "contains control character");
+  }
 }
 
 export interface ResolveMemoryDirOpts {
@@ -183,19 +186,17 @@ export async function readMemoryFileWithMeta(
 ): Promise<ReadMemoryFileResult | null> {
   const p = join(dir, MEMORY_FILE_NAME);
   let fh: import("node:fs/promises").FileHandle | undefined;
-  let totalBytes = 0;
-  try {
-    const st = await fs.stat(p);
-    totalBytes = st.size;
-  } catch {
-    return null;
-  }
   try {
     fh = await fs.open(p, "r");
   } catch {
     return null;
   }
   try {
+    // Stat the open fd — not the path — so totalBytes and the read refer to
+    // the same inode. A concurrent compactMemoryFile rename between a
+    // path-stat and fs.open would otherwise produce a spurious truncated flag.
+    const st = await fh.stat();
+    const totalBytes = st.size;
     const buf = Buffer.alloc(MEMORY_READ_CAP_BYTES);
     const { bytesRead } = await fh.read(
       buf,
@@ -222,6 +223,32 @@ export async function readMemoryFileWithMeta(
   }
 }
 
+// ─── Per-directory write queue ─────────────────────────────────────────────
+//
+// Serializes appendMemoryUpdate and the write phase of compactMemoryFile so
+// a slow summarize() call cannot silently clobber concurrent appends.
+// Keyed by the absolute directory path so distinct memory dirs never block
+// each other.
+const writeQueues = new Map<string, Promise<void>>();
+
+/**
+ * Enqueue `task` for `dir`, serialized behind any previously queued write
+ * for the same directory. Errors thrown by `task` are propagated to the
+ * caller but do **not** stall the queue — subsequent tasks continue to run.
+ */
+function enqueueWrite(dir: string, task: () => Promise<void>): Promise<void> {
+  const prev = writeQueues.get(dir) ?? Promise.resolve();
+  // chain: always run task regardless of whether prev resolved or rejected.
+  const next = prev.catch(() => {}).then(task);
+  // Store a never-rejecting tail so future enqueues don't inherit our error.
+  const chainable = next.catch(() => {});
+  writeQueues.set(dir, chainable);
+  chainable.then(() => {
+    if (writeQueues.get(dir) === chainable) writeQueues.delete(dir);
+  });
+  return next; // caller gets the real promise (may reject).
+}
+
 /**
  * Append a memory-update payload to `<dir>/MEMORY.md`. Creates the
  * parent directory on demand. Empty / non-string `text` is a no-op
@@ -233,6 +260,9 @@ export async function readMemoryFileWithMeta(
  *     existing tail isn't already a newline (defensive — keeps
  *     consecutive updates from running together)
  *   - guarantee a trailing newline on the appended text
+ *
+ * The stat + tail-read + append sequence runs inside the per-directory
+ * write queue so it cannot interleave with compactMemoryFile's rename.
  */
 export async function appendMemoryUpdate(
   dir: string,
@@ -240,28 +270,40 @@ export async function appendMemoryUpdate(
 ): Promise<void> {
   if (typeof text !== "string" || text.length === 0) return;
   await fs.mkdir(dir, { recursive: true });
-  const p = join(dir, MEMORY_FILE_NAME);
-  // Decide whether to prepend a separator newline.
-  let needsLeadingNewline = false;
-  try {
-    const stat = await fs.stat(p);
-    if (stat.size > 0) {
-      const fh = await fs.open(p, "r");
-      try {
-        const tailBuf = Buffer.alloc(1);
-        await fh.read(tailBuf, 0, 1, Math.max(0, stat.size - 1));
-        if (tailBuf.toString("utf8") !== "\n") needsLeadingNewline = true;
-      } finally {
-        await fh.close();
+  await enqueueWrite(dir, async () => {
+    const p = join(dir, MEMORY_FILE_NAME);
+    // Decide whether to prepend a separator newline.
+    let needsLeadingNewline = false;
+    try {
+      const stat = await fs.stat(p);
+      if (stat.size > 0) {
+        const fh = await fs.open(p, "r");
+        try {
+          const tailBuf = Buffer.alloc(1);
+          await fh.read(tailBuf, 0, 1, Math.max(0, stat.size - 1));
+          if (tailBuf.toString("utf8") !== "\n") needsLeadingNewline = true;
+        } finally {
+          await fh.close();
+        }
       }
+    } catch {
+      /* file absent — no separator needed */
     }
-  } catch {
-    /* file absent — no separator needed */
-  }
-  const payload =
-    (needsLeadingNewline ? "\n" : "") +
-    (text.endsWith("\n") ? text : text + "\n");
-  await fs.appendFile(p, payload, "utf8");
+    const payload =
+      (needsLeadingNewline ? "\n" : "") +
+      (text.endsWith("\n") ? text : text + "\n");
+    // Open with 'a' (append) then fsync before closing so the OS page-cache
+    // is flushed to durable storage.  A plain fs.appendFile() returns as
+    // soon as the kernel accepts the write, leaving the data at risk of
+    // loss if the process crashes before the OS flushes its buffer.
+    const fh = await fs.open(p, "a");
+    try {
+      await fh.writeFile(payload, "utf8");
+      await fh.datasync();
+    } finally {
+      await fh.close();
+    }
+  });
 }
 
 /**
@@ -487,9 +529,21 @@ export async function compactMemoryFile(
   let original: string;
   let beforeBytes: number;
   try {
-    const st = await fs.stat(target);
-    beforeBytes = st.size;
-    original = await fs.readFile(target, "utf8");
+    // Open the fd first and stat+read through it so both operations refer to
+    // the same inode.  A concurrent compactMemoryFile rename between a
+    // path-stat and fs.readFile would otherwise let beforeBytes describe the
+    // old file while original contains the already-compacted replacement,
+    // causing the queue's rescue logic to summarize already-summarized content
+    // (summary-of-a-summary).  Same fix as BUG-154 applied to
+    // readMemoryFileWithMeta.
+    const fh = await fs.open(target, "r");
+    try {
+      const st = await fh.stat();
+      beforeBytes = st.size;
+      original = await fh.readFile({ encoding: "utf8" });
+    } finally {
+      await fh.close();
+    }
   } catch (e) {
     throw new CompactionError(
       `compactMemoryFile: source ${target} unreadable: ${(e as Error).message}`,
@@ -510,32 +564,60 @@ export async function compactMemoryFile(
       `compactMemoryFile: summarize hook must return a string (got ${typeof summarized})`,
     );
   }
-  // Guarantee a trailing newline so future appends keep their separator.
-  const finalContent = summarized.endsWith("\n")
-    ? summarized
-    : summarized + "\n";
-  const tmp = join(
-    opts.dir,
-    `${MEMORY_FILE_NAME}.tmp-${process.pid}-${Date.now()}-${randomBytes(
-      4,
-    ).toString("hex")}`,
-  );
-  try {
-    await fs.writeFile(tmp, finalContent, "utf8");
-    await fs.rename(tmp, target);
-  } catch (e) {
-    // Best-effort cleanup of the tmp file; ignore failure.
+  // Enqueue the write so it cannot race with concurrent appendMemoryUpdate
+  // calls.  Inside the queue we re-read the file to rescue any appends that
+  // arrived while summarize() was running (which can take tens of seconds),
+  // then write summary + rescued tail atomically.
+  let afterBytes = 0;
+  await enqueueWrite(opts.dir, async () => {
+    // Rescue appends made during the slow summarize() call.
+    let tail = "";
     try {
-      await fs.unlink(tmp);
+      const current = await fs.readFile(target, "utf8");
+      // If the file still starts with what we originally read, the suffix is
+      // new content written by concurrent appends — preserve it after the
+      // summary so nothing is silently lost.
+      if (current.startsWith(original) && current.length > original.length) {
+        tail = current.slice(original.length);
+      }
     } catch {
-      /* ignore */
+      /* file may have been removed — write summary only */
     }
-    throw new CompactionError(
-      `compactMemoryFile: atomic write failed: ${(e as Error).message}`,
-      e,
+    // Guarantee a trailing newline so future appends keep their separator.
+    const base = summarized.endsWith("\n") ? summarized : summarized + "\n";
+    const finalContent = tail ? base + tail : base;
+    const tmp = join(
+      opts.dir,
+      `${MEMORY_FILE_NAME}.tmp-${process.pid}-${Date.now()}-${randomBytes(
+        4,
+      ).toString("hex")}`,
     );
-  }
-  const afterBytes = Buffer.byteLength(finalContent, "utf8");
+    try {
+      await fs.writeFile(tmp, finalContent, "utf8");
+      // fsync the tmp file before rename so content is durable on crash.
+      // rename is POSIX-atomic but the pages may still be in the OS cache;
+      // without fsync a crash after rename can leave MEMORY.md corrupt/empty.
+      const fd = await fs.open(tmp, "r");
+      try {
+        await fd.sync();
+      } finally {
+        await fd.close();
+      }
+      await fs.rename(tmp, target);
+      afterBytes = Buffer.byteLength(finalContent, "utf8");
+    } catch (e) {
+      // Best-effort cleanup of the tmp file; ignore failure.
+      try {
+        await fs.unlink(tmp);
+      } catch {
+        /* ignore */
+      }
+      throw new CompactionError(
+        `compactMemoryFile: atomic write failed: ${(e as Error).message}`,
+        e,
+      );
+    }
+  });
   return {
     beforeBytes,
     afterBytes,

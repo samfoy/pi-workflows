@@ -961,15 +961,15 @@ export async function startWorkflowRun(
         const changed = pauseGate.pause();
         if (!changed) return false;
         const at = (opts.nowIso ?? (() => new Date().toISOString()))();
-        // Order: ledger `pause` entry first (so a TUI tail observes
-        // the pause before the transition), then `running → paused`
-        // transition. Both writes go through the same writeQueue so
-        // ordering is preserved across fsyncs.
-        await ledger.append(
-          reason !== undefined
-            ? { type: "pause", at, reason }
-            : { type: "pause", at },
-        );
+        // W2: re-check state and abort flag before the SM transition.
+        // stop() calls ctrl.abort() synchronously and is not serialised
+        // through withControlLock, so the signal can fire in the window
+        // between the W1 guard above and here — mirrors the analogous
+        // guard in resumePaused.
+        if (sm.state !== "running" || ctrl.signal.aborted) {
+          pauseGate.resume();
+          return false;
+        }
         try {
           await sm.go("paused");
         } catch {
@@ -979,32 +979,26 @@ export async function startWorkflowRun(
           pauseGate.resume();
           return false;
         }
+        // Ledger write happens after the SM transition is confirmed so
+        // a replay never sees a pause entry without a corresponding
+        // running→paused transition.
+        await ledger.append(
+          reason !== undefined
+            ? { type: "pause", at, reason }
+            : { type: "pause", at },
+        );
         return true;
       }),
     resumePaused: (reason?: string) =>
       withControlLock(async () => {
         if (sm.state !== "paused") return false;
         const at = (opts.nowIso ?? (() => new Date().toISOString()))();
-        await ledger.append(
-          reason !== undefined
-            ? { type: "resume", at, reason }
-            : { type: "resume", at },
-        );
-        // slice_14_concerns W2: re-check `sm.state === "paused"` AND
-        // `ctrl.signal.aborted` AFTER ledger.append. A concurrent
-        // `stop()` / `cancel()` flips `aborted` synchronously even
-        // though the corresponding sm.go("stopped") is queued behind
-        // our resume entry on the ledger writeQueue. Without this
-        // recheck we'd transition paused→running for a doomed run.
+        // Re-check state AND abort flag before writing ledger or
+        // transitioning. A concurrent stop()/cancel() flips `aborted`
+        // synchronously; writing the resume entry before this check
+        // would orphan it if the re-check fails.
         if (sm.state !== "paused" || ctrl.signal.aborted) {
-          await ledger
-            .append({
-              type: "log",
-              at: (opts.nowIso ?? (() => new Date().toISOString()))(),
-              level: "warn",
-              message: `resumePaused aborted: state=${sm.state} aborted=${ctrl.signal.aborted} during ledger append`,
-            })
-            .catch(() => undefined);
+          pauseGate.resume();
           return false;
         }
         // slice_12_concerns B1: this is the dedicated `paused →
@@ -1015,10 +1009,18 @@ export async function startWorkflowRun(
         try {
           await sm.go("running");
         } catch {
-          // Race: state already advanced. Gate not yet released; leave
-          // it closed and absorb — caller sees `false`.
+          // Race: state already advanced. Unblock any queued waiters
+          // before returning — mirrors the rollback in pause().
+          pauseGate.resume();
           return false;
         }
+        // Ledger write after SM transition is confirmed — ensures no
+        // orphaned resume entry if the transition fails.
+        await ledger.append(
+          reason !== undefined
+            ? { type: "resume", at, reason }
+            : { type: "resume", at },
+        );
         // Release the gate only after the state transition is confirmed.
         // This ensures no concurrent observer can see the gate open
         // while sm.state is still "paused".
@@ -1198,7 +1200,6 @@ export function startCtrlWatcher(
   opts: StartCtrlWatcherOpts = {},
 ): void {
   const ctrlFile = join(runDirAbs, "ctrl.jsonl");
-  const archivedFile = ctrlFile + ".archived";
   const watchFn = opts.watchFn ?? fsWatch;
   const log = opts.log ?? (() => {});
   const rotateBytes = opts.rotateBytes ?? CTRL_ROTATE_BYTES;
@@ -1208,16 +1209,56 @@ export function startCtrlWatcher(
   let lastSeenSize = -1;
   let warnedFallback = false;
 
+  function dispatchLines(data: string): void {
+    for (const rawLine of data.split("\n")) {
+      const line = rawLine.trim();
+      if (!line) continue;
+      let cmd: { type: string; reason?: string; value?: unknown; key?: string } | null = null;
+      try {
+        cmd = JSON.parse(line) as { type: string; reason?: string; value?: unknown; key?: string };
+      } catch { /* malformed JSON — skip */ }
+      if (!cmd || typeof cmd.type !== "string") continue;
+      const reason = typeof cmd.reason === "string" ? cmd.reason : "ctrl-ipc";
+      if (cmd.type === "pause") {
+        void run.pause(reason).catch(() => undefined);
+      } else if (cmd.type === "resume") {
+        void run.resumePaused(reason).catch(() => undefined);
+      } else if (cmd.type === "stop") {
+        try { run.stop(reason); } catch { /* idempotent */ }
+      } else if (cmd.type === "resume-interrupt") {
+        // ZONE_HITL: deliver supervisor-injected answer to the matching
+        // pending ctx.interrupt(...) call. Mismatches are silent — the
+        // supervisor doesn't get a synchronous error from a fire-and-
+        // forget ctrl line; the resulting interrupt_resolved entry is
+        // the durable receipt.
+        try {
+          const targetKey = typeof cmd.key === "string" ? cmd.key : undefined;
+          run.respondInterrupt(cmd.value, targetKey);
+        } catch { /* respond is sync + idempotent; defensive */ }
+      }
+    }
+  }
+
   function maybeRotate(): void {
     // Only rotate if we've actually read past the threshold; this
     // avoids rotating during a single huge append where we haven't
     // caught up yet.
     if (bytesRead < rotateBytes) return;
     try {
+      const priorBytesRead = bytesRead;
+      const archivedFile = ctrlFile + ".archived." + Date.now();
       renameSync(ctrlFile, archivedFile);
+      // Drain any commands appended between our readFileSync and the
+      // rename: they landed in the archived file but were not in buf.
+      try {
+        const archived = readFileSync(archivedFile);
+        if (archived.length > priorBytesRead) {
+          dispatchLines(archived.slice(priorBytesRead).toString("utf8"));
+        }
+      } catch { /* best-effort — archived read failure is non-fatal */ }
       bytesRead = 0;
       lastSeenSize = -1;
-      log("info", `ctrl.jsonl: rotated to ctrl.jsonl.archived (>= ${rotateBytes} bytes)`);
+      log("info", `ctrl.jsonl: rotated to ${archivedFile} (>= ${rotateBytes} bytes)`);
     } catch {
       /* best-effort — rename can fail on read-only FS or if file
          was already removed by another process. Reset offset so
@@ -1248,33 +1289,7 @@ export function startCtrlWatcher(
     if (buf.length === bytesRead) return;
     const newData = buf.slice(bytesRead).toString("utf8");
     bytesRead = buf.length;
-    for (const rawLine of newData.split("\n")) {
-      const line = rawLine.trim();
-      if (!line) continue;
-      let cmd: { type: string; reason?: string; value?: unknown; key?: string } | null = null;
-      try {
-        cmd = JSON.parse(line) as { type: string; reason?: string; value?: unknown; key?: string };
-      } catch { /* malformed JSON — skip */ }
-      if (!cmd || typeof cmd.type !== "string") continue;
-      const reason = typeof cmd.reason === "string" ? cmd.reason : "ctrl-ipc";
-      if (cmd.type === "pause") {
-        void run.pause(reason).catch(() => undefined);
-      } else if (cmd.type === "resume") {
-        void run.resumePaused(reason).catch(() => undefined);
-      } else if (cmd.type === "stop") {
-        try { run.stop(reason); } catch { /* idempotent */ }
-      } else if (cmd.type === "resume-interrupt") {
-        // ZONE_HITL: deliver supervisor-injected answer to the matching
-        // pending ctx.interrupt(...) call. Mismatches are silent — the
-        // supervisor doesn't get a synchronous error from a fire-and-
-        // forget ctrl line; the resulting interrupt_resolved entry is
-        // the durable receipt.
-        try {
-          const targetKey = typeof cmd.key === "string" ? cmd.key : undefined;
-          run.respondInterrupt(cmd.value, targetKey);
-        } catch { /* respond is sync + idempotent; defensive */ }
-      }
-    }
+    dispatchLines(newData);
     maybeRotate();
   }
 

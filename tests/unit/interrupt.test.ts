@@ -508,7 +508,7 @@ function makeFakeRun(): FakeRun {
 
 test("WorkflowClient.resume: writes resume-interrupt ctrl line picked up by watcher", async () => {
   const runsHome = mkdtempSync(join(tmpdir(), "pi-wf-resume-"));
-  const runId = "wf-resume01";
+  const runId = "wf-8dc3434a5f73";
   const dir = join(runsHome, runId);
   const fr = makeFakeRun();
   // The watcher reads ctrl.jsonl in the run dir.
@@ -540,7 +540,7 @@ test("WorkflowClient.resume: writes resume-interrupt ctrl line picked up by watc
 
 test("WorkflowClient.resume: with explicit key forwards the key field", async () => {
   const runsHome = mkdtempSync(join(tmpdir(), "pi-wf-resume-"));
-  const runId = "wf-resume02";
+  const runId = "wf-03dac7f907e1";
   const dir = join(runsHome, runId);
   const fr = makeFakeRun();
   Object.defineProperty(fr.run, "runDirAbs", { value: dir });

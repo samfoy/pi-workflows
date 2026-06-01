@@ -41,7 +41,16 @@ export function createGateMethod(
       const defaultAnswer =
         typeof gateOpts.default === "boolean" ? gateOpts.default : true;
 
-      // 1. Log the gate request to the ledger.
+      // 1. Guard: if the signal is already aborted, bail before touching the
+      //    ledger so we never write an orphaned gate_requested entry.
+      if (opts.signal?.aborted) {
+        return {
+          ok: false,
+          error: captureError(new DOMException("Aborted", "AbortError")),
+        };
+      }
+
+      // 2. Log the gate request to the ledger.
       await opts.ledger.append({
         type: "gate_requested",
         at: deps.nowIso(),
@@ -62,10 +71,25 @@ export function createGateMethod(
       // 3. Wait for a response (or fall back to the default if no mechanism
       //    is wired — e.g. running outside the TUI).
       let approved: boolean;
-      if (opts.waitForGate !== undefined) {
-        approved = await opts.waitForGate(message, opts.signal);
-      } else {
-        approved = defaultAnswer;
+      try {
+        if (opts.waitForGate !== undefined) {
+          approved = await opts.waitForGate(message, opts.signal);
+        } else {
+          if (opts.signal?.aborted)
+            throw opts.signal.reason ?? new DOMException('Run was aborted', 'AbortError');
+          approved = defaultAnswer;
+        }
+      } catch (waitErr) {
+        // Write gate_resolved(false) unconditionally on any throw so the
+        // ledger is never left with an orphaned gate_requested entry —
+        // regardless of whether the throw was an abort, IPC failure, network
+        // timeout, or any other internal error.
+        await opts.ledger.append({
+          type: "gate_resolved",
+          at: deps.nowIso(),
+          approved: false,
+        });
+        throw waitErr;
       }
 
       // 4. Log the gate resolution.

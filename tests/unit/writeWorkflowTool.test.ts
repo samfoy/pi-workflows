@@ -272,7 +272,7 @@ test("runNow: calls startRun with the saved WorkflowFile", async () => {
   }
 });
 
-test("runNow: absent + startRun wired — starts immediately", async () => {
+test("runNow: absent — does NOT start automatically (opt-in)", async () => {
   const dir = mkdtempSync(join(tmpdir(), "ww-nornow-"));
   try {
     const pi = makeFakePi();
@@ -290,7 +290,7 @@ test("runNow: absent + startRun wired — starts immediately", async () => {
     ].join("\n");
     await pi.registeredTool!.execute("id-nr", { name: "no-run-wf", script }, {} as any);
 
-    assert.ok(startRunCalled, "startRun SHOULD be called when startRun is wired and runNow is not false");
+    assert.equal(startRunCalled, false, "startRun must NOT be called when runNow is omitted (opt-in behavior)");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
@@ -460,7 +460,7 @@ test("runNow confirm: calls startRun when ctx.ui.confirm returns true", async ()
 export async function main(_ctx: any) { return "ok"; }`;
 
   const ctxE = { ui: { confirm: async (_msg: string) => true } };
-  const result = await (piE as any).__tool.execute("td4", { name: "confirm-wf", script: CONF_SCRIPT }, ctxE);
+  const result = await (piE as any).__tool.execute("td4", { name: "confirm-wf", script: CONF_SCRIPT, runNow: true }, ctxE);
 
   assert.ok(startRunCalled, "startRun should be called when confirm=true");
   assert.ok(result.details.runStarted, "runStarted should be true");
@@ -483,10 +483,10 @@ test("always runs when startRun is wired — no opt-out param", async () => {
   const CONF_NO_SCRIPT = `export const meta = { name: "confirm-no-wf", description: "d", version: "1.0.0" };
 export async function main(_ctx: any) { return "ok"; }`;
 
-  // runNow is no longer in the schema; passing it is ignored. Tool always runs.
-  const result = await (piF as any).__tool.execute("td5", { name: "confirm-no-wf", script: CONF_NO_SCRIPT }, {});
+  // Pass runNow: true to opt-in to auto-run.
+  const result = await (piF as any).__tool.execute("td5", { name: "confirm-no-wf", script: CONF_NO_SCRIPT, runNow: true }, {});
 
-  assert.ok(startRunCalledF, "startRun SHOULD always be called when startRun is wired");
+  assert.ok(startRunCalledF, "startRun SHOULD be called when startRun is wired and runNow: true");
   assert.ok(result.details.runStarted, "runStarted should be true");
   rmSync(dirF, { recursive: true, force: true });
 });

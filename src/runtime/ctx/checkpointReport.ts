@@ -31,6 +31,12 @@ export function createCheckpointReportMethods(
     data?: unknown,
   ) => RunCtxBridgeResult<null | string>;
 } {
+  // Per-label async mutex: serializes concurrent checkpointFn calls for
+  // the same label so that hasCheckpoint + setCheckpoint is atomic
+  // (eliminates the TOCTOU window where two parallel agents both observe
+  // false and both proceed to setCheckpoint).
+  const cpLocks = new Map<string, Promise<void>>();
+
   async function checkpointFn(
     label: unknown,
     data?: unknown,
@@ -41,23 +47,48 @@ export function createCheckpointReportMethods(
           "ctx.checkpoint: label must be a non-empty string",
         );
       }
-      if (await opts.cache.hasCheckpoint(label)) {
-        // Already set — checkpoint_hit (resumed run).
+      // Acquire per-label lock: wait for any in-flight call with the same
+      // label to complete before proceeding. Makes hasCheckpoint +
+      // setCheckpoint effectively atomic for concurrent callers.
+      const previous = cpLocks.get(label) ?? Promise.resolve();
+      let release!: () => void;
+      const ticket = new Promise<void>((r) => {
+        release = r;
+      });
+      cpLocks.set(label, ticket);
+      await previous;
+      try {
+        if (await opts.cache.hasCheckpoint(label)) {
+          // Already set — checkpoint_hit (resumed run).
+          void opts.ledger.append({
+            type: "checkpoint_hit",
+            at: deps.nowIso(),
+            label,
+          });
+          return { ok: true, value: false };
+        }
+        // First write — validate serializability, then persist and record.
+        let safeData: unknown = data;
+        if (data !== undefined) {
+          try {
+            safeData = JSON.parse(JSON.stringify(data));
+          } catch (cycErr) {
+            throw new TypeError(
+              `ctx.checkpoint: data is not JSON-serializable (${(cycErr as Error).message})`,
+            );
+          }
+        }
+        await opts.cache.setCheckpoint(label, safeData);
         void opts.ledger.append({
-          type: "checkpoint_hit",
+          type: "checkpoint_set",
           at: deps.nowIso(),
           label,
         });
-        return { ok: true, value: false };
+        return { ok: true, value: true };
+      } finally {
+        release();
+        if (cpLocks.get(label) === ticket) cpLocks.delete(label);
       }
-      // First write — persist and record.
-      await opts.cache.setCheckpoint(label, data);
-      void opts.ledger.append({
-        type: "checkpoint_set",
-        at: deps.nowIso(),
-        label,
-      });
-      return { ok: true, value: true };
     } catch (e) {
       return { ok: false, error: captureError(e) };
     }
@@ -113,13 +144,21 @@ export function createCheckpointReportMethods(
         ...(parsedData !== undefined ? { data: parsedData } : {}),
       });
       // Emit to overlay.
+      // Only include `data` when parsedData is a plain object: the overlay
+      // type requires Record<string,unknown>, and spreading a string or array
+      // into the cast would give consumers garbage keys.
+      const overlayData: Record<string, unknown> | undefined =
+        parsedData !== undefined &&
+        typeof parsedData === "object" &&
+        parsedData !== null &&
+        !Array.isArray(parsedData)
+          ? (parsedData as Record<string, unknown>)
+          : undefined;
       try {
         opts.emitOverlayEvent?.("pi-workflows.report", {
           runId: opts.runMeta.id,
           event: eventType,
-          ...(parsedData !== undefined
-            ? { data: parsedData as Record<string, unknown> }
-            : {}),
+          ...(overlayData !== undefined ? { data: overlayData } : {}),
         });
       } catch {
         /* swallow */

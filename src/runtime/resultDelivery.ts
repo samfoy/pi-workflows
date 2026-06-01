@@ -297,9 +297,10 @@ export async function deliverRunResult(opts: DeliverOptions): Promise<RunResultF
   const writer = opts.writeFile ?? writeResultFile;
   try {
     await writer(opts.runDirAbs, payload);
-  } catch {
+  } catch (err) {
     // result.json write failure is non-fatal — the ledger already has
     // every fact. We still want to deliver the card.
+    console.error('[resultDelivery] writeResultFile failed — result.json may be missing or stale:', err);
   }
 
   // 2. Send the card.

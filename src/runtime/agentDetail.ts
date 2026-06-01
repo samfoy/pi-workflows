@@ -43,7 +43,7 @@ export interface AgentDetailOpts {
   readonly scrollOffset?: number;
 }
 
-const MAX_LOG_LINES = 12;
+export const MAX_LOG_LINES = 12;
 const MAX_PROMPT_CHARS = 200;
 
 function fmtDurationMs(ms: number): string {
@@ -133,7 +133,7 @@ export function renderAgentDetail(
   const scrollOffset = opts.scrollOffset ?? 0;
   const startIdx = Math.max(0, snap.logTail.length - MAX_LOG_LINES - scrollOffset);
   const endIdx = snap.logTail.length - scrollOffset;
-  const visibleLogLines = snap.logTail.slice(startIdx, endIdx > 0 ? endIdx : snap.logTail.length);
+  const visibleLogLines = snap.logTail.slice(startIdx, Math.max(0, endIdx));
   const logCount = visibleLogLines.length;
   lines.push(`Live tail (last ${logCount > 0 ? logCount : 0} lines)`);
   if (snap.logTail.length === 0) {

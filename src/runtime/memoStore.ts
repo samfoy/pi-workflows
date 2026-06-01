@@ -26,6 +26,7 @@ import {
   openSync,
   promises as fsp,
   renameSync,
+  unlinkSync,
   writeSync,
 } from "node:fs";
 import { dirname } from "node:path";
@@ -221,9 +222,16 @@ export class MemoStore {
   }
 
   private async writeSnapshotAndRename(snapshot: string): Promise<void> {
+    // Unique per-compaction tmp path: base + PID + 4 random hex bytes.
+    // Two processes sharing the same memo.jsonl previously raced on the
+    // fixed memo.jsonl.tmp name — one overwrote the other's snapshot
+    // before the rename, losing O_APPEND entries.  Unique names eliminate
+    // that collision; the final rename is still atomic (same filesystem).
+    const uniqueTmp =
+      `${this.memoPathTmp}.${process.pid}.${Math.random().toString(16).slice(2, 10)}`;
     let fd: number | undefined;
     try {
-      fd = openSync(this.memoPathTmp, "w", 0o644);
+      fd = openSync(uniqueTmp, "w", 0o644);
       if (snapshot.length > 0) writeSync(fd, snapshot);
       fsyncSync(fd);
     } finally {
@@ -232,7 +240,13 @@ export class MemoStore {
     if (this.compactionPanicBeforeRename) {
       this.compactionPanicBeforeRename();
     }
-    renameSync(this.memoPathTmp, this.memoPath);
+    try {
+      renameSync(uniqueTmp, this.memoPath);
+    } catch (err) {
+      // Best-effort cleanup if the rename fails (e.g. cross-device move).
+      try { unlinkSync(uniqueTmp); } catch { /* ignore */ }
+      throw err;
+    }
   }
 
   private async replay(): Promise<void> {
@@ -275,7 +289,8 @@ export class MemoStore {
       if (
         typeof r.key !== "string" ||
         typeof r.writtenAt !== "number" ||
-        typeof r.ttlMs !== "number"
+        typeof r.ttlMs !== "number" ||
+        !("value" in r)
       ) {
         continue;
       }

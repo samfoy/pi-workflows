@@ -217,8 +217,12 @@ export const defaultSaveScriptIO: SaveScriptIO = {
         stdio: "ignore",
         shell: false,
       });
-      child.on("error", () => resolveP(false));
-      child.on("exit", (code) => resolveP(code === 0));
+      const timer = setTimeout(() => {
+        child.kill();
+        resolveP(false);
+      }, 10_000);
+      child.on("error", () => { clearTimeout(timer); resolveP(false); });
+      child.on("exit", (code) => { clearTimeout(timer); resolveP(code === 0); });
     });
   },
 };

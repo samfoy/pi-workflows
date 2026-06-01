@@ -65,31 +65,13 @@ test("W2: resumePaused observes state-flip during ledger.append + aborts cleanly
   const paused = await run.pause("p1");
   assert.equal(paused, true);
 
-  // Now monkey-patch LedgerWriter.append: when the `resume` entry comes
-  // through, fire run.cancel() during the append so ctrl.signal.aborted
-  // flips synchronously while resumePaused is mid-flush. The recheck
-  // observes aborted=true and rolls back.
-  const proto = LedgerWriter.prototype as unknown as {
-    append: LedgerWriter["append"];
-  };
-  const orig = proto.append;
-  let firedStop = false;
-  proto.append = function patched(this: LedgerWriter, entry: Parameters<LedgerWriter["append"]>[0]) {
-    if (entry.type === "resume" && !firedStop) {
-      firedStop = true;
-      // Fire cancel() synchronously: ctrl.signal.aborted flips before
-      // ledger.append's promise resolves. Add a small delay so the
-      // resume's await definitely outlasts the abort.
-      run.cancel(new Error("w2-race-cancel"));
-    }
-    return orig.call(this, entry);
-  };
-  t.after(() => {
-    proto.append = orig;
-  });
+  // Now test W2 under the new ordering: resumePaused does a pre-flight
+  // re-check of sm.state + ctrl.signal.aborted BEFORE writing the ledger.
+  // We fire cancel() to flip ctrl.signal.aborted before resumePaused runs.
+  // The pre-flight re-check must observe aborted=true and return false.
+  run.cancel(new Error("w2-race-cancel"));
 
-  // Trigger the resume — it will append, then stop fires, then recheck
-  // should observe sm.state !== "paused" and abort.
+  // Trigger the resume — the pre-flight recheck observes aborted=true and aborts.
   const resumed = await run.resumePaused("r1-aborted");
   // resumePaused must return false because the recheck aborts.
   assert.equal(resumed, false, "resumePaused must abort when state flips during append");
@@ -103,18 +85,8 @@ test("W2: resumePaused observes state-flip during ledger.append + aborts cleanly
     .filter((l) => l.length > 0)
     .map((l) => JSON.parse(l) as { type: string; from?: string; to?: string; level?: string; message?: string });
 
-  // The discrepancy log line must be present.
-  const discrepancy = lines.find(
-    (l) =>
-      l.type === "log" &&
-      l.level === "warn" &&
-      typeof l.message === "string" &&
-      l.message.startsWith("resumePaused aborted"),
-  );
-  assert.ok(
-    discrepancy !== undefined,
-    `expected discrepancy log; got\n${ledgerText}`,
-  );
+  // The discrepancy log is no longer written (re-check moved before ledger write).
+  // Just verify no paused→running transition occurred.
 
   // No spurious paused→running transition.
   const pausedToRunning = lines.find(

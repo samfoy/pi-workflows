@@ -1,18 +1,18 @@
 /**
- * pi-workflows — partial-manifest writer (slice 6).
+ * pi-workflows - partial-manifest writer (slice 6).
  *
  * Slice 6 owns the parent-liveness fields of `<runDir>/manifest.json`:
  *
- *   - `parentPid`         — `process.pid`
- *   - `parentStartTime`   — `process.hrtime.bigint()` snapshot at run
+ *   - `parentPid`         - `process.pid`
+ *   - `parentStartTime`   - `process.hrtime.bigint()` snapshot at run
  *                           start, decimal-stringified for JSON
  *                           round-trip. Combined with `parentBootId`
  *                           this is unique-per-pi-process across PID
  *                           recycling.
- *   - `parentBootId`      — Linux: `/proc/sys/kernel/random/boot_id`,
+ *   - `parentBootId`      - Linux: `/proc/sys/kernel/random/boot_id`,
  *                           strip trailing newline; macOS:
  *                           `darwin-<sec>` from `sysctl kern.boottime`
- *                           (closes the macOS PID-recycle gap — a
+ *                           (closes the macOS PID-recycle gap - a
  *                           manifest written by a previous boot is
  *                           detectable as stale even though PIDs may
  *                           have recycled into the same numeric
@@ -71,7 +71,7 @@ export function captureParentLiveness(
  * own fields, and one write silently overwrites the other.
  *
  * Keyed by absolute runDir path. Each entry is the tail of the chain;
- * errors are swallowed from the chain tail so a failed write doesn’t
+ * errors are swallowed from the chain tail so a failed write doesn't
  * block all future writes for the same run.
  */
 const livenessWriteQueue = new Map<string, Promise<void>>();
@@ -96,8 +96,16 @@ export function writeParentLivenessFields(
 ): Promise<void> {
   const pending = livenessWriteQueue.get(runDirAbs) ?? Promise.resolve();
   const next = pending.then(() => _doWriteParentLiveness(runDirAbs, fields));
-  // Don’t let a single failure permanently block the queue for this run.
-  livenessWriteQueue.set(runDirAbs, next.catch(() => {}));
+  // Don't let a single failure permanently block the queue for this run.
+  const queued = next.catch(() => {});
+  livenessWriteQueue.set(runDirAbs, queued);
+  // Prune the entry once this promise is the last in the chain — avoids
+  // unbounded map growth on long-lived autoloop hosts (BUG: mem-leak).
+  queued.finally(() => {
+    if (livenessWriteQueue.get(runDirAbs) === queued) {
+      livenessWriteQueue.delete(runDirAbs);
+    }
+  });
   return next;
 }
 
@@ -120,7 +128,7 @@ async function _doWriteParentLiveness(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code !== "ENOENT") {
-      // Corrupt manifest — overwrite. Slice 8a's read path will treat
+      // Corrupt manifest - overwrite. Slice 8a's read path will treat
       // a missing-fields manifest as a fresh run, which is the right
       // semantics for "we couldn't trust what was there."
     }
@@ -161,7 +169,7 @@ function manifestPath_byDir(runDirAbs: string): string {
 
 /**
  * Record the resolved agent-memory directory for `name` into
- * `<runDir>/manifest.json`. Idempotent — re-recording the same
+ * `<runDir>/manifest.json`. Idempotent - re-recording the same
  * (name, dir) pair is a no-op merge. Different dirs for the same
  * name overwrite (last-write-wins) which can only happen if a
  * caller mixes scopes for the same persona within a single run;
@@ -176,7 +184,13 @@ export function recordAgentMemoryDir(
   const next = pending.then(() =>
     _doRecordAgentMemoryDir(runDirAbs, name, dir),
   );
-  livenessWriteQueue.set(runDirAbs, next.catch(() => {}));
+  const queued = next.catch(() => {});
+  livenessWriteQueue.set(runDirAbs, queued);
+  queued.finally(() => {
+    if (livenessWriteQueue.get(runDirAbs) === queued) {
+      livenessWriteQueue.delete(runDirAbs);
+    }
+  });
   return next;
 }
 
@@ -203,14 +217,14 @@ async function _doRecordAgentMemoryDir(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code !== "ENOENT") {
-      // Corrupt manifest — overwrite with our fields only.
+      // Corrupt manifest - overwrite with our fields only.
     }
   }
   const priorDirs =
     existing.agentMemoryDirs && typeof existing.agentMemoryDirs === "object"
       ? existing.agentMemoryDirs
       : {};
-  if (priorDirs[name] === dir) return; // already recorded — short-circuit
+  if (priorDirs[name] === dir) return; // already recorded - short-circuit
   const merged = {
     ...existing,
     agentMemoryDirs: { ...priorDirs, [name]: dir },
@@ -228,13 +242,13 @@ async function _doRecordAgentMemoryDir(
 
 // ─── ZONE_WORKTREE: per-(runDir, agentId) worktree path record ──────
 //
-// Mirrors `recordAgentMemoryDir` exactly — same per-runDir queue,
+// Mirrors `recordAgentMemoryDir` exactly - same per-runDir queue,
 // same atomic merge, different field name. On-disk shape is
 // `agentWorktrees: { <agentId>: <absPath> }`.
 
 /**
  * Record the resolved git-worktree directory for `agentId` into
- * `<runDir>/manifest.json`. Idempotent — re-recording the same
+ * `<runDir>/manifest.json`. Idempotent - re-recording the same
  * (agentId, dir) pair short-circuits without rewriting the file.
  */
 export function recordAgentWorktreePath(
@@ -246,7 +260,13 @@ export function recordAgentWorktreePath(
   const next = pending.then(() =>
     _doRecordAgentWorktreePath(runDirAbs, agentId, dir),
   );
-  livenessWriteQueue.set(runDirAbs, next.catch(() => {}));
+  const queued = next.catch(() => {});
+  livenessWriteQueue.set(runDirAbs, queued);
+  queued.finally(() => {
+    if (livenessWriteQueue.get(runDirAbs) === queued) {
+      livenessWriteQueue.delete(runDirAbs);
+    }
+  });
   return next;
 }
 
@@ -273,14 +293,14 @@ async function _doRecordAgentWorktreePath(
   } catch (err) {
     const code = (err as NodeJS.ErrnoException)?.code;
     if (code !== "ENOENT") {
-      // Corrupt manifest — overwrite with our fields only.
+      // Corrupt manifest - overwrite with our fields only.
     }
   }
   const priorTrees =
     existing.agentWorktrees && typeof existing.agentWorktrees === "object"
       ? existing.agentWorktrees
       : {};
-  if (priorTrees[agentId] === dir) return; // already recorded — short-circuit
+  if (priorTrees[agentId] === dir) return; // already recorded - short-circuit
   const merged = {
     ...existing,
     agentWorktrees: { ...priorTrees, [agentId]: dir },

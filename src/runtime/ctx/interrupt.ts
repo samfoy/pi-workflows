@@ -131,6 +131,19 @@ export function createInterruptMethod(
   ): Promise<RunCtxBridgeResult<{ key: string; value: unknown }>> {
     try {
       const cfg = parseInterruptOpts(optsArg);
+
+      // 0. Guard: if the signal is already aborted, bail before touching
+      //    the counter or ledger so we never burn an int-N slot or write
+      //    an orphaned interrupt_requested entry. Mirrors gate.ts guard.
+      if (opts.signal?.aborted) {
+        return {
+          ok: false,
+          error: captureError(
+            opts.signal.reason ?? new DOMException("Aborted", "AbortError"),
+          ),
+        };
+      }
+
       const idx = deps.nextInterruptIdx();
       const key = `int-${idx}`;
 
@@ -171,14 +184,15 @@ export function createInterruptMethod(
         const replayed = opts.replayResolvedInterrupts.get(key);
         const normalized = replayed === undefined ? null : replayed;
         validateValue(normalized);
+        const cloned = JSON.parse(JSON.stringify(normalized));
         await opts.ledger.append({
           type: "interrupt_resolved",
           at: deps.nowIso(),
           key,
-          value: normalized,
+          value: cloned,
           source: "replay",
         });
-        return { ok: true, value: { key, value: normalized } };
+        return { ok: true, value: { key, value: cloned } };
       }
 
       // 2. Write the request entry. Choices/default are optional;
@@ -218,12 +232,30 @@ export function createInterruptMethod(
       //    (unit test / running outside the TUI) fall back to default.
       let value: unknown;
       let source: "ipc" | "default";
-      if (opts.waitForInterrupt !== undefined) {
-        value = await opts.waitForInterrupt(key, opts.signal);
-        source = "ipc";
-      } else {
-        value = cfg.hasDefault ? cfg.defaultValue : null;
-        source = "default";
+      try {
+        if (opts.waitForInterrupt !== undefined && !opts.signal?.aborted) {
+          value = await opts.waitForInterrupt(key, opts.signal);
+          source = "ipc";
+        } else {
+          if (opts.signal?.aborted)
+            throw opts.signal.reason ?? new DOMException('Run was aborted', 'AbortError');
+          value = cfg.hasDefault ? cfg.defaultValue : null;
+          source = "default";
+        }
+      } catch (waitErr) {
+        // Write interrupt_resolved unconditionally on any throw so the
+        // ledger is never left with an orphaned interrupt_requested entry —
+        // regardless of whether the throw was an abort, IPC failure, or any
+        // other error mid-wait. Mirrors the identical pattern in gate.ts
+        // (BUG-169 fix).
+        await opts.ledger.append({
+          type: "interrupt_resolved",
+          at: deps.nowIso(),
+          key,
+          value: null,
+          source: "abort",
+        });
+        throw waitErr;
       }
 
       // 5. Normalize undefined → null so the ledger never stores

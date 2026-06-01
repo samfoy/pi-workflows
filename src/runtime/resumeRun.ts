@@ -242,6 +242,9 @@ export async function resumeRun(
   let lock: ReturnType<typeof acquireResumeLock> | null = null;
   // BUG-070: declared outside the try block so the catch can inspect it.
   let iifeLaunched = false;
+  // Declared outside the try block so the catch can close it if the IIFE
+  // never launches (mirrors the iifeLaunched / lock pattern).
+  let cacheStore: Awaited<ReturnType<typeof CacheStore.open>> | undefined = undefined;
 
   try {
     // 1. Read ledger \u2014 derive current state (lock not yet held; the
@@ -376,7 +379,7 @@ export async function resumeRun(
         ? { resolveLedgerPath: opts.resolveLedgerPath }
         : { resolveLedgerPath: (id: string) => join(resolveRunDir(id), "ledger.jsonl") }),
     });
-    const cacheStore = await CacheStore.open({
+    cacheStore = await CacheStore.open({
       runId,
       resolveCachePath: (id) => join(resolveRunDir(id), "cache.jsonl"),
       resolveCacheTmpPath: (id) => join(resolveRunDir(id), "cache.jsonl.tmp"),
@@ -740,6 +743,11 @@ export async function resumeRun(
           }
         }
         await ledger.flush();
+        // Drain any in-flight ctx.log ledger writes before the run settles.
+        // ledger.flush() covers writes already in the LedgerWriter queue;
+        // drainPendingLog() covers the logFn-side chain in case a write was
+        // enqueued between the last ledger.flush() call and here.
+        await ctxHost.drainPendingLog().catch(() => undefined);
       } finally {
         sandbox.dispose();
         const endedAt = (opts.nowIso ?? (() => new Date().toISOString()))();
@@ -842,6 +850,8 @@ export async function resumeRun(
           // AFTER ledger.append so a stop() that races mid-flush can't
           // re-enter running.
           if (sm.state !== "paused" || ctrl.signal.aborted) {
+            // Gate was already resumed above; re-pause so the run doesn't
+            // end up in a zombie state with an open gate.
             pauseGate.pause();
             await ledger
               .append({
@@ -854,11 +864,11 @@ export async function resumeRun(
             return false;
           }
           // slice_12_concerns B1: dedicated paused→running edge.
+          // Open the gate AFTER sm.go('running') so agents are only
+          // unblocked once the state machine has authorised execution.
           try {
             await sm.go("running");
           } catch {
-            // Gate was already resumed above; re-pause so the run doesn't
-            // end up in a zombie state with an open gate.
             pauseGate.pause();
             return false;
           }
@@ -921,6 +931,15 @@ export async function resumeRun(
     if (!iifeLaunched && lock !== null) {
       try {
         lock.release();
+      } catch {
+        /* swallow */
+      }
+    }
+    // Flush the CacheStore if the IIFE never launched — its finally block
+    // (the only other dispose site) will never run in that case.
+    if (!iifeLaunched && cacheStore !== undefined) {
+      try {
+        await cacheStore.flush();
       } catch {
         /* swallow */
       }

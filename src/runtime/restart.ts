@@ -112,7 +112,11 @@ export async function restartTerminalRun(
     restartedFrom: opts.source.runId,
   };
 
-  const run = await opts.start(opts.workflow, opts.input, mergedOptions);
+  // Use the frozen script from the old runDir, not the live workflow file.
+  // This ensures restarts execute the exact same code as the original run,
+  // even if the workflow file was edited in the meantime.
+  const frozenWorkflow: WorkflowFile = { ...opts.workflow, absPath: scriptPath };
+  const run = await opts.start(frozenWorkflow, opts.input, mergedOptions);
   opts.onStarted?.(run);
   return {
     kind: "started",

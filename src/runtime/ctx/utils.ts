@@ -14,11 +14,9 @@
  * pass typed-array-like containers.
  */
 export function isLikeArray(v: unknown): v is ArrayLike<unknown> {
-  return (
-    v !== null &&
-    typeof v === "object" &&
-    typeof (v as { length?: unknown }).length === "number"
-  );
+  if (v === null || typeof v !== "object") return false;
+  const len = (v as { length?: unknown }).length;
+  return typeof len === "number" && Number.isFinite(len) && len >= 0 && Math.floor(len) === len;
 }
 
 /**

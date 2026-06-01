@@ -120,6 +120,8 @@ export interface OtelMetricsInstruments {
 
 const METER_NAME = "@samfp/pi-workflows";
 const METER_VERSION = "0.2.0";
+/** Maximum bytes allowed in the tailer's partial-line buffer before discarding. Mirrors BUG-W12's cap in jsonStream.ts. */
+const MAX_TAILER_BUFFER_BYTES = 4 * 1024 * 1024; // 4 MiB
 
 /**
  * Build the instrument set against an existing meter. Exposed
@@ -364,13 +366,13 @@ export function feedLedgerEntryToMetrics(
       };
       // gen_ai.request.model is unknown to the ledger; omit unless we
       // gain visibility into the underlying provider.
-      if (entry.usage.input > 0) {
+      if (Number.isFinite(entry.usage.input) && entry.usage.input > 0) {
         inst.tokenUsage.record(entry.usage.input, {
           ...tokenAttrs,
           "gen_ai.token.type": "input",
         });
       }
-      if (entry.usage.output > 0) {
+      if (Number.isFinite(entry.usage.output) && entry.usage.output > 0) {
         inst.tokenUsage.record(entry.usage.output, {
           ...tokenAttrs,
           "gen_ai.token.type": "output",
@@ -378,7 +380,7 @@ export function feedLedgerEntryToMetrics(
       }
       // Operation duration (seconds). Skip cached results — their
       // duration is dispatcher overhead, not the agent's wall time.
-      if (!entry.cached) {
+      if (!entry.cached && Number.isFinite(entry.durationMs)) {
         inst.operationDuration.record(entry.durationMs / 1000, {
           "gen_ai.operation.name": "invoke_agent",
           "gen_ai.system": GEN_AI_SYSTEM,
@@ -495,6 +497,8 @@ export function tailRunLedgerForMetrics(
   let resolveDone: () => void;
   const done = new Promise<void>((r) => (resolveDone = r));
   let timer: NodeJS.Timeout | null = null;
+  // Serializes concurrent readChunk() calls (loopOnce vs dispose race).
+  let readLock: Promise<void> = Promise.resolve();
 
   const onAbort = (): void => {
     if (stopped) return;
@@ -509,6 +513,18 @@ export function tailRunLedgerForMetrics(
   }
 
   async function readChunk(): Promise<void> {
+    let unlock!: () => void;
+    const prev = readLock;
+    readLock = new Promise<void>((r) => (unlock = r));
+    await prev;
+    try {
+      await _readChunkImpl();
+    } finally {
+      unlock();
+    }
+  }
+
+  async function _readChunkImpl(): Promise<void> {
     let st: { size: number };
     try {
       st = await fsp.stat(path);
@@ -529,6 +545,13 @@ export function tailRunLedgerForMetrics(
       const buf = Buffer.alloc(len);
       await fh.read(buf, 0, len, pos);
       pos = st.size;
+      if (buffer.length + buf.length > MAX_TAILER_BUFFER_BYTES) {
+        log(
+          "warn",
+          `[pi-workflows] otel-metrics: tailer buffer exceeded ${MAX_TAILER_BUFFER_BYTES} bytes — discarding partial line`,
+        );
+        buffer = "";
+      }
       buffer += buf.toString("utf8");
     } catch (err) {
       log(
@@ -713,6 +736,18 @@ export async function createOtelMetricsExporter(
       shutdown: async () => {},
     };
   }
+  // Drain the PeriodicExportingMetricReader before the process exits.  Without
+  // these hooks a short-lived workflow (< exportIntervalMillis, default 60 s)
+  // exits before the reader's first scheduled export fires, silently dropping
+  // every accumulated counter/histogram value.
+  const onBeforeExit = (): void => {
+    void sdk.provider.forceFlush?.();
+  };
+  const onSigterm = (): void => {
+    void sdk.provider.shutdown?.().finally(() => process.exit(0));
+  };
+  process.on("beforeExit", onBeforeExit);
+  process.on("SIGTERM", onSigterm);
   return {
     enabled: true,
     tailRun(runId, signal) {

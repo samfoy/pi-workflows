@@ -579,6 +579,12 @@ function handleList(pi: ExtensionAPI): void {
   );
 }
 
+const VALID_RUN_ID = /^wf-[\w-]+$/;
+
+function isValidRunId(runId: string): boolean {
+  return VALID_RUN_ID.test(runId);
+}
+
 async function handleShow(
   pi: ExtensionAPI,
   args: ReadonlyArray<string>,
@@ -591,6 +597,18 @@ async function handleShow(
         content: "/workflows show <runId> — missing runId argument",
         display: true,
         details: { subcommand: "show", slice: 11 },
+      },
+      { triggerTurn: false, deliverAs: "nextTurn" },
+    );
+    return;
+  }
+  if (!isValidRunId(runId)) {
+    pi.sendMessage(
+      {
+        customType: STUB_CUSTOM_TYPE,
+        content: `invalid runId: ${runId}`,
+        display: true,
+        details: { subcommand: "show", runId, slice: 11 },
       },
       { triggerTurn: false, deliverAs: "nextTurn" },
     );
@@ -672,6 +690,18 @@ async function handleResume(
     );
     return;
   }
+  if (!isValidRunId(runId)) {
+    pi.sendMessage(
+      {
+        customType: STUB_CUSTOM_TYPE,
+        content: `invalid runId: ${runId}`,
+        display: true,
+        details: { subcommand: "resume", runId, slice: 11 },
+      },
+      { triggerTurn: false, deliverAs: "nextTurn" },
+    );
+    return;
+  }
   try {
     // Slice 13 (carry-forward of slice-11 TODO): wire approval through
     // pi.ui.confirm. The original intent of the slice-11 stub was
@@ -694,7 +724,7 @@ async function handleResume(
           ...args: unknown[]
         ) => Promise<boolean>;
         const approved = await confirmFnAny("Resume workflow?", summary);
-        if (approved === false) {
+        if (!approved) {
           pi.sendMessage(
             {
               customType: STUB_CUSTOM_TYPE,
@@ -921,6 +951,18 @@ function handleKill(
         content: "/workflows kill <runId> — missing runId argument",
         display: true,
         details: { subcommand: "kill", slice: 13 },
+      },
+      { triggerTurn: false, deliverAs: "nextTurn" },
+    );
+    return;
+  }
+  if (!isValidRunId(runId)) {
+    pi.sendMessage(
+      {
+        customType: STUB_CUSTOM_TYPE,
+        content: `invalid runId: ${runId}`,
+        display: true,
+        details: { subcommand: "kill", runId, slice: 13 },
       },
       { triggerTurn: false, deliverAs: "nextTurn" },
     );

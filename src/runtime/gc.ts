@@ -52,7 +52,8 @@ export interface GcSkipped {
     | "younger-than-cutoff"
     | "missing-manifest"
     | "read-error"
-    | "has-fork-children";
+    | "has-fork-children"
+    | "protected-restart-source";
   readonly details?: string;
 }
 

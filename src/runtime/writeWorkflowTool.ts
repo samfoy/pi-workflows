@@ -82,7 +82,7 @@ export function validateWorkflowScript(
 
   // Extract the `name` value from `meta = { name: "...", ... }`.
   // Simple string-literal extraction — avoids pulling in acorn for v1.
-  const nameMatch = script.match(/export\s+const\s+meta\s*=\s*\{[^}]*name\s*:\s*["']([^"']+)["']/);
+  const nameMatch = script.match(/export\s+const\s+meta\s*=\s*\{[\s\S]*?name\s*:\s*["']([^"']+)["']/);
   if (!nameMatch) {
     return {
       ok: false,
@@ -264,11 +264,17 @@ export default async function (ctx) {
             "The complete workflow script. Must start with " +
             "`export const meta = { name, description, version };`.",
         },
+        runNow: {
+          type: "boolean",
+          description:
+            "If true, immediately start a run after saving. " +
+            "Omit (or false) to only save/register the workflow without running it.",
+        },
       },
     },
 
     async execute(_id, params, ctx) {
-      const { name: paramName, script } = params as { name: string; script: string };
+      const { name: paramName, script, runNow } = params as { name: string; script: string; runNow?: boolean };
 
       // 1. Validate
       const validation = validateWorkflowScript(script);
@@ -282,9 +288,9 @@ export default async function (ctx) {
       const { name } = validation;
 
       // Name in meta must match the `name` param (best-effort — only warn).
-      if (name !== paramName && paramName) {
-        // Use meta's name as authoritative.
-      }
+      const nameMismatchWarning = (name !== paramName && paramName)
+        ? `\n\n⚠️ Name mismatch: you requested '/${paramName}' but the script's meta.name is '/${name}'. The workflow will be saved and run as '/${name}'. Update the meta.name field in your script to '${paramName}' if you want it registered under '/${paramName}'.`
+        : "";
 
       // 2. Resolve save path
       const cwd = opts.getCwd();
@@ -324,9 +330,9 @@ export default async function (ctx) {
         opts.getRegistry?.().get(name) ??
         { name, absPath: savePath, scope: existsSync(projectScopeDir) ? "project" : "personal" };
 
-      // Always run when startRun is wired — don't let the LLM opt out
-      // via a runNow parameter. The approval TUI modal is the consent gate.
-      const shouldRun = !!opts.startRun;
+      // Only run if the caller explicitly passed runNow: true.
+      // Never auto-run on overwrites or when runNow is omitted.
+      const shouldRun = runNow === true && !!opts.startRun;
       if (shouldRun && opts.startRun) {
         try {
           await opts.startRun(workflowFile, "", ctx);
@@ -347,7 +353,8 @@ export default async function (ctx) {
       const resultText =
         `✅ Workflow \`/${name}\` ${verb}.\n\n` +
         `**Path:** \`${savePath}\`` +
-        runLine;
+        runLine +
+        nameMismatchWarning;
 
       return {
         content: [{ type: "text" as const, text: resultText }],

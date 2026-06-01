@@ -62,6 +62,7 @@ export interface SandboxViolationError extends Error {
     | "bridge-tampered"
     | "realm-error-reconstruct-failed"
     | "timer-host-exception"
+    | "timer-table-limit-exceeded"
     | "init-script-failed"
     | "shape-detect-failed"
     | "compile-failed"

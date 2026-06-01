@@ -193,7 +193,7 @@ export function isHotkeyEnabled(input: DispatchInput): boolean {
     case "?":
       return true;
     case "escape":
-      return input.view === "runs-list";
+      return input.view === "runs-list" || input.view === "phase-view" || input.view === "agent-detail";
     case "enter":
       if (input.view === "runs-list") return input.runState !== undefined;
       if (input.view === "phase-view") return input.runState !== undefined;

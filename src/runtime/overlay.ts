@@ -71,7 +71,7 @@ import {
   type PhaseFeedEntry,
 } from "./phaseRegistry.js";
 import { renderPhaseView } from "./phaseView.js";
-import { renderAgentDetail, type AgentDetailSnapshot } from "./agentDetail.js";
+import { renderAgentDetail, MAX_LOG_LINES as AGENT_DETAIL_MAX_LOG_LINES, type AgentDetailSnapshot } from "./agentDetail.js";
 import { renderGcDialog, loadGcCandidates, applyGc, type GcDialogState } from "./gcDialog.js";
 import { agentTranscriptPath } from "./transcriptOpen.js";
 
@@ -794,6 +794,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       // Agent vanished — fall back to phase view.
       // BUG-074: use handleAction to clear all stale state atomically.
       handleAction({ kind: "navigate-back" });
+      return { lines: [] };
     }
 
     if (view === "phase-view" && openedRunId !== undefined) {
@@ -833,6 +834,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       // Run vanished from registry — fall back to runs list.
       // BUG-074: use handleAction to clear openedRunId, phaseCursor, banner atomically.
       handleAction({ kind: "navigate-back" });
+      return { lines: [] };
     }
     const sorted = sortAndClamp(lastSnapshot);
     const selected = sorted[cursor];
@@ -869,7 +871,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       case "navigate-up":
         // BUG-034: scroll the log in agent-detail, don't mutate runs-list cursor.
         if (view === "agent-detail") {
-          const maxOffset = Math.max(0, agentLogTail.length - 12);
+          const maxOffset = Math.max(0, agentLogTail.length - AGENT_DETAIL_MAX_LOG_LINES);
           if (agentLogScrollOffset < maxOffset) {
             agentLogScrollOffset++;
             requestRender();
@@ -1242,6 +1244,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           return;
         }
         const runIdCopy = action.runId;
+        (list as NonNullable<typeof list>).splice(0, 1); // pop optimistically so a second `i` press skips this entry
         setBanner(
           `answering interrupt ${payload.key} on ${shortenId(runIdCopy)}…`,
         );

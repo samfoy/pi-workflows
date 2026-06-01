@@ -6,9 +6,9 @@
  * (and the per-agent worktree promote path). They share two pieces
  * of run-scoped state:
  *
- *   - `memoryOversizeWarned` — Set<name>, dedupes the one-shot
+ *   - `memoryOversizeWarned` — Set<scope:name>, dedupes the one-shot
  *     "MEMORY.md exceeds the 25 KiB read cap" warning per memory
- *     name within a run. Cleared on a successful compaction.
+ *     (scope, name) pair within a run. Cleared on a successful compaction.
  *   - `readOnlyMemoryKeys` — Set<scope:name>, populated by ctx.agent
  *     when an author mounts memory with `readOnly: true`. Once a
  *     key lands here, ctx.memory.append rejects further writes for
@@ -43,7 +43,7 @@ import { dispatchAgent } from "../dispatcher.js";
 import type { DispatcherOptions, AgentResult } from "../../types/internal.js";
 
 export interface MemoryDeps {
-  /** Run-scoped Set deduping the one-shot oversize-warn per memory name. */
+  /** Run-scoped Set deduping the one-shot oversize-warn per (scope:name) composite key. */
   memoryOversizeWarned: Set<string>;
   /** Run-scoped Set of (scope:name) tuples that any agent mounted as readOnly. */
   readOnlyMemoryKeys: Set<string>;
@@ -166,7 +166,7 @@ export function createMemoryMethods(
     scope: unknown,
   ): Promise<RunCtxBridgeResult<string | null>> {
     try {
-      const { dir, name: safeName } = resolveMemoryArgs(
+      const { dir, scope: parsedScope, name: safeName } = resolveMemoryArgs(
         name,
         scope,
         "ctx.memory.read",
@@ -174,8 +174,11 @@ export function createMemoryMethods(
       const r = await readMemoryFileWithMeta(dir);
       if (r === null) return { ok: true, value: null };
       // Re-use the same one-shot oversize-warn dedup as auto-injection.
-      if (r.truncated && !deps.memoryOversizeWarned.has(safeName)) {
-        deps.memoryOversizeWarned.add(safeName);
+      // Key by scope:name composite so two scopes sharing a name don't
+      // suppress each other's warnings (mirrors readOnlyMemoryKeys).
+      const oversizeKey = memoryReadOnlyKey(parsedScope, safeName);
+      if (r.truncated && !deps.memoryOversizeWarned.has(oversizeKey)) {
+        deps.memoryOversizeWarned.add(oversizeKey);
         void opts.ledger
           .append({
             type: "log",
@@ -221,6 +224,14 @@ export function createMemoryMethods(
     }
   }
 
+  // Per-run in-flight compaction promises, keyed by "scope:name".
+  // Coalesces concurrent compact calls for the same memory so only one
+  // LLM summarise agent runs; the second caller awaits the first's promise.
+  const compactInFlight = new Map<
+    string,
+    Promise<RunCtxBridgeResult<{ beforeBytes: number; afterBytes: number; ratio: number }>>
+  >();
+
   async function memoryCompact(
     name: unknown,
     scope: unknown,
@@ -231,30 +242,49 @@ export function createMemoryMethods(
       ratio: number;
     }>
   > {
+    // Resolve args synchronously first; bad-arg errors are never coalesced.
+    let resolved: { dir: string; scope: MemoryScope; name: string };
     try {
-      const { dir, name: safeName } = resolveMemoryArgs(
-        name,
-        scope,
-        "ctx.memory.compact",
-      );
-      const summarize = opts.compactSummarize ?? defaultCompactSummarize;
-      const result = await compactMemoryFile({
-        dir,
-        summarize: (original) => summarize(safeName, original),
-      });
-      void opts.ledger
-        .append({
-          type: "log",
-          at: deps.nowIso(),
-          level: "info",
-          message: `agent-memory: compacted MEMORY.md for "${safeName}" (${result.beforeBytes} → ${result.afterBytes} bytes, ratio=${result.ratio.toFixed(3)})`,
-        })
-        .catch(() => undefined);
-      deps.memoryOversizeWarned.delete(safeName);
-      return { ok: true, value: result };
+      resolved = resolveMemoryArgs(name, scope, "ctx.memory.compact");
     } catch (e) {
       return { ok: false, error: captureError(e) };
     }
+    const { dir, scope: parsedScope, name: safeName } = resolved;
+    const key = memoryReadOnlyKey(parsedScope, safeName);
+
+    // If a compact is already in-flight for this (scope, name), wait on it
+    // instead of spawning a duplicate LLM agent.
+    const existing = compactInFlight.get(key);
+    if (existing !== undefined) return existing;
+
+    const work = (async (): Promise<
+      RunCtxBridgeResult<{ beforeBytes: number; afterBytes: number; ratio: number }>
+    > => {
+      try {
+        const summarize = opts.compactSummarize ?? defaultCompactSummarize;
+        const result = await compactMemoryFile({
+          dir,
+          summarize: (original) => summarize(safeName, original),
+        });
+        void opts.ledger
+          .append({
+            type: "log",
+            at: deps.nowIso(),
+            level: "info",
+            message: `agent-memory: compacted MEMORY.md for "${safeName}" (${result.beforeBytes} → ${result.afterBytes} bytes, ratio=${result.ratio.toFixed(3)})`,
+          })
+          .catch(() => undefined);
+        deps.memoryOversizeWarned.delete(key);
+        return { ok: true, value: result };
+      } catch (e) {
+        return { ok: false, error: captureError(e) };
+      } finally {
+        compactInFlight.delete(key);
+      }
+    })();
+
+    compactInFlight.set(key, work);
+    return work;
   }
 
   async function promote(

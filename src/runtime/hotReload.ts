@@ -32,7 +32,8 @@
  * Refs: plan.md §4 Slice 16, PRD §3.1, §3.2, §3.6.
  */
 
-import { mkdirSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { mkdirSync, readFileSync } from "node:fs";
 import { basename, extname } from "node:path";
 
 import type { WorkflowFile, ExtensionAPI } from "../types/internal.js";
@@ -185,7 +186,14 @@ export async function createHotReloadWatcher(
     const timer = setTimeout(() => {
       debounceTimers.delete(absPath);
       if (closed) return;
-      handleEvent(absPath, event);
+      try {
+        handleEvent(absPath, event);
+      } catch (err) {
+        log("error", `hot-reload: unhandled error in ${event} handler`, {
+          absPath,
+          error: String(err),
+        });
+      }
     }, debounceMs);
     debounceTimers.set(absPath, timer);
   }
@@ -278,22 +286,42 @@ export async function createHotReloadWatcher(
     if (runInProgress) {
       log(
         "info",
-        `hot-reload: deferred for \`${name}\` — run in progress`,
+        `hot-reload: deferred for \`${name}\` — run in progress, will retry on completion`,
         { absPath },
       );
+      // Subscribe to the registry and re-invoke handleChange once the
+      // active run for this workflow reaches a terminal state.
+      const unsub = activeRuns.subscribe(() => {
+        const stillRunning = activeRuns
+          .listSummaries()
+          .some(
+            (s) => s.workflowName === name && !isTerminalSummaryState(s.state),
+          );
+        if (!stillRunning) {
+          unsub();
+          handleChange(absPath, name);
+        }
+      });
       return;
     }
 
-    // Invalidate trust: clear old sha256 from our cache.
-    // The trust-store persists sha256 rows on disk; clearing the
-    // in-memory cache forces a re-check on next invocation.
+    // Invalidate trust: compute the new sha256 and compare against
+    // the cached value (if any). On first change the cache is empty,
+    // so any new sha256 is treated as a change — trust is always
+    // invalidated when a file is modified.
     const oldSha256 = sha256Cache.get(absPath);
-    if (oldSha256 !== undefined) {
+    const newSha256 = computeFileSha256(absPath);
+    if (newSha256 !== undefined) {
+      if (newSha256 !== oldSha256) {
+        sha256Cache.set(absPath, newSha256);
+        log("info", `hot-reload: trust invalidated for ${name} (sha256 changed)`, {
+          absPath,
+          oldSha256,
+        });
+      }
+    } else {
+      // File unreadable after change — clear stale cache entry.
       sha256Cache.delete(absPath);
-      log("info", `hot-reload: trust invalidated for ${name} (sha256 changed)`, {
-        absPath,
-        oldSha256,
-      });
     }
 
     // Update registry entry (clears sha256 — will be re-derived on
@@ -382,6 +410,20 @@ export async function createHotReloadWatcher(
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────
+
+/**
+ * Read a file and return its SHA-256 hex digest, or `undefined` if
+ * the file cannot be read (e.g. deleted between the event and the
+ * debounce firing).
+ */
+function computeFileSha256(absPath: string): string | undefined {
+  try {
+    const data = readFileSync(absPath);
+    return createHash("sha256").update(data).digest("hex");
+  } catch {
+    return undefined;
+  }
+}
 
 function detectScope(
   absPath: string,

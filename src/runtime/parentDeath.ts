@@ -81,6 +81,34 @@ set -eu
 PI_PARENT_PID=${opts.originalParentPid}
 POLL_INTERVAL=${interval}
 
+# Snapshot the parent's start time to guard against PID recycling.
+# If the OS reuses PI_PARENT_PID after a SIGKILL, the start time of
+# the new occupant will differ, so we treat the original parent as
+# gone rather than being fooled by the recycled PID.
+# Linux: /proc/<pid>/stat field 22 (jiffies since boot, ~1 ms precision).
+# macOS/BSD: ps -o lstart= (1-second precision — sufficient for the
+#   5 s poll window, since a recycled PID cannot share a start-second
+#   with the original parent when we're polling at 5 s intervals).
+_pi_parent_start() {
+  if [ -r "/proc/${opts.originalParentPid}/stat" ]; then
+    awk '{print $22}' "/proc/${opts.originalParentPid}/stat" 2>/dev/null
+  else
+    ps -o lstart= -p "${opts.originalParentPid}" 2>/dev/null
+  fi
+}
+PI_PARENT_START=$(_pi_parent_start)
+
+# _pi_parent_alive returns 0 (true) only when PI_PARENT_PID exists AND
+# its start time matches the snapshot, preventing false-alive readings
+# from a recycled PID.  Falls back to PID-only check when start-time
+# is unavailable (empty string) so behaviour degrades gracefully.
+_pi_parent_alive() {
+  kill -0 "$PI_PARENT_PID" 2>/dev/null || return 1
+  if [ -n "$PI_PARENT_START" ]; then
+    [ "$(_pi_parent_start)" = "$PI_PARENT_START" ]
+  fi
+}
+
 # Watcher: poll the original parent's existence; if gone, SIGTERM us.
 # We send to $$ which will be the eventual exec'd pi process (since
 # exec replaces this shell in-place but keeps the pid).
@@ -93,10 +121,10 @@ POLL_INTERVAL=${interval}
 # naturally on graceful child exit.
 target_pid=$$
 (
-  while kill -0 "$PI_PARENT_PID" 2>/dev/null && kill -0 "$target_pid" 2>/dev/null; do
+  while _pi_parent_alive && kill -0 "$target_pid" 2>/dev/null; do
     sleep "$POLL_INTERVAL"
   done
-  if ! kill -0 "$PI_PARENT_PID" 2>/dev/null; then
+  if ! _pi_parent_alive; then
     # Parent gone — give the child SIGTERM. If it ignores SIGTERM
     # for >5s, follow with SIGKILL.
     kill -TERM "$target_pid" 2>/dev/null || true

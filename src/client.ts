@@ -50,7 +50,7 @@ import {
   type ForkFromCheckpointOptions,
 } from "./runtime/forkRun.js";
 import type { Run } from "./runManager.js";
-import { activeIndexPath, runDir as runDirFor } from "./util/paths.js";
+import { activeIndexPath, assertSafeRunId, runDir as runDirFor } from "./util/paths.js";
 import type { CtrlCommand, LedgerEntry, RunState } from "./types/internal.js";
 
 /** Shape of the `~/.pi/agent/workflows/runs/.active` file. */
@@ -265,6 +265,10 @@ export class WorkflowClient {
     // Track whether we've already seen a terminal transition so we
     // can break after yielding it (unless follow=true).
     let terminated = false;
+    // Cache the byte offset at which we last ran getRunState+replayState.
+    // If no new bytes have arrived since the last check that came back
+    // non-terminal, the state hasn't changed — skip the redundant replay.
+    let lastTerminalCheckAt = -1;
 
     // eslint-disable-next-line no-constant-condition
     while (true) {
@@ -318,12 +322,52 @@ export class WorkflowClient {
 
       // If the run is terminal AND we've consumed all data, stop
       // polling (avoids spinning forever on a completed run).
+      //
+      // Re-read the ledger before consulting getRunState so the length
+      // guard is meaningful.  After the inner loop, bytesRead is always
+      // set to buf.length, so `buf.length === bytesRead` was always true
+      // and provided no real protection.  With a fresh read, the guard
+      // `freshBuf.length === bytesRead` is a real check: if new bytes
+      // have appeared since buf was read (e.g. a terminal transition
+      // landed after the readFile at the top of this iteration), we skip
+      // the break and let the next iteration yield those bytes normally.
       if (!follow) {
-        const currentState = replayState(
-          (await this.getRunState(runId))?.entries ?? [],
-        );
-        if (TERMINAL_STATES.has(currentState) && buf.length === bytesRead) {
-          break;
+        const freshBuf = await fsp.readFile(ledgerFile).catch(() => null);
+        if (freshBuf !== null && freshBuf.length === bytesRead) {
+          // Only recompute state when new bytes have arrived since the
+          // last check.  If bytesRead hasn't changed the ledger is
+          // identical, so the replay result would be the same.
+          if (lastTerminalCheckAt === bytesRead) {
+            await sleep(this.#pollIntervalMs);
+            continue;
+          }
+          lastTerminalCheckAt = bytesRead;
+          const currentState = replayState(
+            (await this.getRunState(runId))?.entries ?? [],
+          );
+          if (TERMINAL_STATES.has(currentState)) {
+            // Drain any bytes written between the freshBuf snapshot and
+            // getRunState's internal readFile — the terminal transition
+            // may have landed in that window and would never be yielded
+            // without this pass.
+            const drainBuf = await fsp.readFile(ledgerFile).catch(() => null);
+            if (drainBuf !== null && drainBuf.length > bytesRead) {
+              const newData = drainBuf.slice(bytesRead).toString("utf8");
+              bytesRead = drainBuf.length;
+              for (const rawLine of newData.split("\n")) {
+                const line = rawLine.trim();
+                if (!line) continue;
+                let parsed: unknown;
+                try { parsed = JSON.parse(line); } catch { continue; }
+                if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) continue;
+                const entry = parsed as LedgerEntry;
+                if (since !== undefined && "at" in entry &&
+                    (entry as { at: string }).at < since) continue;
+                yield entry;
+              }
+            }
+            break;
+          }
         }
       }
 
@@ -344,7 +388,8 @@ export class WorkflowClient {
    * The write is synchronous + fsynced so the command is durable
    * before this method resolves.
    *
-   * @throws if the run directory doesn't exist or the write fails.
+   * @throws if the run directory doesn't exist, the run is already in a
+   *   terminal state, or the write fails.
    */
   async sendControl(
     runId: string,
@@ -453,7 +498,7 @@ export class WorkflowClient {
   ): Promise<Run> {
     const merged: ForkFromCheckpointOptions =
       this.#runsHomeOverride !== undefined && opts.resolveRunDir === undefined
-        ? { ...opts, resolveRunDir: (id: string) => join(this.#runsHomeOverride!, id) }
+        ? { ...opts, resolveRunDir: (id: string) => { assertSafeRunId(id); return join(this.#runsHomeOverride!, id); } }
         : opts;
     return forkFromCheckpoint(parentRunId, merged);
   }
@@ -463,6 +508,7 @@ export class WorkflowClient {
   // ──────────────────────────────────────────────────────────────────
 
   #runDir(runId: string): string {
+    assertSafeRunId(runId);
     if (this.#runsHomeOverride !== undefined) {
       return join(this.#runsHomeOverride, runId);
     }

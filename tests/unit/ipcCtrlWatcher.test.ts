@@ -228,6 +228,8 @@ describe("startCtrlWatcher: rotation", () => {
     const run = makeFakeRun();
     const ctrlFile = join(tmpDir, "ctrl.jsonl");
     const archivedFile = ctrlFile + ".archived";
+    // Note: the rotation may add a timestamp suffix (e.g. .archived.1234567890)
+    const archivedPattern = ctrlFile + ".archived";
     const infos: string[] = [];
 
     // Tiny rotateBytes for fast testing — write enough lines to cross it.
@@ -246,8 +248,9 @@ describe("startCtrlWatcher: rotation", () => {
       appendFileSync(ctrlFile, line);
     }
 
-    // Wait for rotation to happen.
-    const rotated = await waitFor(() => existsSync(archivedFile), 2000, 30);
+    // Wait for rotation to happen — check for any file starting with the archived pattern.
+    const { readdirSync } = await import("node:fs");
+    const rotated = await waitFor(() => readdirSync(tmpDir).some(f => f.startsWith("ctrl.jsonl.archived")), 2000, 30);
     run.terminate();
     await new Promise((r) => setTimeout(r, 50));
 
