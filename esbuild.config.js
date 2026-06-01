@@ -24,12 +24,12 @@ import { copyFile, mkdir } from "node:fs/promises";
 import path from "node:path";
 
 export const config = {
-  entryPoints: ["src/index.ts"],
+  entryPoints: ["src/index.ts", "src/testing.ts"],
   bundle: true,
   platform: "node",
   format: "esm",
   target: "node22",
-  outfile: "dist/index.js",
+  outdir: "dist",
   sourcemap: false,
   // Slice 6 will likely add a `banner` for the top-level `import`-shim
   // dance node ESM needs around `__dirname`. Leave alone for now.
