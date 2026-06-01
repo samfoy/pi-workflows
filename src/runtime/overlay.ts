@@ -95,6 +95,22 @@ export function __isOverlayOpenForTest(): boolean {
   return _overlayOpen;
 }
 
+/**
+ * Test-only seam: pure ledger-narrowing helpers used by the overlay's
+ * appendEntry shim. Exported so unit tests can probe the validation
+ * matrix (runId required, per-customType field shapes) without
+ * mounting the full TUI.
+ *
+ * Production callers should NOT depend on this surface; the underscore
+ * prefix marks it as unstable.
+ */
+export const __narrowForTest = {
+  narrowEntry: (customType: string, data: unknown) => narrowEntry(customType, data),
+  narrowPhaseEntry: (customType: string, data: unknown) =>
+    narrowPhaseEntry(customType, data),
+  shortenId: (runId: string) => shortenId(runId),
+};
+
 export interface MountOverlayOpts {
   readonly pi: ExtensionAPI;
   readonly ctx: ExtensionCommandContextLike;
