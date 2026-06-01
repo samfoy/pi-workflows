@@ -25,8 +25,6 @@
 import { existsSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 
-import { Type } from "typebox";
-
 import type { ExtensionAPI, ExtensionContextLike, WorkflowFile } from "../types/internal.js";
 import { workflowsHome } from "../util/paths.js";
 import { RESERVED_NAMES, classifyFilename } from "../registry.js";
@@ -250,18 +248,24 @@ export default async function (ctx) {
 }
 `.trim(),
 
-    parameters: Type.Object({
-      name: Type.String({
-        description:
-          "Workflow name (used as the slash command: /name). " +
-          "Must be lowercase letters, digits, and hyphens only.",
-      }),
-      script: Type.String({
-        description:
-          "The complete workflow script. Must start with " +
-          "`export const meta = { name, description, version };`.",
-      }),
-    }),
+    parameters: {
+      type: "object",
+      required: ["name", "script"],
+      properties: {
+        name: {
+          type: "string",
+          description:
+            "Workflow name (used as the slash command: /name). " +
+            "Must be lowercase letters, digits, and hyphens only.",
+        },
+        script: {
+          type: "string",
+          description:
+            "The complete workflow script. Must start with " +
+            "`export const meta = { name, description, version };`.",
+        },
+      },
+    } as never,
 
     async execute(_id, params, ctx) {
       const { name: paramName, script } = params as { name: string; script: string };

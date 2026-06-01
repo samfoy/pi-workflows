@@ -36,8 +36,6 @@
  * `startRun` callback with a real `approval` block built from `ctx`.
  */
 
-import { Type } from "typebox";
-
 import type { ExtensionAPI, WorkflowFile } from "../types/internal.js";
 
 // ─── Public API ──────────────────────────────────────────────────────────────
@@ -106,22 +104,26 @@ export function registerRunWorkflowTool(opts: RunWorkflowToolOpts): void {
       "Prefer run_workflow over write_workflow when the workflow already exists. Don't re-author an existing workflow just because you'd write it slightly differently.",
     ],
 
-    parameters: Type.Object({
-      name: Type.String({
-        description:
-          "Workflow name (the slug used as the slash command). " +
-          "Leading '/' is allowed but optional. Examples: 'audit-and-improve', '/codebase-audit'.",
-      }),
-      input: Type.Optional(
-        Type.String({
+    parameters: {
+      type: "object",
+      required: ["name"],
+      properties: {
+        name: {
+          type: "string",
+          description:
+            "Workflow name (the slug used as the slash command). " +
+            "Leading '/' is allowed but optional. Examples: 'audit-and-improve', '/codebase-audit'.",
+        },
+        input: {
+          type: "string",
           description:
             "Optional argument string passed to the workflow as `ctx.input`. " +
             "Same shape as the text after the slash command (e.g. for " +
             "`/codebase-audit src/auth`, input is 'src/auth'). " +
             "Defaults to empty string when omitted.",
-        }),
-      ),
-    }),
+        },
+      },
+    } as never,
 
     async execute(_id, params, ctx) {
       const { name: rawName, input } = params as {

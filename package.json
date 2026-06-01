@@ -38,13 +38,7 @@
     "coverage:check": "c8 check-coverage --lines 85 --branches 70 --include='src/runtime/**' --include='src/util/**'"
   },
   "peerDependencies": {
-    "@earendil-works/pi-coding-agent": "*",
-    "typebox": "^1.0.0"
-  },
-  "peerDependenciesMeta": {
-    "typebox": {
-      "optional": true
-    }
+    "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
