@@ -857,6 +857,9 @@ export async function resumeRun(
           try {
             await sm.go("running");
           } catch {
+            // Gate was already resumed above; re-pause so the run doesn't
+            // end up in a zombie state with an open gate.
+            pauseGate.pause();
             return false;
           }
           return true;

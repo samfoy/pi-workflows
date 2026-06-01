@@ -78,9 +78,23 @@ import { MAX_INPUT_LENGTH } from "./util/limits.js";
  */
 export function extractMetaPhases(source: string): Array<{ title: string }> {
   // Match: phases: [ { title: '...' }, ... ] or phases: [{ title: "..." }, ...]
-  const phasesBlock = /phases\s*:\s*(\[[\s\S]*?\])/m.exec(source);
-  if (!phasesBlock?.[1]) return [];
-  const block = phasesBlock[1];
+  // Use a balanced-bracket scan so nested arrays don't truncate the match.
+  const phasesStart = /phases\s*:\s*(\[)/.exec(source);
+  if (!phasesStart) return [];
+  let depth = 0;
+  let start = -1;
+  let end = -1;
+  for (let i = phasesStart.index + phasesStart[0].length - 1; i < source.length; i++) {
+    if (source[i] === "[") {
+      if (depth === 0) start = i;
+      depth++;
+    } else if (source[i] === "]") {
+      depth--;
+      if (depth === 0) { end = i; break; }
+    }
+  }
+  if (start === -1 || end === -1) return [];
+  const block = source.slice(start, end + 1);
   const titles: Array<{ title: string }> = [];
   const titleRe = /title\s*:\s*['"]([^'"]+)['"]/g;
   let m: RegExpExecArray | null;

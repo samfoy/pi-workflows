@@ -140,8 +140,11 @@ export function acquireResumeLock(opts: {
         // reader seeing an empty file can safely treat it as a crash artifact.
         emptyBody = false; // holderPid remains 0 → isStale=true below
       }
-    } catch {
-      // Unreadable lock — treat as stale.
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException)?.code;
+      if (code !== "ENOENT") throw err;
+      // ENOENT: file disappeared between tryCreate returning null and our read.
+      // Treat as stale — caller will retry.
       body = {};
     }
     const holderPid = typeof body.pid === "number" ? body.pid : 0;

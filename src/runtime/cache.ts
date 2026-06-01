@@ -368,14 +368,19 @@ export class CacheStore {
     const lines = this.batchBuffer.splice(0);
     const combined = lines.join(""); // each line already ends with \n
     let fd: number | undefined;
+    let writeSucceeded = false;
     try {
       fd = openSync(this.cachePath, "a", 0o644);
       writeSync(fd, combined);
+      writeSucceeded = true;
       fsyncSync(fd);
     } catch (err) {
-      // Restore records to the front of the buffer so the next drain
-      // can retry — without this, a transient fs error silently drops data.
-      this.batchBuffer.unshift(...lines);
+      // Only restore records if the write itself failed. If fsync failed
+      // after a successful write the data is already on disk — restoring
+      // the buffer would cause duplicates on the next drain call.
+      if (!writeSucceeded) {
+        this.batchBuffer.unshift(...lines);
+      }
       throw err;
     } finally {
       if (fd !== undefined) closeSync(fd);

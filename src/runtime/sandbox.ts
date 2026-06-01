@@ -496,6 +496,8 @@ export class Sandbox {
   private readonly logFn: (entry: SandboxLogEntry) => void;
   private readonly timerBridge: TimerBridge;
   private disposed = false;
+  /** Per-run abort controller — set during runScript, null otherwise. */
+  private _runAbort: AbortController | null = null;
 
   constructor(opts: SandboxOptions) {
     this.opts = opts;
@@ -536,7 +538,7 @@ export class Sandbox {
       signal: opts.signal,
       onTimerError: (e) => {
         // Fires when realm-error reconstruction failed — pass the
-        // SandboxViolationError to the log channel.
+        // SandboxViolationError to the log channel, then abort the run.
         this.logFn({
           t: new Date().toISOString(),
           level: "error",
@@ -544,10 +546,11 @@ export class Sandbox {
             "[sandbox-timer-error] " + safeStringifyThrown(e),
           ],
         });
+        this._runAbort?.abort(new Error(safeStringifyThrown(e)));
       },
       onTimerContextError: (e) => {
         // Fires on the happy path: realm-error was reconstructed
-        // successfully. Log via the same channel.
+        // successfully. Log via the same channel, then abort the run.
         this.logFn({
           t: new Date().toISOString(),
           level: "error",
@@ -555,6 +558,7 @@ export class Sandbox {
             "[sandbox-timer-error] " + safeStringifyThrown(e),
           ],
         });
+        this._runAbort?.abort(new Error(safeStringifyThrown(e)));
       },
     });
 
@@ -791,6 +795,17 @@ export class Sandbox {
       );
     }
 
+    // Honor abort: race the script promise against the signal.
+    // BUG-061: always remove the fireCtxAbort listener after the run
+    // completes (normal return, abort, or non-abort rejection). The
+    // { once: true } flag only self-removes when the signal fires; on
+    // all other exit paths the listener stays registered, preventing
+    // GC of the Context realm as long as the AbortController lives.
+    //
+    // _runAbort is set BEFORE runInContext so that onTimerContextError
+    // callbacks (which can fire synchronously during the context's first
+    // microtask tick) always see a non-null controller.
+    this._runAbort = new AbortController();
     let promise: Promise<unknown>;
     try {
       promise = script.runInContext(this.context, {
@@ -831,9 +846,14 @@ export class Sandbox {
     // GC of the Context realm as long as the AbortController lives.
     let returnValue: unknown;
     try {
-      returnValue = await raceWithAbort(promise, this.opts.signal, this.context);
+      returnValue = await raceWithAbort(
+        promise,
+        AbortSignal.any([this.opts.signal, this._runAbort.signal]),
+        this.context,
+      );
     } finally {
       hostSignal.removeEventListener("abort", fireCtxAbort);
+      this._runAbort = null;
     }
 
     const durationMs = Date.now() - t0;

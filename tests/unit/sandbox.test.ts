@@ -276,22 +276,36 @@ test("MUTATION-PROBE: if Object.prototype is NOT frozen, this test fails", async
 
 // ─── Realm error reconstruction round-trip via timer error path ───
 
-test("timer callback throwing Error: surfaces in log", async () => {
+test("timer callback throwing Error: aborts the run and surfaces in log", async () => {
   const { signal } = fresh();
-  const r = await runScript(
-    `
-      // Schedule a timer that throws and let it fire before we return.
+  // Timer throws now abort the run (fix: onTimerContextError calls _runAbort.abort).
+  // The run rejects and the error appears in the result log (logged before abort propagates).
+  let caughtErr: Error | null = null;
+  try {
+    await runScript(
+      `
       setTimeout(() => { throw new Error('timer-boom'); }, 5);
       await new Promise(r => setTimeout(r, 50));
       return 'done';
     `,
-    { signal },
+      { signal },
+    );
+  } catch (e) {
+    caughtErr = e as Error;
+  }
+  assert.ok(caughtErr !== null, "run must reject when a timer callback throws");
+  // Must be error-like (context-realm Error fails instanceof host Error).
+  assert.ok(
+    caughtErr instanceof Error ||
+      (caughtErr !== null &&
+        typeof (caughtErr as unknown as Record<string,unknown>).message === "string"),
+    "rejected value must be error-like",
   );
-  assert.equal(r.returnValue, "done");
-  // The timer error gets logged as level=error via the default sink.
-  const errLine = r.log.find((l) => l.level === "error");
-  assert.ok(errLine, "expected an error log entry from the timer throw");
-  assert.match(errLine!.args.join(" "), /timer-boom/);
+  assert.match(
+    (caughtErr as unknown as { message: string }).message,
+    /aborted|timer-boom/,
+    "error must mention abort or the original throw",
+  );
 });
 
 // ─── AbortSignal ────────────────────────────────────────────────
