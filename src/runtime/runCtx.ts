@@ -97,6 +97,8 @@ import { makeSemaphore } from "./semaphore.js";
 import { agentTranscriptPath } from "../util/paths.js";
 import { MAX_PROMPT_LENGTH } from "../util/limits.js";
 import { renderMermaidSync } from "./visualize.js";
+import { createCacheMethods } from "./ctx/cache.js";
+import { isLikeArray, requireString } from "./ctx/utils.js";
 import {
   assertGitRepo,
   createWorktreeForAgent,
@@ -255,6 +257,12 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   const nowIso = opts.nowIso ?? (() => new Date().toISOString());
   const nowMs = opts.nowMs ?? Date.now;
   const newAgentId = opts.newAgentId ?? defaultAgentIdFactory();
+
+  // Per-cluster method factories. Each takes the host options and
+  // returns the bridge-shaped methods. See src/runtime/ctx/ for the
+  // implementations — the audit-driven split landed cluster-by-cluster
+  // so closure-captured state stays explicit.
+  const cacheMethods = createCacheMethods(opts);
 
   let agentCount = 0;
   let budgetSpent = 0;
@@ -1202,48 +1210,16 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
 
   // ─── ctx.cache.* ────────────────────────────────────────────────
   async function cacheGet(key: unknown): Promise<RunCtxBridgeResult<unknown>> {
-    try {
-      requireString(key, "ctx.cache.get: key");
-      return { ok: true, value: opts.cache.getAuthorCache(key as string) };
-    } catch (e) {
-      return { ok: false, error: captureError(e) };
-    }
+    return cacheMethods.cacheGet(key);
   }
   async function cacheSet(key: unknown, value: unknown): Promise<RunCtxBridgeResult<null>> {
-    try {
-      requireString(key, "ctx.cache.set: key");
-      // Eagerly check JSON-cloneability — better error site than disk.
-      try {
-        JSON.stringify(value);
-      } catch (cycErr) {
-        throw new TypeError(
-          `ctx.cache.set: value is not JSON-serializable (${(cycErr as Error).message})`,
-        );
-      }
-      const cloned: unknown =
-        value === undefined ? undefined : JSON.parse(JSON.stringify(value));
-      await opts.cache.setAuthorCache(key as string, cloned);
-      return { ok: true, value: null };
-    } catch (e) {
-      return { ok: false, error: captureError(e) };
-    }
+    return cacheMethods.cacheSet(key, value);
   }
   async function cacheHas(key: unknown): Promise<RunCtxBridgeResult<boolean>> {
-    try {
-      requireString(key, "ctx.cache.has: key");
-      return { ok: true, value: opts.cache.hasAuthorCache(key as string) };
-    } catch (e) {
-      return { ok: false, error: captureError(e) };
-    }
+    return cacheMethods.cacheHas(key);
   }
   async function cacheDelete(key: unknown): Promise<RunCtxBridgeResult<null>> {
-    try {
-      requireString(key, "ctx.cache.delete: key");
-      await opts.cache.deleteAuthorCache(key as string);
-      return { ok: true, value: null };
-    } catch (e) {
-      return { ok: false, error: captureError(e) };
-    }
+    return cacheMethods.cacheDelete(key);
   }
 
   // ─── ctx.log ────────────────────────────────────────────────────
@@ -2105,22 +2081,6 @@ function defaultAgentIdFactory(): () => string {
   // Short, collision-resistant, sortable: 6 random hex bytes.
   return () => sha256(String(Math.random()) + ":" + String(Date.now())).slice(0, 12);
 }
-
-function isLikeArray(v: unknown): v is ArrayLike<unknown> {
-  return (
-    v !== null &&
-    typeof v === "object" &&
-    typeof (v as { length?: unknown }).length === "number"
-  );
-}
-
-function requireString(v: unknown, label: string): void {
-  if (typeof v !== "string") {
-    throw new TypeError(`${label}: expected string, got ${typeof v}`);
-  }
-}
-
-/**
 
 /**
  * Schema-validation helpers (extractJson, validateAgainstSchema,
