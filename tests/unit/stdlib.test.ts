@@ -302,6 +302,70 @@ test("ctx.parallel: rejects non-function fn", async () => {
   );
 });
 
+test("ctx.parallel: forwards failMode='null' to underlying ctx.phase", async () => {
+  // Regression: ParallelOpts used to drop failMode silently, so a
+  // single agent crash would sink the whole phase even when the
+  // workflow author opted into partial-failure tolerance.
+  let observedFailMode: unknown = "<unset>";
+  const host = stubHost({
+    phaseResults: () => {
+      throw new Error("boom");
+    },
+  });
+  const innerPhase = host.phase;
+  host.phase = async (name, agents, opts) => {
+    observedFailMode =
+      opts !== null && typeof opts === "object"
+        ? (opts as Record<string, unknown>).failMode
+        : undefined;
+    return innerPhase(name, agents, opts);
+  };
+  const out = (await runWith(
+    `
+      return await ctx.parallel(
+        [1, 2],
+        (n) => ctx.agent("x" + n, { id: "n" + n }),
+        { failMode: "null" },
+      );
+    `,
+    host,
+  )) as Array<unknown>;
+  assert.equal(observedFailMode, "null");
+  // failMode='null' → the stub host returns nulls for every agent
+  // when the phaseResults callback throws.
+  assert.deepEqual([...out], [null, null]);
+});
+
+test("ctx.parallel: forwards phaseName + maxConcurrent + timeoutMs", async () => {
+  let observed: Record<string, unknown> | undefined;
+  let observedName: string | undefined;
+  const host = stubHost({
+    phaseResults: (_name, handles) =>
+      handles.map((h) => mkResult(h.id, "out:" + h.id)),
+  });
+  const innerPhase = host.phase;
+  host.phase = async (name, agents, opts) => {
+    observedName = String(name);
+    observed =
+      opts !== null && typeof opts === "object"
+        ? { ...(opts as Record<string, unknown>) }
+        : undefined;
+    return innerPhase(name, agents, opts);
+  };
+  await runWith(
+    `
+      return await ctx.parallel(
+        [1],
+        (n) => ctx.agent("x" + n, { id: "n" + n }),
+        { phaseName: "recon", maxConcurrent: 2, timeoutMs: 5000 },
+      );
+    `,
+    host,
+  );
+  assert.equal(observedName, "recon");
+  assert.deepEqual(observed, { maxConcurrent: 2, timeoutMs: 5000 });
+});
+
 // ─── retry ─────────────────────────────────────────────────────────
 
 test("ctx.retry: succeeds on attempt 3 with attempts=5", async () => {

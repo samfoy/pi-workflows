@@ -516,19 +516,26 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
 
         if (failMode === 'null') {
           // failMode: 'null' — return nulls for failed agents, continue.
-          const out: Array<AgentResultLike | null> = settled.map((s) =>
-            s.status === 'fulfilled'
-              ? ({
-                  agentId: s.value.agentId,
-                  text: s.value.text,
-                  usage: s.value.usage as unknown as Readonly<Record<string, number>>,
-                  durationMs: s.value.durationMs,
-                  toolCalls: s.value.toolCalls,
-                  transcriptPath: s.value.transcriptPath,
-                  cached: (s.value as unknown as { cached?: boolean }).cached === true,
-                } as AgentResultLike)
-              : null,
-          );
+          const out: Array<AgentResultLike | null> = settled.map((s) => {
+            if (s.status !== 'fulfilled') return null;
+            const entry = {
+              agentId: s.value.agentId,
+              text: s.value.text,
+              usage: s.value.usage as unknown as Readonly<Record<string, number>>,
+              durationMs: s.value.durationMs,
+              toolCalls: s.value.toolCalls,
+              transcriptPath: s.value.transcriptPath,
+              cached: (s.value as unknown as { cached?: boolean }).cached === true,
+            } as AgentResultLike;
+            // Preserve schema output if present (mirror the all-success
+            // path below). Without this, fulfilled agents lose their
+            // parsed structured output whenever a sibling fails.
+            const schemaOut = (s.value as unknown as { output?: unknown }).output;
+            if (schemaOut !== undefined) {
+              (entry as Record<string, unknown>).output = schemaOut;
+            }
+            return entry;
+          });
           // BUG-057 fix: preserve | null in the bridge result type so the
           // sandbox receives the correct shape and callers can distinguish
           // failed agents from successful ones.

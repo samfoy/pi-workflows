@@ -170,3 +170,98 @@ test("ctx.phase rejection: AggregateError preserves both error classes", async (
   assert.match(allMsgs, /agent=a2/);
   assert.match(allMsgs, /agent=a3/);
 });
+
+test("ctx.phase failMode='null': preserves schema output on fulfilled agents when a sibling fails", async () => {
+  // Regression: the failMode='null' branch built result entries inline
+  // and dropped the `output` field, so any successful agent that
+  // produced schema-parsed JSON lost its parsed payload whenever a
+  // sibling rejected. The all-success path preserved it; the
+  // any-failure path did not.
+  const { root, resolveRunDir } = tmpRunsRoot();
+  const wfPath = join(root, "schema-output.workflow.js");
+  writeFileSync(
+    wfPath,
+    `
+      const findingSchema = {
+        type: "object",
+        required: ["area", "findings"],
+        properties: {
+          area: { type: "string" },
+          findings: { type: "array" },
+        },
+      };
+      const a1 = ctx.agent("ok", { id: "a1", schema: findingSchema });
+      const a2 = ctx.agent("boom", { id: "a2", schema: findingSchema });
+      const results = await ctx.phase("recon", [a1, a2], { failMode: "null" });
+      return {
+        len: results.length,
+        firstHasOutput: !!(results[0] && results[0].output),
+        firstOutput: results[0] ? results[0].output : null,
+        secondIsNull: results[1] === null,
+      };
+    `,
+    "utf8",
+  );
+
+  // Stub dispatch: a1 returns valid JSON in a fenced block; a2 throws.
+  const stubDispatch = async (opts: DispatcherOptions): Promise<AgentResult> => {
+    if (opts.agentId === "a1") {
+      return {
+        ok: true,
+        agentId: "a1",
+        text:
+          'Here is the report:\n\n```json\n' +
+          '{"area": "quality", "findings": [{"title": "x"}]}\n' +
+          '```',
+        usage: {
+          input: 0,
+          output: 0,
+          cacheRead: 0,
+          cacheWrite: 0,
+          totalTokens: 0,
+        },
+        toolCalls: 0,
+        durationMs: 1,
+        transcriptPath: "",
+        exitCode: 0,
+      };
+    }
+    if (opts.agentId === "a2") {
+      throw new AgentSubprocessError({
+        agentId: "a2",
+        exitCode: null,
+        signal: "SIGTERM",
+      });
+    }
+    throw new Error(`unexpected agent ${opts.agentId}`);
+  };
+
+  const run = await startWorkflowRun(wf(wfPath), "", {
+    mockAgents: false,
+    preApproved: true,
+    dispatch: stubDispatch,
+    cwd: root,
+    resolveRunDir,
+  });
+
+  const captured = (await run.promise) as {
+    len: number;
+    firstHasOutput: boolean;
+    firstOutput: { area?: string; findings?: unknown[] } | null;
+    secondIsNull: boolean;
+  };
+
+  assert.equal(captured.len, 2);
+  assert.equal(captured.secondIsNull, true, "failed agent slot is null");
+  assert.equal(
+    captured.firstHasOutput,
+    true,
+    "fulfilled agent's schema output survives failMode='null' alongside a failing sibling",
+  );
+  assert.equal(captured.firstOutput?.area, "quality");
+  assert.equal(
+    Array.isArray(captured.firstOutput?.findings),
+    true,
+    "findings array is preserved",
+  );
+});

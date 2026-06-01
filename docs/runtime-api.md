@@ -382,10 +382,19 @@ const results = await ctx.parallel(files, (file) =>
 
 **`ParallelOpts`:**
 ```ts
-interface ParallelOpts {
-  phaseName?: string; // default: "parallel"
+interface ParallelOpts extends PhaseOpts {
+  phaseName?: string;     // default: "parallel"
+  // Inherited from PhaseOpts:
+  // failMode?: 'throw' | 'null';   // default 'throw'
+  // timeoutMs?: number;            // phase-level deadline
+  // maxConcurrent?: number;        // per-phase semaphore cap
 }
 ```
+
+`failMode`, `timeoutMs`, and `maxConcurrent` are forwarded to the
+underlying `ctx.phase` call. Pass `{ failMode: 'null' }` when you want a
+single agent failure to surface as a `null` slot rather than rejecting
+the whole phase.
 
 ---
 

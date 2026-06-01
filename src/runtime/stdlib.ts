@@ -561,10 +561,22 @@ globalThis.__pi_install_stdlib = function (ctxRef) {
         opts.phaseName.length > 0
           ? opts.phaseName
           : 'parallel';
+      // Forward PhaseOpts (failMode / timeoutMs / maxConcurrent) to the
+      // underlying ctx.phase call. Drop phaseName — that's our own knob.
+      // We construct a fresh object so user-supplied prototypes / extra
+      // keys can't leak through.
+      let phaseOpts;
+      if (opts && typeof opts === 'object') {
+        phaseOpts = {};
+        if (opts.failMode !== undefined) phaseOpts.failMode = opts.failMode;
+        if (opts.timeoutMs !== undefined) phaseOpts.timeoutMs = opts.timeoutMs;
+        if (opts.maxConcurrent !== undefined)
+          phaseOpts.maxConcurrent = opts.maxConcurrent;
+      }
       const handles = [];
       function step(i) {
         if (i >= items.length) {
-          return ctxRef.current.phase(phaseName, handles);
+          return ctxRef.current.phase(phaseName, handles, phaseOpts);
         }
         // Invoke fn synchronously, then handle the result.
         // Check kind BEFORE Promise.resolve to avoid the then-getter (BUG-001 fix).

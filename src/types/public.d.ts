@@ -304,7 +304,7 @@ export interface ConsensusOpts {
   readonly threshold?: number;
 }
 
-export interface ParallelOpts {
+export interface ParallelOpts extends PhaseOpts {
   /** Override the auto-generated phase name (default `"parallel"`). */
   readonly phaseName?: string;
 }
