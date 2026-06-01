@@ -104,6 +104,7 @@ import { createMemoMethods } from "./ctx/memo.js";
 import { createCheckpointReportMethods } from "./ctx/checkpointReport.js";
 import { createMemoryMethods } from "./ctx/memory.js";
 import { createInterruptMethod } from "./ctx/interrupt.js";
+import { createAgentMethod } from "./ctx/agent.js";
 import { isLikeArray, requireString } from "./ctx/utils.js";
 import {
   assertGitRepo,
@@ -284,6 +285,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
     nextInterruptIdx: () => interruptCounter++,
     nowIso,
   });
+  const agent = createAgentMethod(opts, { newAgentId });
 
   let agentCount = 0;
   let budgetSpent = 0;
@@ -355,52 +357,7 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
   }
 
   // ─── ctx.agent ──────────────────────────────────────────────────
-  // Pure: builds a handle object. No I/O. Auto-generates id if absent.
-  // Validates agentOpts for known fields. Per-run cap is enforced
-  // when the handle is actually run (inside ctx.phase) — checking
-  // here would let authors construct N handles but only run a few.
-  function agent(prompt: unknown, optsArg: unknown): RunCtxBridgeResult<AgentHandleData> {
-    try {
-      if (typeof prompt !== "string") {
-        throw new TypeError(
-          `ctx.agent: prompt must be a string (got ${typeof prompt})`,
-        );
-      }
-      if (prompt.length > MAX_PROMPT_LENGTH) {
-        throw new RangeError(
-          `ctx.agent: prompt exceeds MAX_PROMPT_LENGTH (got ${prompt.length}, max ${MAX_PROMPT_LENGTH}). Chunk the input across multiple agents instead of relying on a single oversized call.`,
-        );
-      }
-      const ao =
-        optsArg === undefined || optsArg === null
-          ? ({} as Record<string, unknown>)
-          : (optsArg as Record<string, unknown>);
-      if (typeof ao !== "object" || Array.isArray(ao)) {
-        throw new TypeError("ctx.agent: opts must be a plain object or omitted");
-      }
-      // Plain JSON-clone to strip Context-realm prototypes — gives the
-      // host a safe, mutation-immune snapshot.
-      const optsClone: Record<string, unknown> = JSON.parse(
-        JSON.stringify(ao),
-      );
-      const id =
-        typeof optsClone.id === "string" && optsClone.id.length > 0
-          ? optsClone.id
-          : newAgentId();
-      // Hand the id back via opts.id so cache-key derivation has it
-      // even if the author didn't supply one.
-      optsClone.id = id;
-      const handle: AgentHandleData = {
-        kind: "agent",
-        id,
-        prompt,
-        opts: Object.freeze(optsClone),
-      };
-      return { ok: true, value: handle };
-    } catch (e) {
-      return { ok: false, error: captureError(e) };
-    }
-  }
+  // Implementation in ./ctx/agent.ts; `agent` already bound above.
 
   // ─── ctx.phase ──────────────────────────────────────────────────
   async function phase(
