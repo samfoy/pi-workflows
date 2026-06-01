@@ -23,6 +23,7 @@ import {
   removeParentDeathWrapper,
   writeParentDeathWrapper,
 } from "../../src/runtime/parentDeath.js";
+import { InvalidAgentIdError } from "../../src/util/paths.js";
 
 function tmpRunDir(): string {
   return mkdtempSync(join(tmpdir(), "pi-wf-pdeath-"));
@@ -80,4 +81,31 @@ test("writeParentDeathWrapper: smoke-exec — wrapped echo prints when parent al
     child.on("error", reject);
   });
   assert.equal(Buffer.concat(out).toString("utf8").trim(), "wrapped-output");
+});
+
+test("writeParentDeathWrapper: rejects shell-injection agentIds (defense in depth)", async () => {
+  // The dispatcher already validates upstream, but the wrapper
+  // re-validates because interpolating user-controlled strings into a
+  // shell script is the canonical injection footgun. A newline-bearing
+  // id would break out of the `# Agent: <id>` comment line otherwise.
+  const dir = tmpRunDir();
+  const malicious = [
+    "agent\nrm -rf /",
+    "agent$(whoami)",
+    "agent`id`",
+    "agent;ls",
+    "../escape",
+    "a/b",
+  ];
+  for (const id of malicious) {
+    await assert.rejects(
+      writeParentDeathWrapper({
+        runDirAbs: dir,
+        agentId: id,
+        originalParentPid: process.pid,
+      }),
+      InvalidAgentIdError,
+      `should reject agentId=${JSON.stringify(id)}`,
+    );
+  }
 });

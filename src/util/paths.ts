@@ -173,6 +173,18 @@ export function assertSafeAgentId(agentId: unknown): asserts agentId is string {
   if (agentId.startsWith(".")) {
     throw new InvalidAgentIdError(agentId, "starts with '.' (hidden file)");
   }
+  // Final allowlist gate. Anything that survived the targeted blocks above
+  // but doesn't match this regex contains shell-meaningful characters
+  // (whitespace, $, `, ;, &, |, *, ?, control chars, …). Without this gate,
+  // `writeParentDeathWrapper` can be coerced into injecting shell — the
+  // generated wrapper interpolates the agentId into a comment line, and a
+  // newline would let a malicious id break out of the comment.
+  if (!/^[A-Za-z0-9._-]+$/.test(agentId)) {
+    throw new InvalidAgentIdError(
+      agentId,
+      "contains characters outside [A-Za-z0-9._-]",
+    );
+  }
 }
 
 /**

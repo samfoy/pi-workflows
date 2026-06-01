@@ -791,6 +791,41 @@ test("assertSafeAgentId: rejects leading dot (hidden file)", () => {
   }
 });
 
+test("assertSafeAgentId: rejects shell-meaningful characters", () => {
+  // The targeted blocks above (NUL, /, \, .., leading-.) catch the
+  // path-injection vectors. The allowlist-tail catches everything else
+  // that's a footgun when the id is interpolated into a shell wrapper or
+  // similar context — newlines (comment-break-out), `$`, backticks,
+  // semicolons, `&`, pipes, glob chars, whitespace, control characters.
+  const ids = [
+    "agent\nrm -rf /", // newline — breaks out of `# Agent: <id>` comment
+    "agent\rfoo", // CR
+    "agent\tfoo", // tab
+    "agent foo", // space
+    "agent$(whoami)", // command substitution
+    "agent`whoami`", // backtick command substitution
+    "agent;ls", // statement separator
+    "agent&disown", // background fork
+    "agent|tee", // pipe
+    "agent>foo", // redirect
+    "agent<foo", // redirect
+    "agent*", // glob
+    "agent?", // glob
+    "agent[abc]", // glob
+    "agent\u0007", // BEL control char
+    "\u00e9", // accented latin — outside ASCII allowlist
+    'agent"quoted"', // double quote
+    "agent'quoted'", // single quote
+  ];
+  for (const id of ids) {
+    assert.throws(
+      () => assertSafeAgentId(id),
+      InvalidAgentIdError,
+      `should reject ${JSON.stringify(id)}`,
+    );
+  }
+});
+
 test("agentTranscriptPath: rejects malicious agentId at path-derivation time", () => {
   assert.throws(
     () => agentTranscriptPath("/tmp/run", "../../etc/passwd"),

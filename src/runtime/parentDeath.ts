@@ -40,6 +40,8 @@
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
 
+import { assertSafeAgentId } from "../util/paths.js";
+
 /**
  * Materialize a parent-death-aware shell wrapper into `<runDir>` and
  * return its absolute path. The wrapper, when executed, launches
@@ -56,6 +58,12 @@ export async function writeParentDeathWrapper(opts: {
   /** Polling interval in seconds. PRD §5.5.1 says 5s. */
   pollIntervalSeconds?: number;
 }): Promise<string> {
+  // Defense in depth. Every dispatcher entry point already runs the
+  // agentId through `assertSafeAgentId`, but interpolating user-controlled
+  // strings into a shell script is the canonical injection footgun —
+  // re-validate at the moment of use so a future caller that forgets the
+  // upstream validation still gets blocked here.
+  assertSafeAgentId(opts.agentId);
   const interval = opts.pollIntervalSeconds ?? 5;
   const path = join(opts.runDirAbs, `.pdeath-${opts.agentId}.sh`);
   // POSIX sh — no bashisms. The wrapper accepts the real command and
