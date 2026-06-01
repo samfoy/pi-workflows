@@ -29,7 +29,7 @@
  * resume of the same run is operator error in the first place.
  */
 
-import { existsSync, openSync, readFileSync, statSync, closeSync, unlinkSync, writeSync, fsyncSync } from "node:fs";
+import { existsSync, openSync, readFileSync, closeSync, unlinkSync, writeSync, fsyncSync } from "node:fs";
 import { join } from "node:path";
 
 import { isParentAlive, readBootId, currentBootId } from "./crashSweep.js";
@@ -134,19 +134,11 @@ export function acquireResumeLock(opts: {
           body = parsed as Partial<ResumeLockBody>;
         }
       } else {
-        emptyBody = true;
-        // A crashed writer leaves an empty file with no PID to check liveness
-        // against.  If the mtime has exceeded the init window (5 s) the writer
-        // is gone and the lock is permanently leaked.  Treat it as stale so
-        // the caller can break and re-acquire it.
-        try {
-          const { mtimeMs } = statSync(lockPath);
-          if (Date.now() - mtimeMs > 5_000) {
-            emptyBody = false; // stale-empty: holderPid remains 0 → isStale=true below
-          }
-        } catch {
-          emptyBody = false; // can't stat → assume stale
-        }
+        // Empty file = crashed writer (crash between openSync and writeSync).
+        // No PID is available to check liveness. writeSync happens synchronously
+        // on the same JS thread immediately after openSync (no awaits), so any
+        // reader seeing an empty file can safely treat it as a crash artifact.
+        emptyBody = false; // holderPid remains 0 → isStale=true below
       }
     } catch {
       // Unreadable lock — treat as stale.
@@ -195,22 +187,27 @@ export function acquireResumeLock(opts: {
   }
 
   const fd = opened.fd;
-  const lockBody: ResumeLockBody = {
-    pid: myPid,
-    bootId: myBootId,
-    acquiredAt: nowIso,
-    runId: opts.runId,
-  };
+  // eslint-disable-next-line prefer-const
+  let lockBody!: ResumeLockBody;
   try {
+    lockBody = {
+      pid: myPid,
+      bootId: myBootId,
+      acquiredAt: nowIso,
+      runId: opts.runId,
+    };
     writeSync(fd, JSON.stringify(lockBody, null, 2) + "\n");
     // BUG-116: fsync before closeSync so the lock body is durable on disk
     // before the fd is released. Without this, a reader in another process
     // could see an empty file body in the window between closeSync completing
     // (making the fd available for reuse) and the OS flushing the dirty pages.
     fsyncSync(fd);
-  } finally {
+  } catch (err) {
     closeSync(fd);
+    try { unlinkSync(lockPath); } catch { /* ignore */ }
+    throw err;
   }
+  closeSync(fd);
   return {
     release: () => releaseResumeLock(opts.runDirAbs),
     body: lockBody,

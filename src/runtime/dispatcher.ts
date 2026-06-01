@@ -837,7 +837,7 @@ export async function dispatchAgent(opts: DispatcherOptions): Promise<AgentResul
     } catch {
       // ignore
     }
-    if (exitSignal !== null || (exitCode !== 0 && exitCode !== null)) {
+    if (spawnError !== null || exitSignal !== null || (exitCode !== 0 && exitCode !== null)) {
       throw new AgentSubprocessError({
         agentId: opts.agentId,
         exitCode,

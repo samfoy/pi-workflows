@@ -295,19 +295,16 @@ export async function runGc(opts: GcOptions = {}): Promise<GcResult> {
     }
   }
 
-  // Optionally delete candidates.
-  if (apply) {
-    const pruneWorktrees = opts.pruneWorktrees !== false; // default ON
-    const force = opts.force === true;
-    // ZONE_TIMETRAVEL polish — first pass: any candidate that has
-    // surviving forks is moved to `skipped` (when `force === false`).
-    // We do this BEFORE the worktree-prune loop so refused candidates
-    // never have their worktrees removed. "Surviving" = the fork's
-    // run dir is on disk RIGHT NOW; whether the fork is itself a GC
-    // candidate in this same pass is irrelevant. The user-visible
-    // contract is "don't silently break a lineage chain on a single
-    // pass" — if both A and B are eligible, the operator can re-run
-    // GC after B is deleted (lineage is auto-broken on the next pass).
+  // ZONE_TIMETRAVEL polish — filter candidates that have surviving
+  // fork-children into `skipped`. Runs unconditionally (dry-run AND
+  // apply) so the reported candidates list is accurate in both modes.
+  // "Surviving" = the fork's run dir is on disk RIGHT NOW; whether the
+  // fork is itself a GC candidate in this same pass is irrelevant.
+  // Contract: "don't silently break a lineage chain on a single pass"
+  // — if both A and B are eligible the operator can re-run after B is
+  // deleted. `force:true` overrides this guard.
+  const force = opts.force === true;
+  {
     const survivors: GcCandidate[] = [];
     for (const c of result.candidates) {
       const liveChildren = (childrenByParent.get(c.runId) ?? []).filter(
@@ -330,46 +327,56 @@ export async function runGc(opts: GcOptions = {}): Promise<GcResult> {
         );
         continue;
       }
-      // force === true — mark each surviving fork's manifest with
-      // `parentDeletedAt: <iso>` AND append a `log: warn` tombstone
-      // ledger line. Both are best-effort — a single fork-side
-      // failure must not abort the parent's GC.
-      const tombstoneAt = new Date(nowMs).toISOString();
-      for (const childId of liveChildren) {
-        const childDir = join(runsRoot, childId);
-        try {
-          patchManifestParentDeletedAt(childDir, c.runId, tombstoneAt);
-        } catch (err) {
-          log?.(
-            "warn",
-            `gc: failed to patch tombstone in ${childId}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-        try {
-          appendTombstoneLedgerLine(
-            childDir,
-            c.runId,
-            tombstoneAt,
-          );
-        } catch (err) {
-          log?.(
-            "warn",
-            `gc: failed to append tombstone ledger line in ${childId}: ${err instanceof Error ? err.message : String(err)}`,
-          );
-        }
-        log?.(
-          "warn",
-          `gc: force-delete — marked ${childId} with parentDeletedAt=${tombstoneAt} (parent ${c.runId})`,
-          { child: childId, parent: c.runId, at: tombstoneAt },
-        );
-      }
+      // force === true — tombstone patching is deferred to apply time
+      // (see below); just add to survivors here.
       survivors.push(c);
     }
-    // Replace the candidates list with the survivor subset — callers
-    // see exactly which runs were both eligible AND not blocked by
-    // surviving forks.
+    // Replace candidates with the filtered survivor subset so both
+    // dry-run and apply callers see exactly which runs are eligible.
     result.candidates = survivors;
-    for (const c of survivors) {
+  }
+
+  // Optionally delete candidates.
+  if (apply) {
+    const pruneWorktrees = opts.pruneWorktrees !== false; // default ON
+    // Apply-time tombstone pass: for force-deleted candidates that had
+    // surviving forks, mark each surviving fork's manifest with
+    // `parentDeletedAt: <iso>` AND append a `log: warn` tombstone
+    // ledger line. Both are best-effort — a single fork-side
+    // failure must not abort the parent's GC.
+    if (force) {
+      const nowIso = new Date(nowMs).toISOString();
+      for (const c of result.candidates) {
+        const liveChildren = (childrenByParent.get(c.runId) ?? []).filter(
+          (childId) => runIdSet.has(childId),
+        );
+        for (const childId of liveChildren) {
+          const childDir = join(runsRoot, childId);
+          try {
+            patchManifestParentDeletedAt(childDir, c.runId, nowIso);
+          } catch (err) {
+            log?.(
+              "warn",
+              `gc: failed to patch tombstone in ${childId}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+          try {
+            appendTombstoneLedgerLine(childDir, c.runId, nowIso);
+          } catch (err) {
+            log?.(
+              "warn",
+              `gc: failed to append tombstone ledger line in ${childId}: ${err instanceof Error ? err.message : String(err)}`,
+            );
+          }
+          log?.(
+            "warn",
+            `gc: force-delete — marked ${childId} with parentDeletedAt=${nowIso} (parent ${c.runId})`,
+            { child: childId, parent: c.runId, at: nowIso },
+          );
+        }
+      }
+    }
+    for (const c of result.candidates) {
       // ZONE_WORKTREE follow-up #1: prune any per-agent worktrees
       // recorded in this run's manifest BEFORE rm-rf'ing the runDir.
       // Otherwise `git worktree list` keeps stale entries pointing into

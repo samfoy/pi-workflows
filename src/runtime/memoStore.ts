@@ -205,7 +205,7 @@ export class MemoStore {
     });
     this.writeQueue = next.catch(() => undefined);
     await next;
-    this.entriesSinceCompaction -= countAtStart;
+    this.entriesSinceCompaction = Math.max(0, this.entriesSinceCompaction - countAtStart);
     return true;
   }
 
