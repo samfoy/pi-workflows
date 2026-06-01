@@ -84,5 +84,8 @@
     "@opentelemetry/sdk-trace-base": "^2.7.1",
     "@opentelemetry/sdk-trace-node": "^2.7.1",
     "@opentelemetry/semantic-conventions": "^1.41.1"
+  },
+  "overrides": {
+    "ws": "^8.20.1"
   }
 }
