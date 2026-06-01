@@ -242,7 +242,9 @@ test(
 test("forkFromCheckpoint: rejects unknown parentRunId", async () => {
   await assert.rejects(
     () =>
-      forkFromCheckpoint("wf-doesnotexist000", {
+      // Valid wf-<12 hex> shape, but no run directory exists — should
+      // surface as ForkRunNotFoundError, not a path-validation TypeError.
+      forkFromCheckpoint("wf-deadbeef0000", {
         atPhase: "p1",
         preApproved: true,
         mockAgents: true,
@@ -250,6 +252,35 @@ test("forkFromCheckpoint: rejects unknown parentRunId", async () => {
       }),
     (err: unknown) => err instanceof ForkRunNotFoundError,
   );
+});
+
+test("forkFromCheckpoint: rejects parentRunId that fails the wf-<12 hex> shape", async () => {
+  // Path-traversal hardening. Without isRunId() validation, a parentRunId
+  // like "../../../etc/passwd" gets joined into an absolute path under
+  // ~/.pi/agent/workflows/runs/, escaping the runs directory. We reject
+  // anything that isn't `wf-<12 lowercase hex>` at the public-API entry.
+  const baseOpts = {
+    atPhase: "p1",
+    preApproved: true,
+    mockAgents: true,
+  } as const;
+  const cases: Array<[unknown, RegExp]> = [
+    ["../../../etc/passwd", /must match the wf-<12 hex> shape/],
+    ["wf-doesnotexist000", /must match the wf-<12 hex> shape/], // wrong length + non-hex
+    ["wf-DEADBEEF0000", /must match the wf-<12 hex> shape/], // uppercase hex
+    ["wf-../badruns0", /must match the wf-<12 hex> shape/],
+    ["wf-1234567890", /must match the wf-<12 hex> shape/], // 10 chars, not 12
+    ["", /must be a non-empty string/],
+    [42, /must be a non-empty string/],
+    [null, /must be a non-empty string/],
+  ];
+  for (const [bad, pattern] of cases) {
+    await assert.rejects(
+      () => forkFromCheckpoint(bad as string, baseOpts),
+      (err: unknown) => err instanceof TypeError && pattern.test((err as Error).message),
+      `expected TypeError matching ${pattern} for parentRunId=${JSON.stringify(bad)}`,
+    );
+  }
 });
 
 test("forkFromCheckpoint: rejects unknown atPhase", { timeout: 30_000 }, async () => {

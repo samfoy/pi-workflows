@@ -57,6 +57,7 @@ import type {
 import { LedgerReader } from "./ledger.js";
 import { CacheStore } from "./cache.js";
 import { runDir as runDirFor } from "../util/paths.js";
+import { isRunId } from "../util/runId.js";
 import {
   startWorkflowRun,
   type Run,
@@ -182,6 +183,17 @@ export async function forkFromCheckpoint(
 ): Promise<Run> {
   if (typeof parentRunId !== "string" || parentRunId.length === 0) {
     throw new TypeError("forkFromCheckpoint: parentRunId must be a non-empty string");
+  }
+  // Reject anything that isn't the wf-<12 hex> shape so an attacker
+  // can't pass `../../../etc/passwd` and have resolveRunDir(id) join it
+  // into a path outside ~/.pi/agent/workflows/runs/. The default
+  // resolveRunDir is `path.join(runsHome(), id)`, which silently accepts
+  // `..` segments. Validating here covers both forkFromCheckpoint() and
+  // WorkflowClient.forkFromCheckpoint() (which delegates here).
+  if (!isRunId(parentRunId)) {
+    throw new TypeError(
+      `forkFromCheckpoint: parentRunId must match the wf-<12 hex> shape (got: ${JSON.stringify(parentRunId)})`,
+    );
   }
   if (typeof opts.atPhase !== "string" || opts.atPhase.length === 0) {
     throw new TypeError("forkFromCheckpoint: opts.atPhase must be a non-empty string");
