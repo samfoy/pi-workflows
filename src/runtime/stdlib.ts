@@ -580,7 +580,9 @@ globalThis.__pi_install_stdlib = function (ctxRef) {
         }
         // Invoke fn synchronously, then handle the result.
         // Check kind BEFORE Promise.resolve to avoid the then-getter (BUG-001 fix).
-        var h = fn(items[i], ctxRef.current);
+        // BUG-W06 fix: pass (item, index, ctx) like Array.prototype.map so authors
+        // can use the index without accidentally capturing the ctx object as 'i'.
+        var h = fn(items[i], i, ctxRef.current);
         if (h !== null && typeof h === 'object' && !Array.isArray(h) && h.kind === 'agent') {
           handles.push(h);
           return step(i + 1);

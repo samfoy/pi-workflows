@@ -2705,3 +2705,29 @@ The `promptSnippet` in `writeWorkflowTool.ts` contains `(typed.output as { issue
 ### Suggested Fix
 
 Replace the TypeScript cast with a plain JS access: `typed.output?.issues` or add a JSDoc comment for type hint context instead.
+
+## BUG-W06 — ctx.parallel fn receives (item, ctx) not (item, index)
+
+**Discovered:** 2026-06-01
+**Severity:** High — silent misuse produces invalid agentIds, all agents fail immediately
+
+### Description
+
+`ctx.parallel(items, fn, opts?)` calls `fn(items[i], ctx)` — the second
+argument is the workflow context, not the item index. Authors who write
+`(item, i) => ctx.agent({ id: 'fix-' + i })` get `i = ctx` (an object),
+producing `agentId = 'fix-[object Object]'`. `assertSafeAgentId` rejects
+this immediately, all agents fail, and `phase_end` shows `ok:0 error:N`
+with a 4ms duration and no transcripts.
+
+### Fix
+
+If you need an index in `ctx.parallel`, map the array first:
+```js
+const fixResults = await ctx.parallel(
+  bugs.map((bug, idx) => ({ ...bug, idx })),
+  (bug) => ctx.agent({ id: 'fix-' + bug.idx, ... }),
+);
+```
+
+Long-term: stdlib could pass `(item, index, ctx)` like `Array.prototype.map`.
