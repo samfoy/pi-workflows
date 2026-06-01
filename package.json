@@ -41,11 +41,11 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^25.9.1",
     "c8": "^11.0.0",
     "esbuild": "^0.28.0",
-    "tsx": "^4.0.0",
-    "typescript": "^5.5.0"
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
   },
   "pi": {
     "extensions": [
