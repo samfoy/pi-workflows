@@ -15,6 +15,34 @@
  *   - slice 7 ledger    → log + phase_start/end + agent_start/end +
  *                         agent_error + agent_cache_hit
  *
+ * ─── ARCHITECTURE NOTE ──────────────────────────────────────
+ * The 2026 audit flagged this file (originally 2,329 lines) as a god
+ * module and recommended extracting each ctx.* method into its own
+ * file under src/runtime/ctx/, with createRunCtxHost reduced to
+ * wiring. The full split is a 720-min design-driven refactor and
+ * stays deferred for two reasons:
+ *
+ *   1. The closure capture is non-trivial — method bodies share
+ *      mutable state (agentCount, budgetReserved, ctxRef, the
+ *      LedgerWriter handle, the AbortController forwarder). A
+ *      mechanical split into separate files needs explicit threading
+ *      of all that state, and getting it wrong introduces subtle
+ *      runtime bugs that 1,242 unit tests won't catch (the bugs are
+ *      most likely in concurrency / cleanup paths the tests don't
+ *      stress).
+ *   2. The audit's specific complaints about the type cluster
+ *      (`as unknown as`, missing SettledAgent) have already been
+ *      fixed in-place; the *remaining* benefit is organizational.
+ *
+ * Partial reduction landed via commit `7c7538d` extracting the four
+ * pure schema/validation helpers (extractJson, validateAgainstSchema,
+ * SchemaValidationError, InterruptValueValidationError) into
+ * src/runtime/schema.ts. That dropped 199 lines from this file with
+ * zero closure-state risk because all four were post-class pure helpers.
+ *
+ * The remaining 2,100 lines are the createRunCtxHost factory itself
+ * — navigate by the section dividers inside it.
+ *
  * Per `slice_8a_concerns` (note in scratchpad):
  *   - SC1: Every method here is wrapped Context-side via wrapHostSync /
  *     wrapHostAsync so the script's `ctx.agent.constructor` walks land
