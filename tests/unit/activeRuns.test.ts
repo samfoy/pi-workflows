@@ -239,3 +239,200 @@ test("inFlight / total counters", () => {
   assert.equal(r.inFlight, 1);
   assert.equal(r.total, 2);
 });
+
+// ─── register: optional-field precedence matrix ────────────────────────
+//
+// register() folds 6 optional fields (endedAt, durationMs, approvalReason,
+// runDir, parentRunId, forkAtPhase) using a 3-state ternary — patch wins,
+// else preserve prior, else omit. Each branch matters because the
+// summary feeds the runs-list overlay; mis-merging here surfaces stale
+// data in the TUI.
+//
+// Naming convention: 'patch=X / prior=Y → result=Z'.
+
+test("register: patch field WINS over prior (endedAt)", () => {
+  const r = new ActiveRunsRegistry();
+  const run = fakeRun({ runId: "wf-mp1" });
+  r.register("wf-mp1", run, { workflowName: "x", endedAt: "prior" });
+  r.register("wf-mp1", run, { endedAt: "new" });
+  assert.equal(r.getSummary("wf-mp1")?.endedAt, "new");
+});
+
+test("register: patch=undefined PRESERVES prior (durationMs)", () => {
+  const r = new ActiveRunsRegistry();
+  const run = fakeRun({ runId: "wf-mp2" });
+  r.register("wf-mp2", run, { workflowName: "x", durationMs: 1234 });
+  r.register("wf-mp2", run, { state: "paused" }); // no durationMs in patch
+  assert.equal(r.getSummary("wf-mp2")?.durationMs, 1234);
+});
+
+test("register: BOTH undefined OMITS the field (approvalReason)", () => {
+  const r = new ActiveRunsRegistry();
+  const run = fakeRun({ runId: "wf-mp3" });
+  r.register("wf-mp3", run, { workflowName: "x" });
+  const s = r.getSummary("wf-mp3")!;
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(s, "approvalReason"),
+    false,
+    "approvalReason absent when never supplied",
+  );
+});
+
+test("register: precedence matrix — each optional field independently", () => {
+  // Build a single composite test that walks the table for every field.
+  const r = new ActiveRunsRegistry();
+  const run = fakeRun({ runId: "wf-mp4" });
+  // First register with prior values for all 6 optional fields.
+  r.register("wf-mp4", run, {
+    workflowName: "x",
+    endedAt: "E1",
+    durationMs: 1,
+    approvalReason: "trusted",
+    runDir: "/r1",
+    parentRunId: "p1",
+    forkAtPhase: "f1",
+  });
+  // Re-register with patch overriding every field with new values.
+  r.register("wf-mp4", run, {
+    endedAt: "E2",
+    durationMs: 2,
+    approvalReason: "user-once",
+    runDir: "/r2",
+    parentRunId: "p2",
+    forkAtPhase: "f2",
+  });
+  const s = r.getSummary("wf-mp4")!;
+  assert.equal(s.endedAt, "E2");
+  assert.equal(s.durationMs, 2);
+  assert.equal(s.approvalReason, "user-once");
+  assert.equal(s.runDir, "/r2");
+  assert.equal(s.parentRunId, "p2");
+  assert.equal(s.forkAtPhase, "f2");
+});
+
+// ─── transitioned: terminal-prior short-circuits ──────────────────────
+
+test("applyEntry transitioned: terminal-state prior is locked (out-of-order safety)", () => {
+  const r = new ActiveRunsRegistry();
+  r.applyEntry({
+    customType: "pi-workflows.run.started",
+    data: { runId: "wf-tterm", workflowName: "x" },
+  });
+  r.applyEntry({
+    customType: "pi-workflows.run.ended",
+    data: { runId: "wf-tterm", outcome: "done" },
+  });
+  // A late transitioned entry must NOT clobber the terminal state.
+  r.applyEntry({
+    customType: "pi-workflows.run.transitioned",
+    data: { runId: "wf-tterm", toState: "running" },
+  });
+  assert.equal(r.getSummary("wf-tterm")?.state, "done");
+});
+
+test("applyEntry transitioned: preserves prior optional fields when no patch", () => {
+  const r = new ActiveRunsRegistry();
+  const run = fakeRun({ runId: "wf-tprior" });
+  r.register("wf-tprior", run, {
+    workflowName: "x",
+    endedAt: "E",
+    durationMs: 99,
+    approvalReason: "trusted",
+    runDir: "/d",
+    parentRunId: "p",
+    forkAtPhase: "phase",
+  });
+  r.applyEntry({
+    customType: "pi-workflows.run.transitioned",
+    data: { runId: "wf-tprior", toState: "paused" },
+  });
+  const s = r.getSummary("wf-tprior")!;
+  assert.equal(s.state, "paused");
+  assert.equal(s.endedAt, "E");
+  assert.equal(s.durationMs, 99);
+  assert.equal(s.approvalReason, "trusted");
+  assert.equal(s.runDir, "/d");
+  assert.equal(s.parentRunId, "p");
+  assert.equal(s.forkAtPhase, "phase");
+});
+
+// ─── applyEntry runId guard ───────────────────────────────────
+
+test("applyEntry: missing runId is a silent no-op (no summary created)", () => {
+  const r = new ActiveRunsRegistry();
+  r.applyEntry({
+    customType: "pi-workflows.run.started",
+    // @ts-expect-error — missing runId
+    data: { workflowName: "x" },
+  });
+  r.applyEntry({
+    customType: "pi-workflows.run.transitioned",
+    // @ts-expect-error
+    data: { toState: "paused" },
+  });
+  r.applyEntry({
+    customType: "pi-workflows.run.ended",
+    // @ts-expect-error
+    data: { outcome: "done" },
+  });
+  assert.equal(r.total, 0);
+});
+
+// ─── writeActiveIndex ───────────────────────────────────
+
+test("writeActiveIndex: only non-terminal runs land in the active list", async () => {
+  const { mkdtempSync, readFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join: p } = await import("node:path");
+  const tmp = mkdtempSync(p(tmpdir(), "pi-wf-act-"));
+  const r = new ActiveRunsRegistry();
+  // Two running, one done.
+  r.applyEntry({
+    customType: "pi-workflows.run.started",
+    data: { runId: "wf-w1", workflowName: "x" },
+  });
+  r.applyEntry({
+    customType: "pi-workflows.run.started",
+    data: { runId: "wf-w2", workflowName: "x" },
+  });
+  r.applyEntry({
+    customType: "pi-workflows.run.started",
+    data: { runId: "wf-w3", workflowName: "x" },
+  });
+  r.applyEntry({
+    customType: "pi-workflows.run.ended",
+    data: { runId: "wf-w3", outcome: "done" },
+  });
+  const path = p(tmp, ".active");
+  r.writeActiveIndex(path);
+  const parsed = JSON.parse(readFileSync(path, "utf-8"));
+  assert.deepEqual([...parsed.runs].sort(), ["wf-w1", "wf-w2"]);
+  assert.equal(typeof parsed.updatedAt, "string");
+});
+
+test("writeActiveIndex: never throws even if path is unwritable", () => {
+  const r = new ActiveRunsRegistry();
+  r.applyEntry({
+    customType: "pi-workflows.run.started",
+    data: { runId: "wf-fail", workflowName: "x" },
+  });
+  // Path inside a nonexistent unwritable parent. mkdir attempt is in
+  // a try/catch and the open/write itself in another — must not throw.
+  assert.doesNotThrow(() => {
+    r.writeActiveIndex("/nonexistent/cannot/write/here/.active");
+  });
+});
+
+// ─── isTerminalState helper ──────────────────────────────────
+
+test("isTerminalState classifies the four user-visible terminal outcomes", () => {
+  assert.equal(isTerminalState("done"), true);
+  assert.equal(isTerminalState("failed"), true);
+  assert.equal(isTerminalState("stopped"), true);
+  assert.equal(isTerminalState("cancelled-pre-run"), true);
+  assert.equal(isTerminalState("running"), false);
+  assert.equal(isTerminalState("paused"), false);
+  assert.equal(isTerminalState("approved"), false);
+  assert.equal(isTerminalState("pending"), false);
+});
+
