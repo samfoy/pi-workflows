@@ -55,6 +55,7 @@ import type {
 import { installTimerBridge, type TimerBridge } from "./timerTable.js";
 import { rethrowAcrossRealm, safeStringifyThrown } from "./realmError.js";
 import { STDLIB_INIT_SOURCE } from "./stdlib.js";
+import { MAX_PROMPT_LENGTH } from "../util/limits.js";
 
 /**
  * Payload passed through the bridge nonce slot.
@@ -1467,6 +1468,12 @@ function buildInitScript(nonce: string): string {
     "  // BUG-001 fix: wrap ctx.agent so returned handles throw on await",
     "  var __rawAgent = __base.agent;",
     "  __base.agent = function() {",
+    "    var __p = arguments[0];",
+    `    if (typeof __p === 'string' && __p.length > ${MAX_PROMPT_LENGTH}) {`,
+    "      throw new RangeError(",
+    `        'ctx.agent: prompt exceeds MAX_PROMPT_LENGTH (got ' + __p.length + ', max ${MAX_PROMPT_LENGTH}). Chunk the input across multiple agents instead of relying on a single oversized call.'`,
+    "      );",
+    "    }",
     "    var handle = __rawAgent.apply(this, arguments);",
     "    if (handle && typeof handle === 'object' && handle.kind === 'agent') {",
     "      Object.defineProperty(handle, 'then', {",

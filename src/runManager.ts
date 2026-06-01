@@ -69,6 +69,7 @@ import { runApprovalGate } from "./runtime/approval.js";
 import { sha256 } from "./util/hash.js";
 import { newRunId } from "./util/runId.js";
 import { runDir as runDirFor } from "./util/paths.js";
+import { MAX_INPUT_LENGTH } from "./util/limits.js";
 
 /**
  * Lightweight static extractor for `meta.phases` titles from a workflow script.
@@ -394,6 +395,16 @@ export async function startWorkflowRun(
   args: string,
   opts: RunManagerStartOptions = {},
 ): Promise<Run> {
+  if (typeof args !== "string") {
+    throw new TypeError(
+      `startWorkflowRun: input/args must be a string (got ${typeof args})`,
+    );
+  }
+  if (args.length > MAX_INPUT_LENGTH) {
+    throw new RangeError(
+      `startWorkflowRun: input exceeds MAX_INPUT_LENGTH (got ${args.length}, max ${MAX_INPUT_LENGTH}). The input string is persisted to manifest.json and surfaced via ctx.input — oversized values would clobber disk and tooling.`,
+    );
+  }
   const cwd = opts.cwd ?? process.cwd();
   const runId = (opts.newRunIdFactory ?? newRunId)();
   const resolveRunDir = opts.resolveRunDir ?? runDirFor;

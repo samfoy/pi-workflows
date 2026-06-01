@@ -66,6 +66,7 @@ import { cacheKey } from "../util/hash.js";
 import { sha256 } from "../util/hash.js";
 import { makeSemaphore } from "./semaphore.js";
 import { agentTranscriptPath } from "../util/paths.js";
+import { MAX_PROMPT_LENGTH } from "../util/limits.js";
 import { renderMermaidSync } from "./visualize.js";
 import {
   assertGitRepo,
@@ -295,6 +296,11 @@ export function createRunCtxHost(opts: RunCtxHostOptions): {
       if (typeof prompt !== "string") {
         throw new TypeError(
           `ctx.agent: prompt must be a string (got ${typeof prompt})`,
+        );
+      }
+      if (prompt.length > MAX_PROMPT_LENGTH) {
+        throw new RangeError(
+          `ctx.agent: prompt exceeds MAX_PROMPT_LENGTH (got ${prompt.length}, max ${MAX_PROMPT_LENGTH}). Chunk the input across multiple agents instead of relying on a single oversized call.`,
         );
       }
       const ao =
