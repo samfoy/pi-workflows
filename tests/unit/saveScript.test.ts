@@ -362,3 +362,45 @@ test("save-script: git-add failure surfaces a notify warning, save still recorde
     await cleanup();
   }
 });
+
+test("save-script: rejects path-traversal workflowName before any IO", async () => {
+  // workflowName flows from meta.name on the workflow source — author-
+  // controlled — and is interpolated into the target via
+  // join(workflowsDir, `${name}.js`). Without validation, a malicious
+  // name like '../../etc/passwd' would resolve outside .pi/workflows/.
+  const { root, cleanup } = await withProjectRoot({ hasGit: true });
+  try {
+    const io = makeIO({});
+    const ui = makeUI([]);
+    const malicious = [
+      "../../etc/passwd",
+      "a/b",
+      "a\\b",
+      "name with spaces",
+      "",
+      ".hidden",
+      "name$with$dollars",
+    ];
+    for (const bad of malicious) {
+      const outcome = await runSaveScript({
+        runDirAbs: "/tmp/runs/wf-x",
+        workflowName: bad,
+        workflowSourceAbsPath: "/home/me/.pi/agent/workflows/x.js",
+        cwd: root,
+        io,
+        ui,
+      });
+      assert.equal(outcome.kind, "error", `should error on ${JSON.stringify(bad)}`);
+      if (outcome.kind === "error") {
+        assert.equal(outcome.reason, "bad-workflow-name");
+      }
+      // Crucially: no IO took place — nothing was read from disk and
+      // nothing was written. The error surfaces BEFORE the readScript call.
+      assert.equal(io.written.size, 0);
+      assert.equal(io.gitAddCalls.length, 0);
+      assert.equal(ui.calls.length, 0);
+    }
+  } finally {
+    await cleanup();
+  }
+});

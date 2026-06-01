@@ -28,6 +28,8 @@ import { promises as fs, statSync } from "node:fs";
 import { dirname, join, resolve, sep } from "node:path";
 import { spawn } from "node:child_process";
 
+import { classifyFilename, RESERVED_NAMES } from "../registry.js";
+
 export interface SaveScriptIO {
   /** Read the frozen `<runDir>/script.js`. Returns the source text. */
   readScript(runDirAbs: string): Promise<string>;
@@ -61,7 +63,12 @@ export type SaveOutcome =
   | { readonly kind: "no-op-already-in-project"; readonly targetAbs: string }
   | {
       readonly kind: "error";
-      readonly reason: "no-project-root" | "missing-script" | "io" | "missing-cwd";
+      readonly reason:
+        | "no-project-root"
+        | "missing-script"
+        | "io"
+        | "missing-cwd"
+        | "bad-workflow-name";
       readonly message: string;
     };
 
@@ -227,6 +234,25 @@ export async function runSaveScript(
   if (typeof opts.cwd !== "string" || opts.cwd.length === 0) {
     return { kind: "error", reason: "missing-cwd", message: "no cwd supplied" };
   }
+  // Validate workflowName at the entry. The name flows from
+  // meta.name on the workflow source — author-controlled — and is
+  // interpolated into the target path via
+  // join(workflowsDir, `${name}.js`). A malicious meta.name like
+  // "../../etc/passwd" would resolve outside .pi/workflows/. Reuse
+  // the registry's filename validator so the rules stay in one
+  // place: bare-filename shape, no path separators, no traversal,
+  // no whitespace, name matches /^[A-Za-z0-9_-]+$/, not reserved.
+  const classified = classifyFilename(
+    `${opts.workflowName}.js`,
+    RESERVED_NAMES,
+  );
+  if ("reason" in classified) {
+    return {
+      kind: "error",
+      reason: "bad-workflow-name",
+      message: `invalid workflow name ${JSON.stringify(opts.workflowName)}: ${classified.message}`,
+    };
+  }
   const found = findProjectRoot(opts.cwd, opts.maxWalkDepth ?? DEFAULT_MAX_WALK);
   if (found === null) {
     return {
@@ -277,6 +303,22 @@ export async function runSaveScript(
   }
 
   try {
+    // Defense in depth. classifyFilename above blocks every known
+    // path-shape attack, but interpolating user-controlled strings
+    // into a filesystem path is the canonical footgun — re-assert that
+    // the resolved target is under the workflowsDir before writing,
+    // so a future caller that bypasses the upstream validation still
+    // gets blocked here. Catches symlink shenanigans on the rename
+    // suffix path too.
+    const resolvedTarget = resolve(actualTarget);
+    const resolvedWorkflowsDir = resolve(workflowsDir);
+    if (!resolvedTarget.startsWith(resolvedWorkflowsDir + sep)) {
+      return {
+        kind: "error",
+        reason: "bad-workflow-name",
+        message: `resolved target ${resolvedTarget} is outside workflows dir ${resolvedWorkflowsDir} — refusing to write`,
+      };
+    }
     await opts.io.writeTarget(actualTarget, scriptText);
   } catch (err) {
     return {
