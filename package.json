@@ -1,6 +1,6 @@
 {
   "name": "@samfp/pi-workflows",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Dynamic workflows for pi — sandboxed JS scripts that drive sub-agent fleets, with TUI inspection and resume",
   "keywords": [
     "pi-package",

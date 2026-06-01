@@ -7,7 +7,129 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+No unreleased changes.
+
+## [0.3.0] - 2026-05-31
+
+### Added
+
+**Persistent per-agent memory.** New `memory` opt on `ctx.agent` mounts a
+`MEMORY.md` under one of three scopes (`'user'` → `~/.pi/agent/workflows/agent-memory/`,
+`'project'` → `<cwd>/.pi/workflows/agent-memory/`, `'local'` → per-runDir);
+up to 25 KiB is auto-injected as `Persistent memory:\n…` and sub-agents emit
+`{type:'memory_update'}` JSONL events to append back. `{ scope, readOnly: true }`
+for shared playbook personas. Stdlib helpers `ctx.memory.read/append/compact`.
+See `docs/agent-memory.md`.
+
+**Git-worktree isolation.** New `isolation: 'worktree'` opt on `ctx.agent`
+creates `<runDir>/worktrees/<agentId>/` off HEAD, swaps the agent's cwd,
+and emits `<agentId>.diff` on success. `ctx.promote(agentId, {strategy})`
+applies or rebases worktree edits back to the parent. GC auto-prunes on run
+delete (refuses dirty worktrees without `force: true`). See `docs/agent-worktree.md`.
+
+**Time-travel / fork-from-checkpoint.** `forkFromCheckpoint(parentRunId, {atPhase, overrides})`
+copies the parent ledger and (filtered) cache up to `atPhase` into a new
+runDir; overrides land in `__fork_overrides__` cache key. Strict cache
+filtering excludes phases ≥ atPhase to prevent silent cache-hits. Resume of
+a fork surfaces `parentRunId` / `forkAtPhase` in errors and a `fork_lineage`
+ledger entry. GC refuses to delete a parent run with live forks unless
+`force: true`. New `f` hotkey in the runs-list view. See `docs/time-travel.md`.
+
+**Mid-phase HITL.** `ctx.interrupt({question, choices?, default?, schema?})`
+pauses the run, writes an `interrupt_requested` ledger entry, and blocks
+until a `resume` ctrl entry arrives. Returns `{key, value}` so authors who
+fan out concurrent interrupts can route resumes deterministically.
+`WorkflowClient.resume(runId, value, {key?})` is the supervisor injection
+point. Optional `schema` validates resume value before the call resolves.
+New `i` hotkey in the overlay surfaces an inline prompt via `pi.ui.confirm` /
+`pi.ui.input`. See `docs/hitl.md`.
+
+**OpenTelemetry export.** New `src/runtime/otelExporter.ts` (traces) and
+`otelMetricsExporter.ts` (metrics) tail `ledger.jsonl` and emit OTel signals
+with Gen-AI semantic conventions. Span tree: `invoke_workflow` → `phase` →
+`invoke_agent`; `log` and `gate_*` ledger entries attach as span events.
+Metrics: counters (`pi.runs.started/completed`, `pi.agents.invoked/errored`)
+and histograms (`gen_ai.client.token.usage`, `gen_ai.client.operation.duration`,
+`pi.run.duration`). Activated via `OTEL_EXPORTER_OTLP_ENDPOINT` /
+`OTEL_EXPORTER_OTLP_METRICS_ENDPOINT`; absent → strict no-op. SDK packages
+in `optionalDependencies` so install never blocks. Honors
+`OTEL_RESOURCE_ATTRIBUTES`. Smoke recipe at `examples/otel-smoke/`
+(Jaeger + Prometheus + Grafana via `docker-compose`). See `docs/otel.md`.
+
+**Stdlib expansion.** `ctx.extractJSON(text)` (char-code, fence-aware,
+truncation-tolerant). Phase-boundary schema validation when `opts.schema`
+set (throws `SchemaValidationError`). `ctx.aggregate(method, ballots, opts)`
+ports DSPy issue #8898's working draft (MIT): `borda`, `schulze`, `ranked_pairs`,
+`kemeny_young`, `instant_runoff`, `coombs`, `score`, `approval`. `ctx.consensus`
+now accepts `method` in addition to its prior Jaccard heuristic.
+`ctx.critique({producer, critic, accept, maxRounds})` 1-producer-1-judge
+convergence loop. Real `AbortSignal` polyfill: `throwIfAborted()`,
+`AbortSignal.timeout`, `AbortSignal.any`, working `dispatchEvent`.
+
+**TUI hotkeys.** `r` (restart phase), `s` (save script), `t` (open transcript
+in editor), `c` (copy to clipboard), `i` (answer interrupt), `v` (Mermaid DAG
+to tmp), `f` (fork-from-here in runs-list). Banner state now `{text, expiresAtMs}`
+with 4 s default TTL.
+
+**DAG visualization.** `src/runtime/visualize.ts::renderMermaid(runDir|manifest)`
+emits a `flowchart TD`. `ctx.report({format:'mermaid'})` exposes the same
+in-workflow.
+
+**Public type surface.** `src/types/public.d.ts` extended with
+`MemoryScope`, `MemoryCompactResult`, `IsolationMode`, `AggregateMethod`,
+`AggregateResult`, `CritiqueOpts/Result`, `InterruptOpts/Result`,
+`PromoteOpts/Result`, `AgentOpts.memory`, `AgentOpts.isolation`,
+`WorkflowContext.{extractJSON, aggregate, critique, memory.*, interrupt, promote}`
+and a `report({format:'mermaid'}): string` overload. Shipped to `dist/types/`
+and re-exported from `index` so authors get types via either
+`/// <reference types="@samfp/pi-workflows" />` or explicit `import type`.
+
 ### Fixed
+
+- **SIGKILL escalation grace timer was unref'd**, so libuv didn't wake the
+  loop until the test's 5 s timeout fired. Cooperative `Run.stop()` paths
+  also left a 5-second ghost `SIGKILL` timer firing against an already-dead
+  PID. Both fixed by ref-ing the grace timer and clearing it on cooperative
+  exit.
+- **`recoverFromTranscript` had no size cap.** Now caps at 64 MiB; oversize
+  files are tail-read so `agent_end` recovery still works without OOM.
+- **`agentTranscriptPath`/`agentStderrPath` accepted any `agentId`.** Now
+  rejects `..`, `/`, `\`, NUL, and leading `.` via `assertSafeAgentId`.
+- **`currentBootId` returned `""` on macOS,** so long-uptime hosts never
+  reaped crashed runs. Now uses `sysctl kern.boottime` (`darwin-<sec>`).
+- **`ctx.log` wrote the ledger twice.** Each call now produces exactly one
+  `log` ledger entry (overlay event preserved).
+- **`ctrl.jsonl` IPC had no fallback.** Polls 1 s mtime alongside `fs.watch`
+  so silent watch-failures (NFS, Docker bind-mounts) don't drop control
+  messages. Byte-offset tracking + 8 MiB rotation.
+- **Hot-reload registered a no-op stub** for newly-added workflows. Both
+  stub sites now route through `registerSingleWorkflowCommand`.
+- **`allowCodeGeneration.strings` defaulted to `true`** while threat-model
+  said `false`. Default flipped to `false`; the two security fixtures that
+  need codegen on opt in explicitly.
+- **Sandbox dead-weight cleanup** removed `installConsole/Crypto/Buffer/WebApis`,
+  `getSandboxObject`, `extractLoaderArgs`, `minimalCtxLiteral` and other
+  pre-bridge helpers (~70 lines).
+- **Resume cross-check** for memory + worktree paths warns when the live
+  re-resolver disagrees with the manifest entry (e.g. cwd changed between
+  parent crash and resume).
+- **`fakeChild` test fixture leaked a 60 s `setTimeout` ref'd**, causing
+  `dispatcher.test.ts` to take 60+ s wall time. Now cleared on `kill()`.
+  Suite is back to ~12 s.
+
+### Build
+
+- `dist/sandboxWorker.js` and `dist/sandboxWorkerBoot.mjs` shipped via a
+  second esbuild entrypoint + copy step (was failing at runtime with
+  "Cannot find module .../sandboxWorkerBoot.mjs"). Removed in favor of
+  in-process `vm.runInContext` once the worker_threads experiment was
+  rolled back.
+- `dist/types/public.d.ts` and `dist/types/internal.d.ts` now copied at
+  build time (tsc's `--declaration` doesn't emit from `.d.ts` inputs).
+  Public types now reach end users via the package's main `dist/index.d.ts`.
+
+### Other
+
 - `write_workflow` tool path now wires `Run.terminated → deliverRunResult`,
   so workflows kicked off via the tool fire the result card AND
   `pi.sendUserMessage` when they finish. Previously the run completed
