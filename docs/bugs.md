@@ -2731,3 +2731,503 @@ const fixResults = await ctx.parallel(
 ```
 
 Long-term: stdlib could pass `(item, index, ctx)` like `Array.prototype.map`.
+
+## BUG-W07 ✅ FIXED — canonicalJson: BigInt serializes identically to its string equivalent
+
+**Discovered:** 2026-06-01
+**Severity:** Medium — cache-key collision between BigInt value and its numeric string equivalent
+
+### Description
+
+`canonicalJson(BigInt(123))` returned `'"123"'` — identical to
+`canonicalJson("123")`. The culprit was `JSON.stringify((v as bigint).toString())`,
+which wraps the BigInt's string representation in JSON string quotes, making it
+indistinguishable from a plain string holding the same digits. Any `opts` object
+with a BigInt field collides with one holding the numeric string equivalent,
+violating the "1-bit change → different hash" guarantee.
+
+### Fix
+
+Changed the BigInt branch in `canonicalJson` (`src/util/hash.ts`) to emit a
+bare `B`-prefixed token instead of a JSON-quoted string:
+
+```diff
+-  return JSON.stringify((v as bigint).toString());
++  // Prefix with "B" — no other walk branch emits a value starting with
++  // "B", so BigInt(123) → "B123" is distinct from string "123" → '"123"'.
++  return "B" + (v as bigint).toString();
+```
+
+`B` is safe as a discriminant: strings start with `"`, numbers with a
+digit/`-`/`n` (NaN/Infinity → `"null"`), booleans with `t`/`f`,
+arrays/objects with `[`/`{`, and null/undefined/symbols/functions with `n`.
+No collision possible.
+
+## BUG-W07 ✅ FIXED — appendMemoryUpdate: fs.appendFile without fsync — memory updates lost on crash
+
+**Discovered:** 2026-06-01
+**Severity:** High — memory_update payloads silently lost if process crashes after appendFile returns but before OS flushes its page-cache buffer
+
+### Description
+
+`appendMemoryUpdate` in `src/runtime/agentMemory.ts` called `fs.appendFile(p, payload, "utf8")` and returned immediately. `fs.appendFile` resolves as soon as the kernel accepts the write into its page cache; if the process crashes before the OS flushes, the data is gone with no error surfaced to the caller. Unlike `memoStore.ts`, which opens a file descriptor and calls `fsyncSync` after every write, this path had no durability guarantee.
+
+### Fix
+
+Replaced the bare `fs.appendFile` call with an explicit open (`'a'` flag) → `fh.writeFile` → `fh.datasync()` → `fh.close()` sequence. `datasync()` is the async equivalent of `fdatasync(2)` and flushes data (but not metadata) to durable storage before the promise resolves, matching the durability contract of `memoStore.ts`.
+
+## BUG-W07 ✅ FIXED — `isLikeArray` accepted NaN / negative / Infinity `.length`
+
+**Discovered:** 2026-06-01
+**Severity:** Medium — silent zero-agent phase or unbounded loop
+
+### Location
+
+`src/runtime/ctx/utils.ts` — `isLikeArray`
+
+### Description
+
+`isLikeArray` only checked `typeof .length === 'number'`, which admits `NaN`,
+`-1`, `Infinity`, and non-integer floats. In `phase.ts` the agents array is
+iterated with `for (let i = 0; i < agentsArg.length; i++)`:
+
+- `NaN` or negative length → 0 iterations; phase succeeds vacuously with all
+  agents silently skipped.
+- `Infinity` → unbounded loop / `RangeError: Maximum call stack size exceeded`.
+
+### Fix
+
+Added `Number.isFinite`, `>= 0`, and integer (`Math.floor(len) === len`) checks:
+
+```ts
+export function isLikeArray(v: unknown): v is ArrayLike<unknown> {
+  if (v === null || typeof v !== "object") return false;
+  const len = (v as { length?: unknown }).length;
+  return typeof len === "number" && Number.isFinite(len) && len >= 0 && Math.floor(len) === len;
+}
+```
+
+## BUG-W07 ✅ FIXED — NaN propagates to operationDuration histogram when durationMs is non-finite
+
+**Discovered:** 2026-06-01
+**Severity:** Medium — OTLP backends silently drop or error on NaN histogram values
+
+### Description
+
+`feedLedgerEntryToMetrics` recorded `entry.durationMs / 1000` into the
+`gen_ai.client.operation.duration` histogram with no `Number.isFinite`
+guard. A missing or `NaN` `durationMs` would propagate NaN into the
+histogram. Token counters were protected by `(entry.usage.input > 0)`;
+the duration path had no analogous guard. Most OTLP backends silently
+drop or error on NaN values.
+
+### Fix
+
+Added `Number.isFinite(entry.durationMs)` to the existing `!entry.cached`
+guard in `otelMetricsExporter.ts` near line 382:
+
+```ts
+if (!entry.cached && Number.isFinite(entry.durationMs)) {
+  inst.operationDuration.record(entry.durationMs / 1000, { ... });
+}
+```
+
+## BUG-W07 ✅ FIXED — checkpoint data not validated for JSON-serializability before setCheckpoint
+
+**Discovered:** 2026-06-01
+**Severity:** Medium — non-serializable data produces opaque error inside CacheStore instead of a descriptive error at ctx.checkpoint() call time
+
+### File
+`src/runtime/ctx/checkpointReport.ts`, `checkpointFn`
+
+### Description
+
+`reportFn` round-trips `data` through `JSON.parse(JSON.stringify(data))` before
+persisting, so circular references or `BigInt` values produce a descriptive
+`TypeError` at the call site. `checkpointFn` passed `data` directly to
+`opts.cache.setCheckpoint` with no such validation, causing an opaque error deep
+inside `CacheStore` instead of a clear error at `ctx.checkpoint()` call time.
+
+### Fix
+
+Added the same `JSON.parse(JSON.stringify(data))` round-trip in `checkpointFn`
+before calling `setCheckpoint`, wrapping failures in a `TypeError` with the
+message `ctx.checkpoint: data is not JSON-serializable (...)`. The validated
+`safeData` value is passed to `setCheckpoint` instead of the raw `data`.
+
+## BUG-W08 ✅ FIXED — compactMemoryFile: no fsync before rename — durability gap on crash
+
+**Discovered:** 2026-06-01
+**Severity:** Medium — silent data loss on OS crash between writeFile and rename
+
+### File
+`src/runtime/agentMemory.ts`, `compactMemoryFile`
+
+### Description
+
+`compactMemoryFile` called `fs.writeFile(tmp)` then `fs.rename(tmp, target)` with
+no fsync in between. POSIX rename is atomic (the directory-entry swap is
+all-or-nothing) but does **not** guarantee that the file's content has been
+flushed from the OS page cache to stable storage. A crash or power loss
+immediately after the rename could leave `MEMORY.md` pointing at a zero-length
+or corrupt inode. `memoStore.ts` already fsyncs before its rename; `agentMemory.ts`
+did not.
+
+### Fix
+
+After `fs.writeFile(tmp)`, open the tmp file in read mode, call `fd.sync()`, and
+close before calling `fs.rename`:
+
+```ts
+const fd = await fs.open(tmp, "r");
+try {
+  await fd.sync();
+} finally {
+  await fd.close();
+}
+await fs.rename(tmp, target);
+```
+
+This matches the `fsyncSync` pattern already used in `memoStore.ts`.
+
+## BUG-150 ✅ FIXED — `PI_WORKFLOWS_OTEL_INPUT=raw` emits unbounded input string as span attribute
+
+**Discovered:** 2026-06-01
+**Severity:** Medium — large prompts silently drop the entire span on OTLP backends with per-span size limits (Jaeger ~64 KB, Datadog ~128 KB)
+
+### File
+
+`src/runtime/otelExporter.ts`
+
+### Description
+
+`inputAttrs()` set `pi.workflow.input` to the full raw input string with no
+length cap when `PI_WORKFLOWS_OTEL_INPUT=raw`. `excerpt` mode already capped
+at 64 chars; `raw` had no cap at all. A large prompt caused the entire span
+to be silently dropped by the OTLP backend.
+
+### Fix
+
+Added `OTEL_INPUT_RAW_MAX_CHARS = 4096` constant. `raw` mode now slices the
+input to 4096 chars before assigning `pi.workflow.input`, using the same
+guard pattern already used by `excerpt` mode:
+
+```ts
+const OTEL_INPUT_RAW_MAX_CHARS = 4096;
+// …
+out["pi.workflow.input"] =
+  input.length <= OTEL_INPUT_RAW_MAX_CHARS
+    ? input
+    : input.slice(0, OTEL_INPUT_RAW_MAX_CHARS);
+```
+
+## BUG-149 ✅ FIXED — Post-fork checkpoint cache records not timestamp-filtered
+
+**Area:** Runtime / forkRun
+**Severity:** Medium
+**Location:** `src/runtime/forkRun.ts` — `_classifyParentCacheLine`
+**Discovered:** iteration-3
+
+### Description
+
+`_classifyParentCacheLine` applied `cutAt` timestamp filtering only to `agent_result` records. `author_cache` entries with a `__chk__` key prefix (written by `ctx.checkpoint`) were unconditionally returned as `"keep"`, so post-fork checkpoints were seeded verbatim into the fork's `cache.jsonl`. When the fork re-ran those phases, `ctx.checkpoint(label)` found the key and returned `true`, silently skipping re-execution of the guarded work block.
+
+### Fix
+
+Added an early guard in `_classifyParentCacheLine`: if the record type is `author_cache` and the key starts with `__chk__`, apply the same `cutAt` comparison using `r.at` before falling through to the existing `agent_result` path. Malformed `__chk__` entries (missing `at`) are dropped defensively.
+
+---
+
+## BUG-W07 ✅ FIXED — gate: gate_requested written to ledger without abort pre-check; gate_resolved never written on abort
+
+**Area:** Runtime / ctx.gate
+**Severity:** Medium
+**Location:** `src/runtime/ctx/gate.ts`
+**Discovered:** iteration-14
+
+### Description
+
+`gate_requested` was appended to the ledger before checking whether
+`opts.signal` was already aborted. If the signal fired before `gate` was
+called, the ledger gained an orphaned `gate_requested` entry with no
+matching `gate_resolved`. The same orphan could occur when the signal
+fired during `waitForGate` — the outer catch returned `{ ok: false }`
+without writing `gate_resolved`.
+
+### Fix
+
+1. Added an `opts.signal?.aborted` guard immediately before the
+   `gate_requested` ledger write; returns `{ ok: false, error: AbortError }`
+   without touching the ledger when already aborted.
+2. Wrapped `waitForGate` in a try/catch; on abort-during-wait, writes
+   `gate_resolved(approved: false)` before re-throwing, ensuring every
+   `gate_requested` entry is always paired with a `gate_resolved`.
+
+## BUG-W07 ✅ FIXED — createOtelExporter registers no process-exit flush hook — spans dropped on fast exit
+
+**Discovered:** 2026-06-01
+**Severity:** Medium — silent span/metric loss on short-lived workflow runs
+
+### Description
+
+`createOtelExporter` returns a handle with `flush()`/`shutdown()` but never
+registered `process.on('beforeExit')` or `process.on('SIGTERM')` hooks to
+drain the `BatchSpanProcessor`. For short workflow runs the process can exit
+before the processor's 5-second periodic interval fires, silently dropping
+every span.
+
+### Fix
+
+After the SDK loads successfully, register two hooks before returning the handle:
+
+- `beforeExit`: calls `sdk.provider.forceFlush?.()` — covers natural event-loop draining exits.
+- `SIGTERM`: calls `sdk.provider.shutdown?.()` then `process.exit(0)` — covers signal termination.
+
+`shutdown()` now also removes both listeners via `process.off(...)` to avoid
+dangling handlers if the caller explicitly shuts down the exporter.
+
+## BUG-W08 ✅ FIXED — Orphaned fork run directory when startWorkflowRun throws after seed
+
+**Discovered:** 2026-06-01
+**Severity:** High — orphan directories accumulate in GC scans and /workflows list
+
+### Description
+
+In `forkFromCheckpoint` (`src/runtime/forkRun.ts`), `wrappedResolveRunDir` creates
+the run directory and writes `ledger.jsonl` + `cache.jsonl` seed files before
+`startWorkflowRun` returns. If `startWorkflowRun` throws (approval denied, hash
+mismatch, etc.) there was no cleanup path — the partially-seeded directory was
+left on disk. It appeared in GC scans and `/workflows list` with inherited parent
+ledger entries, polluting the run index and confusing users.
+
+### Fix
+
+Wrapped the `startWorkflowRun` call in a `try/catch`. On error, if
+`mintedRunId !== null` (meaning `wrappedResolveRunDir` was invoked and the
+directory was created), the orphan is removed via `fs.rm(..., { recursive: true,
+force: true })` before rethrowing the original error. Cleanup failures are
+swallowed to avoid masking the root cause.
+
+## BUG-W09 ✅ FIXED — interrupt: waitForInterrupt called with no signal.aborted pre-check
+
+**Discovered:** 2026-06-01
+**Severity:** Medium — can stall teardown and leaves orphaned interrupt_requested in ledger
+
+### Description
+
+In `ctx/interrupt.ts`, the Block path called `opts.waitForInterrupt(key, opts.signal)` with
+no prior check on `opts.signal?.aborted`. If the signal was already aborted at that point,
+`waitForInterrupt` would be invoked unnecessarily, potentially stalling teardown. When it
+subsequently rejected, execution jumped to the outer catch, meaning `interrupt_resolved` was
+never written — leaving the `interrupt_requested` entry permanently orphaned in the ledger.
+
+### Fix
+
+Folded the aborted guard into the condition:
+```ts
+// Before
+if (opts.waitForInterrupt !== undefined) {
+
+// After
+if (opts.waitForInterrupt !== undefined && !opts.signal?.aborted) {
+```
+
+When the signal is already aborted, the block falls through to the default path
+(`cfg.defaultValue ?? null`, `source = "default"`), which continues to write
+`interrupt_resolved` and returns cleanly. The abort propagates naturally at the run level.
+
+## BUG-W09 ✅ FIXED — `endOpenSpans` uses wall-clock `new Date()` — child spans outlive root span end time
+
+**Discovered:** 2026-06-01  
+**Severity:** Medium — OTel parent-child timing invariant violated; rendering artefacts in Jaeger/Tempo/Honeycomb
+
+### Description
+
+`endOpenSpans()` computed `const now = new Date()` at the moment `dispose()` was called.
+The root span had already been closed using the ledger-entry timestamp `t` (which is in the
+past). Any still-open agent/phase spans therefore received an end time strictly greater than
+their parent's end time, violating the OTel invariant `child.endTime ≤ parent.endTime`.
+This produced rendering artefacts (negative-duration children, timeline overflows) in
+Jaeger, Tempo, and Honeycomb.
+
+### Fix
+
+Added `lastEntryTime: Date | null` to `ReplayState`. `feedLedgerEntry` updates it on every
+entry (`state.lastEntryTime = t`). `endOpenSpans` now uses `state.lastEntryTime ?? new Date()`
+so abandoned spans are capped at the last observed ledger timestamp instead of wall-clock now.
+
+## BUG-150 ✅ FIXED — TOCTOU race in checkpointFn — concurrent agents with same label both return true
+
+**Discovered:** 2026-06-01
+**Severity:** Medium
+
+### File
+`src/runtime/ctx/checkpointReport.ts` — `checkpointFn`
+
+### Description
+
+`hasCheckpoint` and `setCheckpoint` were two separate `await`ed calls with no
+lock between them. Two parallel agents calling `ctx.checkpoint('same-label')`
+could both observe `false` from `hasCheckpoint` before either wrote, then both
+proceed to `setCheckpoint`. Both returned `{ok:true, value:true}`, violating the
+idempotency contract and causing the guarded work block to execute twice.
+
+### Fix
+
+Added a per-label async mutex (`cpLocks: Map<string, Promise<void>>`) inside
+`createCheckpointReportMethods`. Before the `hasCheckpoint` read, each call:
+
+1. Snapshots the current in-flight promise for the label (or `Promise.resolve()` if none).
+2. Creates a new `ticket` promise and stores it in `cpLocks` for subsequent callers to await.
+3. `await`s the previous promise, serializing execution.
+4. Runs the check-then-set body inside a `try/finally` that calls `release()` on completion.
+
+The second concurrent caller blocks at step 3 until the first finishes; by then
+`hasCheckpoint` returns `true` and the second caller correctly returns
+`{ok:true, value:false}`.
+
+---
+
+## BUG-151 ✅ FIXED — memo_check silently ignores caller-supplied ttlMs — stale entries returned when freshness filtering expected
+
+**Discovered:** 2026-06-01
+**Severity:** Medium — silent stale-cache hits when caller expects stricter freshness
+
+### Description
+
+`memo_check` called `parseMemoOpts(optsArg)` (which parses `ttl` into `ttlMs`) but then executed `void ttlMs` and discarded it. The hit/miss decision was delegated entirely to `store.has(keyHash)`, which gates against the TTL baked in at `set`-time. A caller writing `ctx.memo.check(key, { ttl: 3_600_000 })` expecting entries fresher than one hour would silently receive entries up to 24 hours old with no error or diagnostic.
+
+### Fix
+
+Removed `void ttlMs` and added a check-time freshness gate after `store.get()`:
+
+```ts
+if (Date.now() - entry.writtenAt > ttlMs) {
+  return { ok: true, value: { hit: false } };
+}
+```
+
+The caller-supplied TTL now acts as a maximum-age gate: an entry that passes the set-time TTL check but exceeds the check-time TTL is returned as a miss. This is strictly additive — passing a larger TTL than the set-time value has no effect (the entry would already be expired by `store.get()`).
+
+## BUG-151 ✅ FIXED — sendControl creates phantom run directory instead of throwing for non-existent runId
+
+**File:** `src/client.ts` — `WorkflowClient.sendControl`
+**Discovered:** 2026-06-01
+**Severity:** Medium — silent phantom directory creation; durable ctrl commands written but never consumed
+
+### Description
+
+`sendControl` called `fsp.mkdir(dir, { recursive: true })` unconditionally before writing the
+control command. This silently created the run directory when the `runId` didn't exist (typo'd
+ID, stale ID, or long-dead run). The JSDoc contract documented `@throws if the run directory
+doesn't exist or the write fails`, but the implementation did the opposite — the command was
+durably fsynced into a directory that no run process ever watched.
+
+### Fix
+
+Replaced `fsp.mkdir(dir, { recursive: true })` with `fsp.access(dir)`, which throws `ENOENT`
+if the directory is absent, matching the documented `@throws` contract. The directory is never
+created by this method.
+
+## BUG-151 ✅ FIXED — `resumePaused` returns false without calling `pauseGate.resume()` — queued agents block indefinitely
+
+**File:** `src/runManager.ts`
+**Discovered:** 2026-06-01
+**Severity:** Medium — permanent deadlock for queued agents when a run fails while paused
+
+### Description
+
+Two early-return paths in `resumePaused` (inside `withControlLock`) returned `false` without calling `pauseGate.resume()`:
+
+1. The re-check after `ledger.append` — fires when `sm.state !== "paused" || ctrl.signal.aborted` after the ledger write.
+2. The `sm.go("running")` catch block — fires when the state transition races with a concurrent advance.
+
+The critical path: a phase throws with `failMode:'throw'`, causing `sm.go('failed')` to run outside `withControlLock`. When a `resumePaused` IPC call then arrives, the re-check sees `sm.state !== 'paused'` and returns `false` — but the pause gate is never opened. Any `runOneAgent` call already queued on `pauseGate.waitWhilePaused` blocks indefinitely.
+
+The `pause()` method's own catch/rollback path correctly called `pauseGate.resume()`, making this an asymmetric omission.
+
+### Fix
+
+Added `pauseGate.resume()` before each `return false` in `resumePaused`, mirroring the existing rollback in `pause()`. Updated the catch-block comment to document the intent.
+
+## BUG-151 ✅ FIXED — onTimerError never called for normal callback throws — run-failure hook bypassed
+
+**File:** `src/runtime/timerTable.ts`, `invokeWrapped()`
+**Discovered:** 2026-06-01
+**Severity:** High — sandbox timer callback throws silently swallowed; run never fails
+
+### Description
+
+In `invokeWrapped()`, when `wrapped()` throws and `rethrowAcrossRealm()` succeeds, the code
+called `opts.onTimerContextError?.(ctxErr)` then immediately returned. `opts.onTimerError` was
+never invoked in this path. The JSDoc for `onTimerError` explicitly states it is "invoked when a
+timer callback throws" and "decides whether to fail the run." Production wires `onTimerError` to
+the run-failure path; `onTimerContextError` is a test-only sink. Any sandbox timer callback that
+threw would be silently swallowed — the run never failed regardless of the error. `onTimerError`
+was only reached when `rethrowAcrossRealm` itself threw a `SandboxViolationError` (the exceptional
+case, not the normal throw path).
+
+### Fix
+
+Added `opts.onTimerError?.(ctxErr)` immediately before `opts.onTimerContextError?.(ctxErr)` in the
+`rethrowAcrossRealm` success branch, so the run-failure hook fires unconditionally on any caught
+timer error. `onTimerContextError` is retained (test sink) but now always accompanies `onTimerError`.
+
+## BUG-W07 — ctx.parallel with large agent count silently fails all agents (unresolved)
+
+**Discovered:** 2026-06-01  
+**Severity:** High — 0 agents run, all appear as FAILED, no error in ledger
+
+### Description
+
+When `ctx.parallel(items, fn, { failMode: 'null' })` is called with 33 items, all 33
+`runOneAgent` promises reject in ~5ms with no `agent_start` or `agent_error` ledger entries.
+This is logically impossible under the documented `runOneAgent` code path — every rejection
+path before the outer try/catch either (a) requires `agentCount >= perRunAgentCap` (not met at
+33/1000) or (b) requires `tokenBudget !== null` (disabled by default). The `phase_end` shows
+`ok:0 error:33 durationMs:5` with zero agent transcripts.
+
+### Observed conditions
+
+- 33 agents, `maxConcurrent: 16` (run-level cap)
+- 6 hunt agents + 1 dedupe agent completed beforehand (all via BUG-149 recovery, no `agent_end`)
+- `failMode: 'null'` on the parallel call
+- All agents had distinct valid IDs (`fix-0` — `fix-32`), prompts ~900 chars
+
+### Workaround
+
+Replace `ctx.parallel(items, fn)` with a `for-of` loop using `ctx.phase('fix-N', [agent], { failMode: 'null' })`.
+This is serial but avoids the concurrency failure entirely.
+
+### Suspected root cause (unconfirmed)
+
+Possibly related to the 6 preceding agents completing via BUG-149 synthetic path — they have
+`ok:true` but no `agent_end` in the transcript. Unclear if the `state.agentCount` or semaphore
+state becomes corrupted in this scenario.
+
+## BUG-W10 ✅ FIXED — Mermaid header comment injection via unescaped manifest fields
+
+**File:** `src/runtime/visualize.ts` — `emitMermaid()`
+**Discovered:** 2026-06-01
+**Severity:** High — user-controlled input can break out of Mermaid `%%` comment line
+
+### Description
+
+In `emitMermaid()`, `manifest.runId`, `manifest.workflowName`, and `manifest.input` were
+interpolated into the `%%` comment line without sanitization. `escapeLabel()` was never called
+on these values. A newline (`\n`, `\r`) in any field — especially `manifest.input`, which is
+user-supplied — breaks out of the comment and injects arbitrary nodes or edges into the rendered
+diagram. Example: `input='audit\nStart --> Injected\nInjected([pwned])'` produces a live Mermaid
+node after the comment line.
+
+### Fix
+
+Wrapped each value through `escapeLabel()` (which already strips `\u0000–\u001F`, covering `\r`
+and `\n`) before concatenation. `String()` coercion added so non-string manifest fields don't
+cause a runtime exception:
+
+```ts
+if (manifest.runId) headerBits.push(`run=${escapeLabel(String(manifest.runId))}`);
+if (manifest.workflowName) headerBits.push(`workflow=${escapeLabel(String(manifest.workflowName))}`);
+if (manifest.input) headerBits.push(`input=${escapeLabel(truncate(String(manifest.input), 60))}`);
+```
