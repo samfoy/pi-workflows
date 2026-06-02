@@ -183,16 +183,16 @@ test("renderMermaidFromData emits flowchart TD with subgraphs and edges", () => 
   assert.match(out, /Start\(\[Start: codebase-audit\]\)/);
   assert.match(out, /Start --> P0/);
   // Both phases as subgraphs with phase names
-  assert.match(out, /subgraph P0 \["discover · 7100ms · ok=3"\]/);
-  assert.match(out, /subgraph P1 \["audit · 9900ms · ok=1"\]/);
+  assert.match(out, /subgraph P0 \["discover · 7s · ok=3"\]/);
+  assert.match(out, /subgraph P1 \["audit · 9s · ok=1"\]/);
   // Phase chain edge
   assert.match(out, /P0 --> P1/);
   // Three agents in phase 0
-  assert.match(out, /P0_A0\["discover-1 · ok · 4990ms"\]/);
-  assert.match(out, /P0_A1\["discover-2 · ok · 5989ms"\]/);
-  assert.match(out, /P0_A2\["discover-3 · ok · 6988ms"\]/);
+  assert.match(out, /P0_A0\["discover-1 · ok · 4s"\]/);
+  assert.match(out, /P0_A1\["discover-2 · ok · 5s"\]/);
+  assert.match(out, /P0_A2\["discover-3 · ok · 6s"\]/);
   // Agent in phase 1
-  assert.match(out, /P1_A0\["audit-1 · ok · 9790ms"\]/);
+  assert.match(out, /P1_A0\["audit-1 · ok · 9s"\]/);
   // End node carries final state
   assert.match(out, /P1 --> End/);
   assert.match(out, /End\(\[done\]\)/);
@@ -270,7 +270,7 @@ test("renderMermaidFromData: agent_error and agent_cache_hit set distinct status
   assert.match(out, /P0_A0\["fail-1 · error"\]/);
   assert.match(out, /P0_A1\["cached-1 · cache-hit"\]/);
   // Phase label aggregates both kinds
-  assert.match(out, /subgraph P0 \["mixed · 2000ms · err=1 hit=1"\]/);
+  assert.match(out, /subgraph P0 \["mixed · 2s · err=1 hit=1"\]/);
 });
 
 test("renderMermaidFromData: control chars and quotes in labels are escaped", () => {
@@ -312,8 +312,8 @@ test("renderMermaid (async): reads manifest + ledger off disk", async () => {
     writeFileSync(join(runDir, "ledger.jsonl"), ledger);
     const out = await renderMermaid(runDir);
     assert.match(out, /run=wf-fixturefull/);
-    assert.match(out, /subgraph P0 \["discover · 7100ms · ok=3"\]/);
-    assert.match(out, /subgraph P1 \["audit · 9900ms · ok=1"\]/);
+    assert.match(out, /subgraph P0 \["discover · 7s · ok=3"\]/);
+    assert.match(out, /subgraph P1 \["audit · 9s · ok=1"\]/);
     assert.match(out, /End\(\[done\]\)/);
   } finally {
     cleanup();
@@ -329,7 +329,7 @@ test("renderMermaid (async): missing manifest still produces a diagram", async (
     const out = await renderMermaid(runDir);
     // Default Start label (no workflowName)
     assert.match(out, /Start\(\[Start\]\)/);
-    assert.match(out, /subgraph P0 \["discover · 7100ms · ok=3"\]/);
+    assert.match(out, /subgraph P0 \["discover · 7s · ok=3"\]/);
   } finally {
     cleanup();
   }

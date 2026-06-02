@@ -66,6 +66,7 @@ import { join } from "node:path";
 import type { LedgerEntry } from "../types/internal.js";
 import { LedgerReader } from "./ledger.js";
 import { ledgerPath } from "../util/paths.js";
+import { fmtDuration } from "../util/time.js";
 
 /** Subset of `RunManifest` the renderer actually reads. */
 export interface VizManifestLike {
@@ -456,7 +457,7 @@ function emitMermaid(input: EmitInput): string {
 function phaseLabelFor(p: PhaseRow): string {
   const bits: string[] = [p.phaseName];
   if (p.ended) {
-    if (typeof p.durationMs === "number") bits.push(`${p.durationMs}ms`);
+    if (typeof p.durationMs === "number") bits.push(fmtDuration(p.durationMs));
     const counts: string[] = [];
     if (p.ok > 0) counts.push(`ok=${p.ok}`);
     if (p.error > 0) counts.push(`err=${p.error}`);
@@ -470,7 +471,7 @@ function phaseLabelFor(p: PhaseRow): string {
 
 function agentLabelFor(a: AgentRow): string {
   const bits: string[] = [a.agentId, a.status];
-  if (typeof a.durationMs === "number") bits.push(`${a.durationMs}ms`);
+  if (typeof a.durationMs === "number") bits.push(fmtDuration(a.durationMs));
   return bits.join(" · ");
 }
 
