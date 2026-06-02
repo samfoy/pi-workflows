@@ -12,7 +12,7 @@ import {
   helpForState,
 } from "./hotkeys.js";
 import { renderRunsList } from "./runsList.js";
-import { renderPhaseView } from "./phaseView.js";
+import { renderPhaseViewCards } from "./phaseView.js";
 import { renderAgentDetail, type AgentDetailSnapshot } from "./agentDetail.js";
 import { renderGcDialog } from "./gcDialog.js";
 import { agentTranscriptPath } from "./transcriptOpen.js";
@@ -109,11 +109,15 @@ export function buildRender(
       const summary = opts.registry.getSummary(state.openedRunId);
       if (summary !== undefined) {
         const phaseSnap = opts.phaseRegistry.getRunSnapshot(state.openedRunId);
-        // Determine selected agent's state for context-sensitive help.
-        const runningAgentsForHelp = phaseSnap?.phases
-          .filter((p) => p.status === "running")
-          .flatMap((p) => p.agents) ?? [];
-        const selectedAgentState = runningAgentsForHelp[state.phaseCursor]?.state;
+        // P2-S9: cursor now indexes into phases[] (cards), not agentRows.
+        // For context-sensitive help, resolve the cursor phase's first
+        // running agent (or first agent of any state) to derive the
+        // agentState used by the help line.
+        const cursorPhase = phaseSnap?.phases[state.phaseCursor];
+        const cursorPhaseAgent =
+          cursorPhase?.agents.find((a) => a.state === "running") ??
+          cursorPhase?.agents[0];
+        const selectedAgentState = cursorPhaseAgent?.state;
         // Slice 15 (I1): include a deferred gate in the `i`-enable
         // count so the help line shows `[i] answer prompt` when only
         // a snoozed gate is outstanding (no pending interrupt list).
@@ -133,7 +137,7 @@ export function buildRender(
               phasePendingInterrupts,
             )
           : [];
-        const opts2: Parameters<typeof renderPhaseView>[2] = {
+        const opts2: Parameters<typeof renderPhaseViewCards>[2] = {
           nowMs: opts.nowMs(),
           help,
           // P2-S3: thread the spinner frame through to phase state.view.
@@ -141,14 +145,15 @@ export function buildRender(
         };
         if (width !== undefined) (opts2 as { width?: number }).width = width;
         if (liveBannerText !== undefined) (opts2 as { banner?: string }).banner = liveBannerText;
+        // P2-S9: cursor binds to phases[] now — use phases.length, not agentRows.
         if (
           phaseSnap !== undefined &&
           state.phaseCursor >= 0 &&
-          phaseSnap.totalAgents > 0
+          phaseSnap.phases.length > 0
         ) {
           (opts2 as { cursor?: number }).cursor = state.phaseCursor;
         }
-        const rendered = renderPhaseView(summary, phaseSnap, opts2);
+        const rendered = renderPhaseViewCards(summary, phaseSnap, opts2);
         return { lines: rendered.lines };
       }
       // Run vanished from registry — fall back to runs list.

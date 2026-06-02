@@ -530,15 +530,13 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       state.lastSnapshot = opts.registry.listSummaries();
       const sorted = sortAndClamp(state.lastSnapshot);
       if (state.cursor >= sorted.length) state.cursor = Math.max(0, sorted.length - 1);
-      // BUG-073: clamp state.phaseCursor when the running-phase agent list shrinks.
+      // BUG-073: clamp state.phaseCursor when phases shrink.
+      // P2-S9: cursor indexes phases[] (cards), not running-agent rows.
       if (state.openedRunId !== undefined) {
         const snap = opts.phaseRegistry.getRunSnapshot(state.openedRunId);
-        const visibleAgents =
-          snap?.phases
-            .filter((p) => p.status === "running")
-            .flatMap((p) => p.agents).length ?? 0;
-        if (state.phaseCursor >= visibleAgents) {
-          state.phaseCursor = Math.max(0, visibleAgents - 1);
+        const phaseCount = snap?.phases.length ?? 0;
+        if (state.phaseCursor >= phaseCount) {
+          state.phaseCursor = Math.max(0, phaseCount - 1);
         }
       }
       requestRender();

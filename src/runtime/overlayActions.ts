@@ -146,13 +146,9 @@ export function handleAction(
         if (state.view === "phase-view") {
           if (state.openedRunId !== undefined) {
             const snap = opts.phaseRegistry.getRunSnapshot(state.openedRunId);
-            // Only agents in the running phase are rendered as agentRows;
-            // use that count as the bound, not totalAgents (all phases).
-            const visibleAgents =
-              snap?.phases
-                .filter((p) => p.status === "running")
-                .flatMap((p) => p.agents).length ?? 0;
-            if (state.phaseCursor < Math.max(0, visibleAgents - 1)) {
+            // P2-S9: cursor indexes phases[] (cards), not running-agent rows.
+            const phaseCount = snap?.phases.length ?? 0;
+            if (state.phaseCursor < Math.max(0, phaseCount - 1)) {
               state.phaseCursor++;
               helpers.requestRender();
             }
@@ -312,21 +308,23 @@ export function handleAction(
         }
         return;
       case "open-agent-detail":
-        // Slice 15: Enter on phase state.view opens agent detail for state.cursor-pointed agent.
+        // P2-S9: cursor indexes phases[] now. Resolve the cursor phase's
+        // first running agent (or first agent of any state) and drill in.
+        // Pending phases / phases with no agents = no-op.
         if (action.runId && state.openedRunId !== undefined) {
           const phaseSnap = opts.phaseRegistry.getRunSnapshot(state.openedRunId);
-          // Index into only the running-phase agents — the same set that
-          // renderPhaseView emits as agentRows — so state.cursor and target stay in sync.
-          const agentEntry = phaseSnap?.phases
-            .filter((p) => p.status === "running")
-            .flatMap((p) => p.agents)
-            .find((_, idx) => idx === state.phaseCursor);
-          if (agentEntry !== undefined) {
-            state.openedAgentId = agentEntry.agentId;
-            state.agentLogTail = [];
-            state.view = "agent-detail";
-            helpers.clearBanner();
-            helpers.requestRender();
+          const cursorPhase = phaseSnap?.phases[state.phaseCursor];
+          if (cursorPhase !== undefined && cursorPhase.status !== "pending") {
+            const agentEntry =
+              cursorPhase.agents.find((a) => a.state === "running") ??
+              cursorPhase.agents[0];
+            if (agentEntry !== undefined) {
+              state.openedAgentId = agentEntry.agentId;
+              state.agentLogTail = [];
+              state.view = "agent-detail";
+              helpers.clearBanner();
+              helpers.requestRender();
+            }
           }
         }
         return;
@@ -783,12 +781,14 @@ export function handleKey(
     if (state.view === "phase-view" && state.openedRunId !== undefined) {
       const summary = opts.registry.getSummary(state.openedRunId);
       const isRemote = !opts.registry.wasLocalRun(state.openedRunId);
-      // Find the agent under the phase state.cursor for per-agent actions.
+      // P2-S9: cursor indexes phases[]. The agent under the cursor for
+      // per-agent hotkeys (s/r) is the cursor phase's first running
+      // agent (or first agent of any state).
       const phaseSnapForKey = opts.phaseRegistry.getRunSnapshot(state.openedRunId);
-      const runningAgentRows = phaseSnapForKey?.phases
-        .filter((p) => p.status === "running")
-        .flatMap((p) => p.agents) ?? [];
-      const selectedAgent = runningAgentRows[state.phaseCursor];
+      const cursorPhaseForKey = phaseSnapForKey?.phases[state.phaseCursor];
+      const selectedAgent =
+        cursorPhaseForKey?.agents.find((a) => a.state === "running") ??
+        cursorPhaseForKey?.agents[0];
       // Slice 15 (I1): a deferred gate prompt also enables `i` (re-open).
       const deferredGateForOpened =
         getGatePromptState() !== null &&
