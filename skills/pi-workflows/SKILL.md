@@ -22,6 +22,18 @@ Load this skill when the user asks to:
 
 ---
 
+## Quickstart: how results are delivered
+
+1. **Write or describe** a workflow — the model calls `write_workflow` (or you type a slash command).
+2. **Approval dialog** appears with the file SHA-256 and first 40 lines; press `y` to proceed.
+3. **Run starts in the background** — you can keep chatting while agents work.
+4. **Press `w`** to open the workflow overlay and watch phase progress in real time.
+5. **Result lands as a follow-up chat turn** automatically when the run finishes — no polling needed.
+
+To inspect a specific run at any time: `/workflows show <id>`
+
+---
+
 ## How to invoke a workflow
 
 Three paths, depending on who's driving:
@@ -531,7 +543,7 @@ See `docs/integration-testing.md` for cache assertions, phase-structure tests, a
 
 ```
 /workflows list         # list active + recent runs
-/workflows status <id>  # status of a specific run
+/workflows show <id>    # inspect a specific run
 /workflows resume <id>  # re-attach to a completed run (gates through pi.ui.confirm)
 /workflows kill <id>    # kill a running workflow
 /workflows gc           # garbage-collect old terminal runs
