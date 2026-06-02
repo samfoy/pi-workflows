@@ -146,6 +146,22 @@ export interface RenderOpts {
    * toggles this via Enter on the sentinel row.
    */
   readonly expandCompleted?: boolean;
+  /**
+   * P2-S6 — runId whose log tail should be peeked inline. When set
+   * AND that run is in the rendered output, the peek lines are
+   * injected into `lines[]` immediately after that row. The peek
+   * lines do NOT appear in `rows[]`, so cursor navigation is
+   * unaffected. If the runId is not in the visible list, this is a
+   * silent no-op.
+   */
+  readonly peekRunId?: string;
+  /**
+   * P2-S6 — the log-tail strings to inject under `peekRunId`. Each
+   * non-last entry renders as `  │ <text>`, the last entry as
+   * `  └ <text>`. An empty array (or `undefined` when peekRunId is
+   * set) renders a single `  └ (no log entries yet)` placeholder.
+   */
+  readonly peekLines?: ReadonlyArray<string>;
 }
 
 /**
@@ -535,6 +551,24 @@ export function renderRunsList(
     header,
     separator,
   ];
+
+  // P2-S6 — build the peek-tail injection once. Returns null when
+  // peek is inactive or its target run is not in the visible list.
+  const peekTail: string[] | null = (() => {
+    if (opts.peekRunId === undefined) return null;
+    if (!rows.some((r) => r.runId === opts.peekRunId)) return null;
+    const lns = opts.peekLines ?? [];
+    if (lns.length === 0) return ["  \u2514 (no log entries yet)"];
+    const out: string[] = [];
+    for (let li = 0; li < lns.length - 1; li++) {
+      out.push(`  \u2502 ${lns[li]}`);
+    }
+    out.push(`  \u2514 ${lns[lns.length - 1]}`);
+    return out;
+  })();
+  const matchPeek = (row: RenderedRow): boolean =>
+    peekTail !== null && row.runId === opts.peekRunId;
+
   if (rows.length === 0 && hiddenCompletedCount === 0) {
     lines.push("(no runs)");
   } else if (groupBy === "state") {
@@ -544,11 +578,19 @@ export function renderRunsList(
     let i = 0;
     if (needsInput.length > 0) {
       lines.push(sectionHeader("\u26a0", "Needs input", needsInput.length));
-      for (let k = 0; k < needsInput.length; k++) lines.push(rows[i++]!.line);
+      for (let k = 0; k < needsInput.length; k++) {
+        const row = rows[i++]!;
+        lines.push(row.line);
+        if (matchPeek(row)) for (const p of peekTail!) lines.push(p);
+      }
     }
     if (working.length > 0) {
       lines.push(sectionHeader("\u25b6", "Working", working.length));
-      for (let k = 0; k < working.length; k++) lines.push(rows[i++]!.line);
+      for (let k = 0; k < working.length; k++) {
+        const row = rows[i++]!;
+        lines.push(row.line);
+        if (matchPeek(row)) for (const p of peekTail!) lines.push(p);
+      }
     }
     if (completedVisible.length > 0 || hiddenCompletedCount > 0) {
       // The header count reflects the FULL completed bucket (visible
@@ -561,7 +603,9 @@ export function renderRunsList(
         ),
       );
       for (let k = 0; k < completedVisible.length; k++) {
-        lines.push(rows[i++]!.line);
+        const row = rows[i++]!;
+        lines.push(row.line);
+        if (matchPeek(row)) for (const p of peekTail!) lines.push(p);
       }
       if (hiddenCompletedCount > 0) {
         // Cursor lands on the sentinel when `cursor === rows.length`.
@@ -573,7 +617,10 @@ export function renderRunsList(
       }
     }
   } else {
-    for (const r of rows) lines.push(r.line);
+    for (const r of rows) {
+      lines.push(r.line);
+      if (matchPeek(r)) for (const p of peekTail!) lines.push(p);
+    }
   }
   if (help.length > 0) {
     lines.push("");

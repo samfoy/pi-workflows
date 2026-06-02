@@ -28,6 +28,7 @@ import { renderAgentDetail, MAX_LOG_LINES as AGENT_DETAIL_MAX_LOG_LINES } from "
 import { loadGcCandidates, applyGc } from "./gcDialog.js";
 import { agentTranscriptPath } from "./transcriptOpen.js";
 import type { PhaseRegistry } from "./phaseRegistry.js";
+import { readPeekLines } from "./peek.js";
 import {
   _pendingInterrupts,
   DEFAULT_BANNER_TTL_MS,
@@ -250,6 +251,27 @@ export function handleAction(
         if (state.view === "filter") state.view = "runs-list";
         helpers.requestRender();
         return;
+      // P2-S6 — peek panel toggle. Sticky: cursor navigation does
+      // NOT clear the peek; only a second Space on the same row
+      // closes it, and Space on a different row replaces it.
+      case "peek-toggle": {
+        const targetRunId = action.runId;
+        if (targetRunId === undefined) return;
+        if (state.peekRunId === targetRunId) {
+          // Toggle off.
+          state.peekRunId = undefined;
+          state.peekLines = [];
+          helpers.requestRender();
+          return;
+        }
+        const summary = opts.registry.getSummary(targetRunId);
+        const dir = summary?.runDir;
+        const lines = dir !== undefined ? readPeekLines(dir, 5) : [];
+        state.peekRunId = targetRunId;
+        state.peekLines = lines;
+        helpers.requestRender();
+        return;
+      }
       case "close-overlay":
         helpers.close();
         return;

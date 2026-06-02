@@ -707,3 +707,45 @@ test("P2-S7: Enter in filter view emits filter-enter (lock)", () => {
   const action = dispatchHotkey({ key: "Enter", view: "filter" });
   assert.equal(action.kind, "filter-enter");
 });
+
+// ----- P2-S6: peek panel -----------------------------------------------
+
+test("P2-S6: Space on a runs-list row emits peek-toggle with runId", () => {
+  const action = dispatchHotkey({
+    key: " ",
+    view: "runs-list",
+    runState: "running",
+    runId: "wf-peek00000001",
+  });
+  assert.equal(action.kind, "peek-toggle");
+  assert.equal(action.runId, "wf-peek00000001");
+});
+
+test("P2-S6: Space without a selected run is a no-op (no-selection)", () => {
+  const action = dispatchHotkey({ key: " ", view: "runs-list" });
+  assert.equal(action.kind, "noop");
+  assert.equal(action.reason, "no-selection");
+});
+
+test("P2-S6: Space outside runs-list view is disabled-for-state", () => {
+  const action = dispatchHotkey({
+    key: " ",
+    view: "phase-view",
+    runState: "running",
+    runId: "wf-peek00000001",
+  });
+  assert.equal(action.kind, "noop");
+  assert.equal(action.reason, "disabled-for-state");
+});
+
+test("P2-S6: Space fires regardless of run state (peek is read-only)", () => {
+  for (const state of STATES) {
+    const action = dispatchHotkey({
+      key: " ",
+      view: "runs-list",
+      runState: state,
+      runId: "wf-peek00000001",
+    });
+    assert.equal(action.kind, "peek-toggle", `expected peek-toggle for state=${state}`);
+  }
+});

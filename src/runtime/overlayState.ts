@@ -87,6 +87,19 @@ export interface OverlayInstanceState {
    * `… N more` sentinel. Toggled by Enter on the sentinel row.
    */
   expandCompleted: boolean;
+  /**
+   * P2-S6 — runId currently showing the inline peek panel, or
+   * `undefined` when no peek is open. Sticky: cursor navigation
+   * does NOT clear it; only a second Space (matching) or a Space
+   * on a different row toggles / replaces it.
+   */
+  peekRunId: string | undefined;
+  /**
+   * P2-S6 — cached log-tail strings for the currently-peeked run.
+   * Populated synchronously when peek is opened (last 5 ledger
+   * entries). The renderer prepends glyphs (│ / └) on output.
+   */
+  peekLines: readonly string[];
   lastSnapshot: ReadonlyArray<RunSummary>;
 }
 
@@ -108,6 +121,8 @@ export function makeOverlayState(initialSnapshot: ReadonlyArray<RunSummary>): Ov
     filterMode: false,
     filterText: "",
     expandCompleted: false,
+    peekRunId: undefined,
+    peekLines: [],
     lastSnapshot: initialSnapshot,
   };
 }

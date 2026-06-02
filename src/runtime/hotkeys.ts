@@ -79,7 +79,9 @@ export type HotkeyActionKind =
   | "filter-enter"
   | "filter-append"
   | "filter-backspace"
-  | "filter-clear";
+  | "filter-clear"
+  // P2-S6 — peek panel toggle (Space on a runs-list row).
+  | "peek-toggle";
 
 export interface HotkeyAction {
   readonly kind: HotkeyActionKind;
@@ -197,6 +199,8 @@ const NORM_KEY = new Map<string, string>([
   // ZONE_TIMETRAVEL TUI surface: 'f' opens the fork-from-checkpoint dialog.
   ["f", "f"],
   ["F", "f"],
+  // P2-S6: peek panel toggle (Space on a runs-list row).
+  [" ", "space"],
 ]);
 
 function normalize(key: string): string {
@@ -292,6 +296,11 @@ export function isHotkeyEnabled(input: DispatchInput): boolean {
       // checkpoint. Available on runs-list when a run is selected,
       // regardless of state — forking a running run is fine (the
       // parent keeps running independently).
+      if (input.view !== "runs-list") return false;
+      return input.runId !== undefined;
+    case "space":
+      // P2-S6: Space toggles the peek panel for the selected run.
+      // Read-only — enabled in any state, only on runs-list.
       if (input.view !== "runs-list") return false;
       return input.runId !== undefined;
     default:
@@ -492,6 +501,13 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
       // ZONE_TIMETRAVEL: open the fork dialog for this run.
       if (input.view === "runs-list") {
         return { kind: "fork-requested", runId };
+      }
+      return { kind: "noop", runId, reason: "disabled-for-state" };
+    case "space":
+      // P2-S6: peek panel toggle. Runs-list only — read-only,
+      // enabled regardless of run state.
+      if (input.view === "runs-list") {
+        return { kind: "peek-toggle", runId };
       }
       return { kind: "noop", runId, reason: "disabled-for-state" };
     default:

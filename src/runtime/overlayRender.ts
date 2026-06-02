@@ -202,6 +202,10 @@ export function buildRender(
       expandCompleted: state.expandCompleted,
       // P2-S7: thread filter text when in filter mode.
       ...(state.filterMode ? { filterText: state.filterText } : {}),
+      // P2-S6: thread peek panel when active.
+      ...(state.peekRunId !== undefined
+        ? { peekRunId: state.peekRunId, peekLines: state.peekLines }
+        : {}),
     });
     // VQ-1 — swap plain `row.line` entries in `lines[]` for their
     // ANSI-colored equivalents so state labels render with color in

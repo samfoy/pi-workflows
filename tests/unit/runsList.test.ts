@@ -977,3 +977,101 @@ describe("P2-S4: groupBy: 'time' (legacy) backward compat", () => {
     );
   });
 });
+
+//
+//  P2-S6 — peek panel (Space shows inline log tail).
+//
+
+describe("P2-S6: peek panel", () => {
+  test("peekRunId+peekLines injects `│` rows then `└` row after the matched run", () => {
+    const out = renderRunsList(
+      [
+        summary({ runId: "wf-peek00000001", workflowName: "alpha", state: "running" }),
+        summary({ runId: "wf-peek00000002", workflowName: "beta", state: "running" }),
+      ],
+      {
+        nowMs: NOW,
+        groupBy: "state",
+        peekRunId: "wf-peek00000001",
+        peekLines: ["first line", "second line", "third line"],
+      },
+    );
+    // Row count is unchanged — peek lines do NOT appear in rows[].
+    assert.equal(out.rows.length, 2);
+    // The peek lines appear right after the matched row in lines[].
+    const matchIdx = out.lines.findIndex(
+      (l) => l.includes("alpha") && l.includes("running"),
+    );
+    assert.ok(matchIdx >= 0, "matched row should be present in lines[]");
+    assert.equal(out.lines[matchIdx + 1], "  \u2502 first line");
+    assert.equal(out.lines[matchIdx + 2], "  \u2502 second line");
+    assert.equal(out.lines[matchIdx + 3], "  \u2514 third line");
+  });
+
+  test("peekRunId+empty peekLines emits a single `└ (no log entries yet)` placeholder", () => {
+    const out = renderRunsList(
+      [summary({ runId: "wf-empty0000001", workflowName: "alpha", state: "running" })],
+      { nowMs: NOW, groupBy: "state", peekRunId: "wf-empty0000001", peekLines: [] },
+    );
+    const placeholder = out.lines.find((l) => l.includes("(no log entries yet)"));
+    assert.ok(placeholder !== undefined, "placeholder line must be emitted");
+    assert.ok(placeholder!.startsWith("  \u2514 "), "placeholder uses └ glyph");
+  });
+
+  test("peekRunId pointing at a run not in the visible list silently no-ops", () => {
+    const out = renderRunsList(
+      [summary({ runId: "wf-visible0001", workflowName: "alpha", state: "running" })],
+      { nowMs: NOW, groupBy: "state", peekRunId: "wf-missing0001", peekLines: ["x", "y"] },
+    );
+    // No peek lines anywhere.
+    assert.ok(
+      !out.lines.some((l) => l.startsWith("  \u2502 ") || l.startsWith("  \u2514 ")),
+      "no peek glyphs when peekRunId is absent from the visible list",
+    );
+  });
+
+  test("undefined peekRunId — no peek lines, no behavior change", () => {
+    const out = renderRunsList(
+      [summary({ runId: "wf-plain0000001", workflowName: "alpha", state: "running" })],
+      { nowMs: NOW, groupBy: "state" },
+    );
+    assert.ok(
+      !out.lines.some((l) => l.startsWith("  \u2502 ") || l.startsWith("  \u2514 ")),
+      "no peek output when peekRunId is undefined",
+    );
+  });
+
+  test("peek lines do not affect cursor row index (`rows[]` order unchanged)", () => {
+    const runsArr = [
+      summary({ runId: "wf-peek00000001", workflowName: "alpha", state: "running" }),
+      summary({ runId: "wf-peek00000002", workflowName: "beta", state: "running" }),
+    ];
+    const baseline = renderRunsList(runsArr, { nowMs: NOW, groupBy: "state" });
+    const peeked = renderRunsList(runsArr, {
+      nowMs: NOW,
+      groupBy: "state",
+      peekRunId: "wf-peek00000001",
+      peekLines: ["a", "b"],
+    });
+    assert.deepEqual(
+      peeked.rows.map((r) => r.runId),
+      baseline.rows.map((r) => r.runId),
+    );
+  });
+
+  test("peek works in groupBy: 'time' mode too", () => {
+    const out = renderRunsList(
+      [summary({ runId: "wf-flat00000001", workflowName: "alpha", state: "running" })],
+      {
+        nowMs: NOW,
+        groupBy: "time",
+        peekRunId: "wf-flat00000001",
+        peekLines: ["only"],
+      },
+    );
+    assert.ok(
+      out.lines.some((l) => l === "  \u2514 only"),
+      "peek tail emits └ row in flat (time-grouped) mode",
+    );
+  });
+});
