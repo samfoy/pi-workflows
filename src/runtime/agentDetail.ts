@@ -135,7 +135,10 @@ export function renderAgentDetail(
   const endIdx = snap.logTail.length - scrollOffset;
   const visibleLogLines = snap.logTail.slice(startIdx, Math.max(0, endIdx));
   const logCount = visibleLogLines.length;
-  lines.push(`Live tail (last ${logCount > 0 ? logCount : 0} lines)`);
+  const tailLabel = scrollOffset > 0
+    ? `Log  [${startIdx + 1}\u2013${endIdx} of ${snap.logTail.length}]  \u2191\u2193 scroll`
+    : `Live tail (last ${logCount > 0 ? logCount : 0} lines)`;
+  lines.push(tailLabel);
   if (snap.logTail.length === 0) {
     lines.push("  (no output yet)");
   } else {

@@ -127,6 +127,25 @@ test("live tail shows last 12 lines from logTail", () => {
   assert.ok(!allText.includes("line-0"), "first lines should be trimmed");
 });
 
+test("scroll offset 0 shows live tail label", () => {
+  const tail = Array.from({ length: 20 }, (_, i) => `line-${i}`);
+  const snap = makeSnap({ logTail: tail });
+  const { lines } = renderAgentDetail(snap, { nowMs: NOW, scrollOffset: 0 });
+  const allText = lines.join("\n");
+  assert.ok(allText.includes("Live tail (last 12 lines)"), `expected live tail label, got: ${allText}`);
+  assert.ok(!allText.includes("↑↓ scroll"), "should not show scroll label at offset 0");
+});
+
+test("scroll offset >0 shows position label", () => {
+  // scrollOffset=5, logTail.length=20 → startIdx=3, endIdx=15 → "Log  [4–15 of 20]  ↑↓ scroll"
+  const tail = Array.from({ length: 20 }, (_, i) => `line-${i}`);
+  const snap = makeSnap({ logTail: tail });
+  const { lines } = renderAgentDetail(snap, { nowMs: NOW, scrollOffset: 5 });
+  const allText = lines.join("\n");
+  assert.ok(allText.includes("Log  [4\u201315 of 20]  ↑↓ scroll"), `expected position label, got: ${allText}`);
+  assert.ok(!allText.includes("Live tail"), "should not show live tail label when scrolled");
+});
+
 test("empty log tail shows placeholder", () => {
   const snap = makeSnap({ logTail: [] });
   const { lines } = renderAgentDetail(snap, { nowMs: NOW });
