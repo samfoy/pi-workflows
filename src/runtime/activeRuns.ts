@@ -49,6 +49,7 @@ import type { Run } from "../runManager.js";
 import type { RunOutcome } from "../types/internal.js";
 import { isParentAlive } from "./crashSweep.js";
 import { manifestPath } from "../util/paths.js";
+import { getPhaseRegistry, type PhaseRegistry } from "./phaseRegistry.js";
 
 /**
  * Stale-PID liveness check (B6). Thin wrapper around `isParentAlive`
@@ -599,6 +600,7 @@ const HYDRATION_CAP = 200;
 export async function hydrateRegistryFromDisk(
   registry: ActiveRunsRegistry,
   runsDir?: string,
+  phaseRegistry: PhaseRegistry = getPhaseRegistry(),
 ): Promise<void> {
   const root = runsDir ?? join(homedir(), ".pi/agent/workflows/runs");
   // Yield first so the overlay can render before we hit the filesystem.
@@ -682,6 +684,36 @@ export async function hydrateRegistryFromDisk(
       runDir: c.path,
     };
     registry.hydrateRun(summary);
+
+    // P2-S2: seed PhaseRegistry from manifest.phaseMeta so completed
+    // runs surface phase titles + descriptions in the TUI cards even
+    // though their `pi-workflows.meta.phases` feed entry is no longer
+    // being emitted in this process.
+    if (Array.isArray(manifest.phaseMeta)) {
+      const phases: Array<{ title: string; description?: string }> = [];
+      for (const raw of manifest.phaseMeta as unknown[]) {
+        if (raw && typeof raw === "object" && !Array.isArray(raw)) {
+          const r = raw as Record<string, unknown>;
+          if (typeof r.title === "string") {
+            phases.push(
+              typeof r.description === "string"
+                ? { title: r.title, description: r.description }
+                : { title: r.title },
+            );
+          }
+        }
+      }
+      if (phases.length > 0) {
+        try {
+          phaseRegistry.applyEntry({
+            customType: "pi-workflows.meta.phases",
+            data: { runId, phases },
+          } as Parameters<PhaseRegistry["applyEntry"]>[0]);
+        } catch {
+          /* silent — phaseMeta seeding is best-effort */
+        }
+      }
+    }
   }
 
   registry.flushNotify();

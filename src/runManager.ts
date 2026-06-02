@@ -66,6 +66,7 @@ import { createRunCtxHost } from "./runtime/runCtx.js";
 import { makeSemaphore } from "./runtime/semaphore.js";
 import { PauseGate } from "./runtime/pauseGate.js";
 import { runApprovalGate } from "./runtime/approval.js";
+import { writePhaseMeta } from "./runtime/manifestWriter.js";
 import { sha256 } from "./util/hash.js";
 import { newRunId } from "./util/runId.js";
 import { runDir as runDirFor } from "./util/paths.js";
@@ -868,6 +869,14 @@ export async function startWorkflowRun(
             phases: declaredPhases,
           });
         } catch { /* emission failures must not abort the run */ }
+      }
+      // P2-S2: persist phaseMeta into manifest.json so disk-hydrated
+      // (completed) runs surface phase descriptions in the TUI cards.
+      // Best-effort — a write failure must not abort the run.
+      if (declaredPhases.length > 0) {
+        writePhaseMeta(runDirAbs, declaredPhases).catch(() => {
+          /* silent — phaseMeta is a display-layer enrichment */
+        });
       }
       try {
         const out = await sandbox.runScript(sourceText);

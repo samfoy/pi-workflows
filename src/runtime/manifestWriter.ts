@@ -316,6 +316,79 @@ async function _doRecordAgentWorktreePath(
   await fs.rename(tmpName, target);
 }
 
+// ─── P2-S2: phaseMeta persistence ────────────────────────────
+//
+// Reuses the same per-runDir queue + atomic merge pattern so a
+// run-start phaseMeta write can never tear or interleave with the
+// dispatcher's parent-liveness write or runManager's slice-8a
+// partial-manifest write.
+
+/**
+ * Merge `phaseMeta` (extracted from `meta.phases[]` at run-start)
+ * into `<runDir>/manifest.json`. Idempotent in shape — callers may
+ * re-invoke with the same array and the file will be rewritten with
+ * an identical payload. Empty arrays are written as-is so disk
+ * hydration can distinguish "workflow declared no phases" (`[]`)
+ * from "pre-P2 run" (`undefined`).
+ */
+export function writePhaseMeta(
+  runDirAbs: string,
+  phaseMeta: ReadonlyArray<{ title: string; description?: string }>,
+): Promise<void> {
+  const pending = livenessWriteQueue.get(runDirAbs) ?? Promise.resolve();
+  const next = pending.then(() => _doWritePhaseMeta(runDirAbs, phaseMeta));
+  const queued = next.catch(() => {});
+  livenessWriteQueue.set(runDirAbs, queued);
+  queued.finally(() => {
+    if (livenessWriteQueue.get(runDirAbs) === queued) {
+      livenessWriteQueue.delete(runDirAbs);
+    }
+  });
+  return next;
+}
+
+async function _doWritePhaseMeta(
+  runDirAbs: string,
+  phaseMeta: ReadonlyArray<{ title: string; description?: string }>,
+): Promise<void> {
+  await fs.mkdir(runDirAbs, { recursive: true });
+  const target = manifestPath_byDir(runDirAbs);
+  let existing: Partial<RunManifest> = {};
+  try {
+    const buf = await fs.readFile(target, "utf8");
+    if (buf.trim().length > 0) {
+      const parsed = JSON.parse(buf) as unknown;
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        existing = parsed as Partial<RunManifest>;
+      }
+    }
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException)?.code;
+    if (code !== "ENOENT") {
+      // Corrupt manifest — overwrite with our fields only.
+    }
+  }
+  // Strip undefined description fields so the on-disk JSON stays clean.
+  const sanitized = phaseMeta.map((p) =>
+    p.description !== undefined
+      ? { title: p.title, description: p.description }
+      : { title: p.title },
+  );
+  const merged: Partial<RunManifest> = {
+    ...existing,
+    phaseMeta: sanitized,
+  };
+  const tmpName = join(
+    runDirAbs,
+    `manifest.json.tmp-${process.pid}-${Date.now()}-${randomBytes(4).toString("hex")}`,
+  );
+  const json = JSON.stringify(merged, null, 2) + "\n";
+  await fs.writeFile(tmpName, json, "utf8");
+  const fd = openSync(tmpName, "r+");
+  try { fsyncSync(fd); } finally { closeSync(fd); }
+  await fs.rename(tmpName, target);
+}
+
 // Re-export the by-runId path helper for symmetry with other slices'
 // import patterns.
 export { manifestPath };

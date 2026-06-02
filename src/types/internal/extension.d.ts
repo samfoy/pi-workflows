@@ -398,6 +398,20 @@ export interface RunManifest {
    */
   readonly parentDeletedAt?: string;
 
+  // ─── Phase 2 / TUI cards (P2-S2) ─────────────────────────────
+  /**
+   * Frozen snapshot of `meta.phases[]` extracted from the workflow
+   * source at run-start. Persisted so disk-hydrated (completed) runs
+   * can still surface phase titles + descriptions in the TUI phase
+   * view without replaying the workflow's `pi-workflows.meta.phases`
+   * feed entry. Optional / absent on pre-P2 manifests; readers must
+   * treat missing as "no declared meta".
+   */
+  readonly phaseMeta?: ReadonlyArray<{
+    readonly title: string;
+    readonly description?: string;
+  }>;
+
   // ─── slice 11 (crash sweep) ───────────────────────────────────
   /**
    * ISO-8601 UTC timestamp of when the crash-sweep last transitioned
