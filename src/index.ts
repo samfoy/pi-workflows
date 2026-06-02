@@ -34,6 +34,7 @@ import {
   registerSingleWorkflowCommand,
   registerWorkflowsCommand,
 } from "./commands/workflowCmd.js";
+import { STUB_CUSTOM_TYPE } from "./commands/workflowCmd.internal.js";
 import { makeConfirmDialog } from "./runtime/approval.js";
 import { sweepCrashedRuns } from "./runtime/crashSweep.js";
 import { bindRegistryToFeed } from "./runtime/overlay.js";
@@ -147,6 +148,29 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     pi,
     getRegistry: () => _registry ?? new Map(),
     startRun: startRunFromTool,
+  });
+
+  // ── Slice 14 (B2): suppress STUB_CUSTOM_TYPE messages from LLM context ──
+  // /workflows list, /workflows show, bypass banners, and other slash-
+  // command output use `pi.sendMessage` with `customType: STUB_CUSTOM_TYPE`
+  // and `deliverAs: "nextTurn"`. Without filtering, those messages land
+  // in the message history and the model analyzes workflow output on the
+  // next turn (e.g. typing "hello" after `/workflows list` makes the
+  // model summarize the run table). The `context` event fires before
+  // each LLM call with a mutable messages array; returning a filtered
+  // copy keeps the messages visible in the TUI session log but invisible
+  // to the model.
+  pi.on("context", async (rawEvent) => {
+    const event = rawEvent as {
+      messages?: ReadonlyArray<{ role?: string; customType?: string }>;
+    };
+    const messages = event.messages;
+    if (!Array.isArray(messages)) return {};
+    const filtered = messages.filter(
+      (m) => !(m.role === "custom" && m.customType === STUB_CUSTOM_TYPE),
+    );
+    if (filtered.length === messages.length) return {};
+    return { messages: filtered };
   });
 
   // ── Keyword trigger ────────────────────────────────────────────────
