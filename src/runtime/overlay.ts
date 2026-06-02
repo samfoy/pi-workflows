@@ -549,6 +549,11 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   let view: OverlayView = "runs-list";
   let cursor = 0;
   let phaseCursor = 0;
+  // Slice 11 (VQ-2): `gg` chord state. Set when the first `g` arrives
+  // (dispatcher returns noop reason=pending-g). Cleared on any other
+  // key, on view change, on overlay close, or when the chord fires.
+  let pendingG = false;
+  let pendingGAt = 0;
   let openedRunId: string | undefined;
   // Slice 15: agent detail state
   let openedAgentId: string | undefined;
@@ -971,6 +976,22 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         }
         return;
       }
+      case "navigate-first":
+        // Slice 11 (VQ-2): `gg` chord — jump cursor to the first row.
+        if (view === "phase-view") {
+          if (phaseCursor !== 0) {
+            phaseCursor = 0;
+            requestRender();
+          }
+          return;
+        }
+        if (view === "runs-list") {
+          if (cursor !== 0) {
+            cursor = 0;
+            requestRender();
+          }
+        }
+        return;
       case "navigate-back":
         // Agent detail (slice 15): Esc returns to phase view.
         if (view === "agent-detail") {
@@ -1355,6 +1376,14 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           setBanner("operation requires a local run (r/s unavailable on remote sessions)");
           requestRender();
         }
+        // Slice 11 (VQ-2): first `g` of a `gg` chord — record state so
+        // the next `g` within 300ms emits navigate-first. The caller
+        // path (handleKey) already cleared pendingG before dispatch;
+        // we set it here only for the pending-g reason.
+        if (action.reason === "pending-g") {
+          pendingG = true;
+          pendingGAt = Date.now();
+        }
         return;
     }
   };
@@ -1393,7 +1422,19 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     }
     // Agent detail view.
     if (view === "agent-detail" && openedRunId !== undefined) {
-      const action = dispatchHotkey({ key, view });
+      // Slice 11 (VQ-2): snapshot+clear chord state per keypress; the
+      // dispatcher consumes the snapshot and the noop handler re-arms
+      // pendingG when it sees reason=pending-g.
+      const wasPendingG = pendingG;
+      const wasPendingGAt = pendingGAt;
+      pendingG = false;
+      pendingGAt = 0;
+      const action = dispatchHotkey({
+        key,
+        view,
+        pendingG: wasPendingG,
+        pendingGAt: wasPendingGAt,
+      });
       handleAction(action);
       return;
     }
@@ -1407,11 +1448,18 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         .flatMap((p) => p.agents) ?? [];
       const selectedAgent = runningAgentRows[phaseCursor];
       const pendingCount = pendingInterrupts.get(openedRunId)?.length ?? 0;
+      // Slice 11 (VQ-2): snapshot+clear chord state per keypress.
+      const wasPendingG = pendingG;
+      const wasPendingGAt = pendingGAt;
+      pendingG = false;
+      pendingGAt = 0;
       const action = dispatchHotkey({
         key,
         view,
         isRemote,
         pendingInterruptCount: pendingCount,
+        pendingG: wasPendingG,
+        pendingGAt: wasPendingGAt,
         ...(summary !== undefined
           ? { runState: summary.state, runId: openedRunId }
           : {}),
@@ -1430,11 +1478,18 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       selected !== undefined
         ? pendingInterrupts.get(selected.runId)?.length ?? 0
         : 0;
+    // Slice 11 (VQ-2): snapshot+clear chord state per keypress.
+    const wasPendingG = pendingG;
+    const wasPendingGAt = pendingGAt;
+    pendingG = false;
+    pendingGAt = 0;
     const action = dispatchHotkey({
       key,
       view,
       isRemote,
       pendingInterruptCount: selectedPendingCount,
+      pendingG: wasPendingG,
+      pendingGAt: wasPendingGAt,
       ...(selected !== undefined
         ? { runState: selected.state, runId: selected.runId }
         : {}),

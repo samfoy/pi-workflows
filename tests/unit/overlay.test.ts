@@ -218,7 +218,7 @@ test("F2: `x` on a registered run calls Run.stop() via the overlay", async () =>
   mount!.done();
 });
 
-test("F4: `p` toggles pause↔resume by current state", async () => {
+test("F4: `p` pauses running runs; `u` resumes paused runs (slice 11 VQ-4)", async () => {
   const pi = makeFakePi();
   const registry = new ActiveRunsRegistry();
   let pauseCalls = 0;
@@ -271,7 +271,13 @@ test("F4: `p` toggles pause↔resume by current state", async () => {
   await Promise.resolve();
   // Wait for debounced overlay snapshot refresh (default 30ms).
   await new Promise((r) => setTimeout(r, 50));
+  // Slice 11 (VQ-4): `p` no longer resumes — it's a noop on paused.
   mount!.component.handleInput!("p");
+  await Promise.resolve();
+  assert.equal(pauseCalls, 1);
+  assert.equal(resumeCalls, 0, "p must NOT resume a paused run anymore (use u)");
+  // `u` is the new unpause key.
+  mount!.component.handleInput!("u");
   await Promise.resolve();
   assert.equal(pauseCalls, 1);
   assert.equal(resumeCalls, 1);

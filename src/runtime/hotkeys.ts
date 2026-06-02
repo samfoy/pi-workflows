@@ -46,6 +46,7 @@ export type HotkeyActionKind =
   | "noop"
   | "navigate-up"
   | "navigate-down"
+  | "navigate-first"
   | "navigate-back"
   | "open-phase-view"
   | "open-agent-detail"
@@ -78,7 +79,8 @@ export interface HotkeyAction {
     | "disabled-for-state"
     | "disabled-for-remote"
     | "no-selection"
-    | "unknown-key";
+    | "unknown-key"
+    | "pending-g";
 }
 
 /** The overlay views slice 13 understands. Phase/agent are slices 14/15. */
@@ -121,6 +123,16 @@ export interface DispatchInput {
    * / `interrupt_resolved` ledger events.
    */
   readonly pendingInterruptCount?: number | undefined;
+  /**
+   * Slice 11 (VQ-2): chord state for the `gg` jump-to-first sequence.
+   * The overlay tracks `pendingG` (set after the first `g` tap) and
+   * `pendingGAt` (wall-clock ms of that tap) and threads them in.
+   * The dispatcher emits `navigate-first` when a second `g` arrives
+   * within 300ms; otherwise it emits `noop` with reason `pending-g`
+   * and the overlay sets `pendingG=true; pendingGAt=Date.now()`.
+   */
+  readonly pendingG?: boolean | undefined;
+  readonly pendingGAt?: number | undefined;
 }
 
 const NORM_KEY = new Map<string, string>([
@@ -144,7 +156,12 @@ const NORM_KEY = new Map<string, string>([
   ["x", "x"],
   ["X", "x"],
   ["g", "g"],
-  ["G", "g"],
+  // Slice 11 (VQ-2): G is now its own normalized key — opens the GC
+  // dialog. Lowercase `g` is the `gg` chord initiator (jump-first).
+  ["G", "G"],
+  // Slice 11 (VQ-4): u is the unpause/resume key. p no longer resumes.
+  ["u", "u"],
+  ["U", "u"],
   ["?", "?"],
   ["s", "s"], // save-script
   ["S", "s"],
@@ -199,8 +216,11 @@ export function isHotkeyEnabled(input: DispatchInput): boolean {
       if (input.view === "phase-view") return input.runState !== undefined;
       return false;
     case "p":
-      // pause/resume on runs-list and phase-view, only for running/paused.
-      return input.runState === "running" || input.runState === "paused";
+      // Slice 11 (VQ-4): `p` only pauses; `u` is the new unpause key.
+      return input.runState === "running";
+    case "u":
+      // Slice 11 (VQ-4): `u` resumes a paused run; otherwise disabled.
+      return input.runState === "paused";
     case "x":
       // Agent-level: enabled in phase-view when cursor selects a running agent.
       if (input.view === "phase-view" && input.agentId !== undefined && input.agentState === "running")
@@ -211,19 +231,18 @@ export function isHotkeyEnabled(input: DispatchInput): boolean {
       // Agent-level restart: enabled in phase-view when cursor selects a running agent.
       if (input.view === "phase-view" && input.agentId !== undefined && input.agentState === "running")
         return true;
-      if (input.view === "runs-list") {
-        // Slice 14: `r` is enabled on paused (resume) AND terminal (restart).
-        if (input.runState === "paused") return true;
-        return input.runState !== undefined && TERMINAL.has(input.runState);
-      }
-      if (input.view === "phase-view") {
-        // `r` is enabled on paused (resume) AND terminal (restart) on phase-view,
-        // matching dispatchHotkey and helpForState logic.
-        if (input.runState === "paused") return true;
+      // Slice 11 (VQ-4): `r` no longer resumes paused runs (use `u`).
+      // Only terminal states fire `restart-requested`.
+      if (input.view === "runs-list" || input.view === "phase-view") {
         return input.runState !== undefined && TERMINAL.has(input.runState);
       }
       return false;
     case "g":
+      // Slice 11 (VQ-2): `g` is the chord initiator — always "enabled"
+      // on runs-list (it either advances the chord or starts one).
+      return input.view === "runs-list";
+    case "G":
+      // Slice 11 (VQ-2): `G` opens the GC dialog (was lowercase `g`).
       return input.view === "runs-list";
     case "s":
       // Slice 14: `s` (save) is enabled on phase-view, ONLY for terminal
@@ -289,14 +308,30 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
   }
 
   // From here on, every key needs a selected run *or* operates on
-  // overlay-level chrome. Universal-no-selection short-circuit:
-  if (input.runId === undefined && k !== "g") {
+  // overlay-level chrome. Universal-no-selection short-circuit.
+  // Slice 11 (VQ-2): `g` (chord) and `G` (gc) are runs-list chrome
+  // and don't require a selection.
+  if (input.runId === undefined && k !== "g" && k !== "G") {
     return { kind: "noop", reason: "no-selection" };
   }
 
-  if (k === "g") {
+  if (k === "G") {
     if (input.view !== "runs-list") return { kind: "noop", reason: "disabled-for-state" };
     return { kind: "open-gc-dialog" };
+  }
+
+  if (k === "g") {
+    // Slice 11 (VQ-2): `gg` chord. A second `g` within 300ms of the
+    // first emits navigate-first; the first tap is a noop with reason
+    // pending-g so the overlay can record chord state.
+    if (input.view !== "runs-list") {
+      return { kind: "noop", reason: "disabled-for-state" };
+    }
+    const at = input.pendingGAt ?? 0;
+    if (input.pendingG === true && at > 0 && Date.now() - at < 300) {
+      return { kind: "navigate-first" };
+    }
+    return { kind: "noop", reason: "pending-g" };
   }
 
   if (k === "enter" && input.view === "runs-list") {
@@ -319,8 +354,13 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
 
   switch (k) {
     case "p": {
+      // Slice 11 (VQ-4): `p` only pauses; paused→resume moved to `u`.
       if (input.runState === "running")
         return { kind: "pause", runId };
+      return { kind: "noop", runId, reason: "disabled-for-state" };
+    }
+    case "u": {
+      // Slice 11 (VQ-4): `u` resumes a paused run.
       if (input.runState === "paused")
         return { kind: "resume", runId };
       return { kind: "noop", runId, reason: "disabled-for-state" };
@@ -339,11 +379,10 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
       return { kind: "noop", runId, reason: "disabled-for-state" };
     }
     case "r": {
-      // Slice 14: `r` overloads to `resume` on paused runs and
-      // `restart-requested` on terminal runs (per PRD §10.4.1). Slice
-      // 13 only handled the terminal-restart leg; the resume leg was
-      // owned by `p`. Slice 14 unifies per the spec table.
-      // Slice 15 F2: `r` (restart) is disabled on remote runs.
+      // Slice 11 (VQ-4): `r` no longer resumes paused runs — use `u`.
+      // `r` fires `restart-requested` only on terminal states, or
+      // `restart-agent` for a cursor-selected running agent.
+      // F2: `r` (restart) is disabled on remote runs.
       if (input.isRemote) {
         return { kind: "noop", runId, reason: "disabled-for-remote" };
       }
@@ -355,8 +394,6 @@ export function dispatchHotkey(input: DispatchInput): HotkeyAction {
       ) {
         return { kind: "restart-agent", runId, agentId: input.agentId };
       }
-      if (input.runState === "paused")
-        return { kind: "resume", runId };
       if (input.runState !== undefined && TERMINAL.has(input.runState))
         return { kind: "restart-requested", runId };
       return { kind: "noop", runId, reason: "disabled-for-state" };
@@ -456,15 +493,13 @@ export function helpForState(
       return [
         enabled("↑↓ jk", "agents"),
         dis("Enter", "agent detail", noSel),
-        dis(
-          "p",
-          isPaused ? "resume" : "pause",
-          noSel || (!isRunning && !isPaused),
-        ),
+        // Slice 11 (VQ-4): p only pauses; u unpauses; r is terminal-only.
+        dis("p", "pause", noSel || !isRunning),
+        dis("u", "unpause", noSel || !isPaused),
         dis(
           "r",
-          agentRunning ? "restart agent" : (isPaused ? "resume" : "restart"),
-          noSel || (!agentRunning && !isPaused && !isTerminal),
+          agentRunning ? "restart agent" : "restart",
+          noSel || (!agentRunning && !isTerminal),
         ),
         dis("x", agentRunning ? "stop agent" : "stop", noSel || (!agentRunning && !isRunning && !isPaused)),
         dis("s", "save script", noSel || !isTerminal),
@@ -492,17 +527,16 @@ export function helpForState(
   return [
     enabled("↑↓ jk", "navigate"),
     dis("Enter", "open run", noSel),
-    dis(
-      "p",
-      isPaused ? "resume" : "pause",
-      noSel || (!isRunning && !isPaused),
-    ),
+    // Slice 11 (VQ-4): p only pauses; u unpauses; r is terminal-only.
+    dis("p", "pause", noSel || !isRunning),
+    dis("u", "unpause", noSel || !isPaused),
     dis("x", "stop", noSel || (!isRunning && !isPaused)),
-    dis("r", isPaused ? "resume" : "restart", noSel || (!isTerminal && !isPaused)),
+    dis("r", "restart", noSel || !isTerminal),
     dis("v", "viz", noSel),
     dis("i", "answer prompt", noSel || (pendingInterruptCount ?? 0) === 0),
     dis("f", "fork", noSel),
-    enabled("g", "gc"),
+    // Slice 11 (VQ-2): G opens GC; gg jumps to first row.
+    enabled("G", "gc"),
     enabled("Esc", "close"),
     enabled("?", "help"),
   ];

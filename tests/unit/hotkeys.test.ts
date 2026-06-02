@@ -85,14 +85,14 @@ test("Enter on runs-list opens phase view (slice 14 owns the actual view)", () =
   }
 });
 
-// ─── State-guarded `p` (pause / resume) ────────────────────────────
+// ─── State-guarded `p` (pause only — slice 11 VQ-4) ──────────────
 
-test("F1+F4: `p` matrix — only running/paused are enabled, with correct action kind", () => {
-  const expected: Record<RunSummaryState, "pause" | "resume" | "noop"> = {
+test("F1+F4: `p` matrix — only running enables pause; paused is now noop (use `u`)", () => {
+  const expected: Record<RunSummaryState, "pause" | "noop"> = {
     pending: "noop",
     approved: "noop",
     running: "pause",
-    paused: "resume",
+    paused: "noop",
     done: "noop",
     failed: "noop",
     stopped: "noop",
@@ -107,6 +107,20 @@ test("F1+F4: `p` matrix — only running/paused are enabled, with correct action
         "disabled-for-state",
         `noop reason for state=${state}`,
       );
+    }
+  }
+});
+
+// ─── State-guarded `u` (unpause — slice 11 VQ-4) ─────────────────
+
+test("VQ-4: `u` matrix — only paused emits resume; everything else noop", () => {
+  for (const state of STATES) {
+    const action = dispatch("u", state);
+    if (state === "paused") {
+      assert.equal(action.kind, "resume", `state=${state}`);
+    } else {
+      assert.equal(action.kind, "noop", `state=${state}`);
+      assert.equal(action.reason, "disabled-for-state");
     }
   }
 });
@@ -127,27 +141,123 @@ test("F1: `x` matrix — only running/paused are stoppable", () => {
 
 // ─── State-guarded `r` (restart-requested) ─────────────────────────
 
-test("F1: `r` matrix — paused emits resume; terminal emits restart-requested", () => {
+test("F1: `r` matrix — paused noop (use `u`); terminal emits restart-requested (slice 11 VQ-4)", () => {
   for (const state of STATES) {
     const action = dispatch("r", state);
-    if (state === "paused") {
-      // Slice 14 / PRD §10.4.1: r overloads on paused → resume.
-      assert.equal(action.kind, "resume", `state=${state}`);
-    } else if (TERMINAL.has(state)) {
+    if (TERMINAL.has(state)) {
       assert.equal(action.kind, "restart-requested", `state=${state}`);
     } else {
-      assert.equal(action.kind, "noop");
+      assert.equal(action.kind, "noop", `state=${state}`);
       assert.equal(action.reason, "disabled-for-state");
     }
   }
 });
 
-// ─── State-independent `g` (gc dialog) ─────────────────────────────
+// ─── Slice 11 VQ-2: `G` opens GC dialog; `g` is the chord initiator ─
 
-test("`g` always emits open-gc-dialog on runs-list", () => {
+test("VQ-2: `G` (uppercase) emits open-gc-dialog on runs-list", () => {
   for (const state of STATES) {
-    const action = dispatch("g", state);
+    const action = dispatch("G", state);
     assert.equal(action.kind, "open-gc-dialog");
+  }
+});
+
+test("VQ-2: `g` (lowercase) alone emits noop reason=pending-g", () => {
+  const action = dispatchHotkey({
+    key: "g",
+    view: "runs-list",
+    runState: "running",
+    runId: "wf-1",
+    pendingG: false,
+    pendingGAt: 0,
+  });
+  assert.equal(action.kind, "noop");
+  assert.equal(action.reason, "pending-g");
+});
+
+test("VQ-2: `gg` chord within 300ms emits navigate-first", () => {
+  const action = dispatchHotkey({
+    key: "g",
+    view: "runs-list",
+    runState: "running",
+    runId: "wf-1",
+    pendingG: true,
+    pendingGAt: Date.now() - 100,
+  });
+  assert.equal(action.kind, "navigate-first");
+});
+
+test("VQ-2: `gg` chord after 300ms produces noop pending-g (chord timed out)", () => {
+  // Expired chord: dispatcher treats it as a fresh first-tap.
+  const expired = dispatchHotkey({
+    key: "g",
+    view: "runs-list",
+    runState: "running",
+    runId: "wf-1",
+    pendingG: true,
+    pendingGAt: Date.now() - 400,
+  });
+  assert.equal(expired.kind, "noop");
+  assert.equal(expired.reason, "pending-g");
+  // Two separate first-taps each emit noop pending-g.
+  const first = dispatchHotkey({
+    key: "g",
+    view: "runs-list",
+    runState: "running",
+    runId: "wf-1",
+    pendingG: false,
+    pendingGAt: 0,
+  });
+  assert.equal(first.kind, "noop");
+  assert.equal(first.reason, "pending-g");
+});
+
+test("VQ-2: `g` outside runs-list is disabled-for-state", () => {
+  const action = dispatchHotkey({
+    key: "g",
+    view: "phase-view",
+    runState: "running",
+    runId: "wf-1",
+  });
+  assert.equal(action.kind, "noop");
+  assert.equal(action.reason, "disabled-for-state");
+});
+
+// ─── Slice 11 VQ-4: `u` unpause / `r` terminal-only / `p` pause-only ─
+
+test("VQ-4: `u` on paused run emits resume", () => {
+  const action = dispatch("u", "paused");
+  assert.equal(action.kind, "resume");
+  assert.equal(action.runId, "wf-test01");
+});
+
+test("VQ-4: `u` on running run is noop disabled-for-state", () => {
+  const action = dispatch("u", "running");
+  assert.equal(action.kind, "noop");
+  assert.equal(action.reason, "disabled-for-state");
+});
+
+test("VQ-4: `p` on paused run is noop disabled-for-state (no longer resumes)", () => {
+  const action = dispatch("p", "paused");
+  assert.equal(action.kind, "noop");
+  assert.equal(action.reason, "disabled-for-state");
+});
+
+test("VQ-4: `p` on running run still emits pause", () => {
+  const action = dispatch("p", "running");
+  assert.equal(action.kind, "pause");
+});
+
+test("VQ-4: `r` on paused run is noop (no longer resumes — use `u`)", () => {
+  const action = dispatch("r", "paused");
+  assert.equal(action.kind, "noop");
+  assert.equal(action.reason, "disabled-for-state");
+});
+
+test("VQ-4: `r` on terminal run still emits restart-requested", () => {
+  for (const state of ["done", "failed", "stopped", "cancelled-pre-run"] as const) {
+    const action = dispatch("r", state);
+    assert.equal(action.kind, "restart-requested", `state=${state}`);
   }
 });
 
@@ -322,13 +432,13 @@ test("Enter on phase-view dispatches open-agent-detail", () => {
 // ─── Slice 15 F1: U3 remote-badge mutation guard (hotkey layer) ───
 // (The render-layer mutation test lives in runsList.test.ts)
 
-test("F2 mutation-guard: g is still enabled for remote runs", () => {
-  // g (GC) should be unaffected by isRemote — it's not restricted to local.
+test("F2 mutation-guard: G is still enabled for remote runs", () => {
+  // G (GC) should be unaffected by isRemote — it's not restricted to local.
   const action = dispatchHotkey({
-    key: "g",
+    key: "G",
     view: "runs-list",
   });
-  assert.equal(action.kind, "open-gc-dialog", "g should open GC dialog");
+  assert.equal(action.kind, "open-gc-dialog", "G should open GC dialog");
 });
 
 // ─── disabled-for-remote reason (UX toast gap fix) ───────────────────────────
@@ -410,15 +520,16 @@ test("x on phase-view without agent cursor falls through to run-level stop", () 
   assert.equal(action.runId, "wf-test01");
 });
 
-test("r on phase-view without agent cursor falls through to run-level resume/restart", () => {
-  // paused run without agent cursor → resume (not restart-agent)
+test("r on phase-view without agent cursor: paused → noop, terminal → restart-requested", () => {
+  // Slice 11 (VQ-4): paused without agent cursor → noop (use `u` instead).
   const paused = dispatchHotkey({
     key: "r",
     view: "phase-view",
     runState: "paused",
     runId: "wf-test01",
   });
-  assert.equal(paused.kind, "resume");
+  assert.equal(paused.kind, "noop");
+  assert.equal(paused.reason, "disabled-for-state");
 
   // terminal run without agent cursor → restart-requested (not restart-agent)
   const terminal = dispatchHotkey({
