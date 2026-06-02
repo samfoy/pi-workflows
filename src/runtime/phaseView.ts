@@ -28,6 +28,16 @@ import { isTerminalState } from "./activeRuns.js";
 import type { PhaseSnapshot, RunPhaseSnapshot } from "./phaseRegistry.js";
 import { fmtDuration, fmtRelative } from "./runsList.js";
 
+/** Truncate to n-1 chars + '…' if longer, else right-pad to n. */
+function pad(s: string, n: number): string {
+  if (s.length >= n) return s.slice(0, Math.max(0, n - 1)) + "\u2026";
+  return s + " ".repeat(n - s.length);
+}
+
+const COL_PHASE_NAME = 14;
+const COL_AGENT_ID = 14;
+const COL_SUMMARY = 35;
+
 /**
  * Format a token count for display.
  * < 1000 → `N tok`, ≥ 1000 → `X.Xk tok`, ≥ 1000000 → `X.XM tok`
@@ -162,7 +172,7 @@ export function renderPhaseView(
         if (phase.totalTokens > 0) summaryStr += `  \u00b7  ${fmtTokens(phase.totalTokens)}`;
         summaryStr += `   ${phaseElapsed} elapsed`;
       }
-      lines.push(`${glyph} ${phase.phaseName.padEnd(14)} ${summaryStr}`);
+      lines.push(`${glyph} ${pad(phase.phaseName, COL_PHASE_NAME)} ${summaryStr}`);
 
       // Show agent rows only for the active phase to mirror the wireframe
       // and avoid enormous renders on many-phase runs. (Done phases get
@@ -177,8 +187,8 @@ export function renderPhaseView(
             nowMs,
           );
           const cached = agent.cached === true ? "  (cached)" : "";
-          const summaryCell = agent.summary ?? "";
-          const row = `    ${ag} ${agent.agentId.padEnd(14)} ${agent.state.padEnd(7)} ${dur.padEnd(7)} ${summaryCell}${cached}`;
+          const summaryCell = pad(agent.summary ?? "", COL_SUMMARY);
+          const row = `    ${ag} ${pad(agent.agentId, COL_AGENT_ID)} ${agent.state.padEnd(7)} ${dur.padEnd(7)} ${summaryCell}${cached}`;
           agentRows.push({
             phaseName: phase.phaseName,
             agentId: agent.agentId,

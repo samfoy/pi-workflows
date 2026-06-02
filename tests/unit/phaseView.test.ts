@@ -294,3 +294,70 @@ test("phase view: no Total line when no token data", () => {
   const lines = out.lines.join("\n");
   assert.ok(!lines.includes("Total:"), "should not render Total line with no token data");
 });
+
+// ──────────────────────────────────────────────────────────────
+// VQ-3 / Slice 2: column overflow truncation
+// ──────────────────────────────────────────────────────────────
+
+test("phase view: long phase name truncates to 14 chars with ellipsis", () => {
+  const reg = new PhaseRegistry();
+  // "reconcile-outputs" is 17 chars — pad(str, 14) → slice(0,13) + "…" = "reconcile-out…" (14 chars)
+  reg.applyEntry({
+    customType: "pi-workflows.phase.started",
+    data: { runId: baseSummary.runId, phaseName: "reconcile-outputs", agentCount: 1, startedAt: "2026-05-29T12:01:00Z" },
+  });
+  const snap = reg.getRunSnapshot(baseSummary.runId)!;
+  const out = renderPhaseView(baseSummary, snap, { nowMs: FIXED_NOW });
+  const phaseLine = out.lines.find((l) => l.includes("reconcile-out"));
+  assert.ok(phaseLine !== undefined, "expected a truncated phase-name line");
+  // Must NOT contain the raw 17-char name followed by a space (i.e. untruncated)
+  assert.ok(!phaseLine.includes("reconcile-outputs "), "raw 17-char name must not appear in line");
+  // Must contain the truncated name + ellipsis
+  assert.ok(phaseLine.includes("reconcile-out\u2026"), `expected 'reconcile-out\u2026' in: ${phaseLine}`);
+  // The truncated cell must be exactly 14 chars wide
+  const match = phaseLine.match(/^[·▸✓] (.{14}) /);
+  assert.ok(match !== null, `phase name column must be exactly 14 chars wide in: ${phaseLine}`);
+});
+
+test("phase view: long agent id truncates to 14 chars in agent row", () => {
+  const reg = new PhaseRegistry();
+  reg.applyEntry({
+    customType: "pi-workflows.phase.started",
+    data: { runId: baseSummary.runId, phaseName: "p-trunc", agentCount: 1, startedAt: "2026-05-29T12:01:00Z" },
+  });
+  // "very-long-agent-identifier" is 26 chars — pad(str, 14) → "very-long-age\u2026" (14 chars)
+  reg.applyEntry({
+    customType: "pi-workflows.agent.started",
+    data: { runId: baseSummary.runId, phaseName: "p-trunc", agentId: "very-long-agent-identifier", startedAt: "2026-05-29T12:01:01Z" },
+  });
+  const snap = reg.getRunSnapshot(baseSummary.runId)!;
+  const out = renderPhaseView(baseSummary, snap, { nowMs: FIXED_NOW });
+  const agentLine = out.lines.find((l) => l.includes("very-long-age"));
+  assert.ok(agentLine !== undefined, "expected an agent row with truncated id");
+  assert.ok(!agentLine.includes("very-long-agent-identifier "), "raw 26-char agent id must not appear");
+  assert.ok(
+    agentLine.includes("very-long-age\u2026"),
+    `expected 'very-long-age\u2026' in: ${agentLine}`,
+  );
+});
+
+test("phase view: long agent summary truncates at COL_SUMMARY", () => {
+  const longSummary = "a".repeat(50);
+  const reg = new PhaseRegistry();
+  reg.applyEntry({
+    customType: "pi-workflows.phase.started",
+    data: { runId: baseSummary.runId, phaseName: "p-sum", agentCount: 1, startedAt: "2026-05-29T12:01:00Z" },
+  });
+  reg.applyEntry({
+    customType: "pi-workflows.agent.started",
+    data: { runId: baseSummary.runId, phaseName: "p-sum", agentId: "agent-sum", startedAt: "2026-05-29T12:01:01Z", summary: longSummary },
+  });
+  const snap = reg.getRunSnapshot(baseSummary.runId)!;
+  const out = renderPhaseView(baseSummary, snap, { nowMs: FIXED_NOW });
+  const agentLine = out.lines.find((l) => l.includes("agent-sum"));
+  assert.ok(agentLine !== undefined, "expected an agent row");
+  // The 50-char summary must not appear verbatim
+  assert.ok(!agentLine.includes(longSummary), "unbounded summary must not appear in line");
+  // Must end with ellipsis in the summary region
+  assert.ok(agentLine.includes("\u2026"), "summary must be truncated with ellipsis");
+});
