@@ -113,6 +113,14 @@ export interface RenderOpts {
    * applied internally so callers can pass any non-negative integer.
    */
   readonly spinnerFrame?: number;
+  /**
+   * P2-S7 — filter text. When set and non-empty, rows are filtered to
+   * those whose `workflowName` or `runId` starts with the text
+   * (case-insensitive). Empty string is treated as undefined (no
+   * filter). When set, the subtitle gains a `  /  <text>█` suffix
+   * with a block-cursor indicator.
+   */
+  readonly filterText?: string;
 }
 
 /**
@@ -242,7 +250,19 @@ export function renderRunsList(
 ): RenderedRunsList {
   const nowMs = opts.nowMs ?? Date.now();
   const max = opts.maxRows ?? DEFAULT_MAX;
-  const sorted = sortRuns([...runs]);
+  // P2-S7 — apply filterText before sort/group. Match by
+  // case-insensitive prefix on workflowName OR runId.
+  const filterRaw = opts.filterText ?? "";
+  const filterActive = filterRaw.length > 0;
+  const filterLower = filterRaw.toLowerCase();
+  const filtered = filterActive
+    ? runs.filter(
+        (r) =>
+          r.workflowName.toLowerCase().startsWith(filterLower) ||
+          r.runId.toLowerCase().startsWith(filterLower),
+      )
+    : runs;
+  const sorted = sortRuns([...filtered]);
   const trimmed = sorted.slice(0, max);
 
   const activeCount = trimmed.filter((r) => !isTerminalState(r.state)).length;
@@ -251,7 +271,11 @@ export function renderRunsList(
   const title = opts.title ?? "pi-workflows";
   const subtitle =
     `${activeCount} active · ${totalCount} total` +
-    (sorted.length > max ? ` · +${sorted.length - max} hidden` : "");
+    (sorted.length > max ? ` · +${sorted.length - max} hidden` : "") +
+    // P2-S7 — filter indicator with block-cursor suffix.
+    (opts.filterText !== undefined && opts.filterText.length > 0
+      ? `  /  ${opts.filterText}█`
+      : "");
 
   const headerCols = [
     pad("run id", COL_RUN_ID),

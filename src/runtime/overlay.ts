@@ -623,6 +623,10 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   let gcDialogState: GcDialogState | null = null;
   let gcBusy = false;
   let helpVisible = true;
+  // P2-S7 — filter mode state. `_filterMode` toggles when `/` enters
+  // and Enter/Esc exits; `_filterText` accumulates printable chars.
+  let _filterMode = false;
+  let _filterText = "";
   /**
    * Banner state — ephemeral one-line message rendered under the
    * subtitle. `expiresAtMs` is wall-clock per `opts.nowMs()`. The
@@ -1007,6 +1011,8 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       tokenTotals,
       // P2-S3: thread the spinner frame through to the runs list.
       spinnerFrame: _spinnerFrame,
+      // P2-S7: thread filter text when in filter mode.
+      ...(_filterMode ? { filterText: _filterText } : {}),
     });
     // VQ-1 — swap plain `row.line` entries in `lines[]` for their
     // ANSI-colored equivalents so state labels render with color in
@@ -1121,6 +1127,37 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         return;
       case "toggle-help":
         helpVisible = !helpVisible;
+        requestRender();
+        return;
+      // P2-S7 — filter mode actions.
+      case "filter-enter":
+        if (view === "filter") {
+          // Lock filter — exit text-input mode, stay in runs-list.
+          _filterMode = false;
+          view = "runs-list";
+        } else {
+          _filterMode = true;
+          _filterText = "";
+          view = "filter";
+        }
+        requestRender();
+        return;
+      case "filter-append":
+        if (action.char !== undefined) {
+          _filterText += action.char;
+          requestRender();
+        }
+        return;
+      case "filter-backspace":
+        if (_filterText.length > 0) {
+          _filterText = _filterText.slice(0, -1);
+          requestRender();
+        }
+        return;
+      case "filter-clear":
+        _filterText = "";
+        _filterMode = false;
+        if (view === "filter") view = "runs-list";
         requestRender();
         return;
       case "close-overlay":
@@ -1550,6 +1587,13 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       } else if (k === "n" || key === "Escape" || key === "ESC" || key === "\u001b") {
         handleAction({ kind: "gc-cancel" });
       }
+      return;
+    }
+    // P2-S7 — filter input mode intercepts all keys; route directly
+    // to the dispatcher with view='filter'.
+    if (view === "filter") {
+      const action = dispatchHotkey({ key, view: "filter" });
+      handleAction(action);
       return;
     }
     // gap/ctx-gate: gate prompt intercepts keys when a gate is pending

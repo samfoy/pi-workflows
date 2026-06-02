@@ -679,3 +679,31 @@ test("ZONE_TIMETRAVEL: `f` with no runId is noop (no-selection)", () => {
   assert.equal(action.kind, "noop");
   assert.equal(action.reason, "no-selection");
 });
+
+// ----- P2-S7: filter mode -----------------------------------------------
+
+test("P2-S7: `/` in runs-list emits filter-enter", () => {
+  const action = dispatchHotkey({ key: "/", view: "runs-list", runState: "running", runId: "wf-1" });
+  assert.equal(action.kind, "filter-enter");
+});
+
+test("P2-S7: printable char in filter view emits filter-append with char", () => {
+  const action = dispatchHotkey({ key: "a", view: "filter" });
+  assert.equal(action.kind, "filter-append");
+  assert.equal(action.char, "a");
+});
+
+test("P2-S7: Escape in filter view emits filter-clear", () => {
+  const action = dispatchHotkey({ key: "Escape", view: "filter" });
+  assert.equal(action.kind, "filter-clear");
+});
+
+test("P2-S7: Backspace in filter view emits filter-backspace", () => {
+  const action = dispatchHotkey({ key: "Backspace", view: "filter" });
+  assert.equal(action.kind, "filter-backspace");
+});
+
+test("P2-S7: Enter in filter view emits filter-enter (lock)", () => {
+  const action = dispatchHotkey({ key: "Enter", view: "filter" });
+  assert.equal(action.kind, "filter-enter");
+});

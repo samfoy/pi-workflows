@@ -74,13 +74,20 @@ export type HotkeyActionKind =
   | "copy-prompt"
   | "gc-apply"
   | "gc-cancel"
-  | "toggle-help";
+  | "toggle-help"
+  // P2-S7 — filter mode actions.
+  | "filter-enter"
+  | "filter-append"
+  | "filter-backspace"
+  | "filter-clear";
 
 export interface HotkeyAction {
   readonly kind: HotkeyActionKind;
   readonly runId?: string;
   /** Populated for `stop-agent` and `restart-agent` actions. */
   readonly agentId?: string;
+  /** P2-S7 — the character appended for `filter-append`. */
+  readonly char?: string;
   /** When `kind === "noop"`, why the key was a no-op. Exposed so the
    * overlay can render an appropriate hint. */
   readonly reason?:
@@ -91,8 +98,9 @@ export interface HotkeyAction {
     | "pending-g";
 }
 
-/** The overlay views slice 13 understands. Phase/agent are slices 14/15. */
-export type OverlayView = "runs-list" | "phase-view" | "agent-detail";
+/** The overlay views slice 13 understands. Phase/agent are slices 14/15.
+ * P2-S7 added `'filter'` for filter-input mode. */
+export type OverlayView = "runs-list" | "phase-view" | "agent-detail" | "filter";
 
 /**
  * Inputs to the dispatcher. `runState` is undefined when there is no
@@ -218,7 +226,7 @@ export function isHotkeyEnabled(input: DispatchInput): boolean {
     case "?":
       return true;
     case "escape":
-      return input.view === "runs-list" || input.view === "phase-view" || input.view === "agent-detail";
+      return input.view === "runs-list" || input.view === "phase-view" || input.view === "agent-detail" || input.view === "filter";
     case "enter":
       if (input.view === "runs-list") return input.runState !== undefined;
       if (input.view === "phase-view") return input.runState !== undefined;
@@ -297,6 +305,37 @@ export function isHotkeyEnabled(input: DispatchInput): boolean {
  * (`pause`/`resumePaused`/`stop`) — see overlay.ts.
  */
 export function dispatchHotkey(input: DispatchInput): HotkeyAction {
+  // P2-S7 — filter input mode short-circuits all other dispatch.
+  if (input.view === "filter") {
+    if (input.key === "Escape" || input.key === "ESC" || input.key === "\u001b") {
+      return { kind: "filter-clear" };
+    }
+    if (
+      input.key === "Enter" ||
+      input.key === "RETURN" ||
+      input.key === "\r" ||
+      input.key === "\n"
+    ) {
+      return { kind: "filter-enter" };
+    }
+    if (input.key === "Backspace" || input.key === "\u007f" || input.key === "\b") {
+      return { kind: "filter-backspace" };
+    }
+    // Printable ASCII (32–126) — single char only.
+    if (input.key.length === 1) {
+      const code = input.key.charCodeAt(0);
+      if (code >= 32 && code <= 126) {
+        return { kind: "filter-append", char: input.key };
+      }
+    }
+    return { kind: "noop", reason: "unknown-key" };
+  }
+
+  // P2-S7 — `/` enters filter mode from runs-list.
+  if (input.key === "/" && input.view === "runs-list") {
+    return { kind: "filter-enter" };
+  }
+
   const k = normalize(input.key);
 
   // Universal navigation / chrome — independent of state.
@@ -490,7 +529,7 @@ export function helpForState(
   const enabled = (key: string, label: string): HelpBullet =>
     dis(key, label, false);
 
-  if (view !== "runs-list") {
+  if (view !== "runs-list" && view !== "filter") {
     // Phase view (slice 14): full hotkey set.
     if (view === "phase-view") {
       const noSel = runState === undefined;
