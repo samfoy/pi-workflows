@@ -15,7 +15,7 @@
  *   - fmtDuration / fmtRelative deterministic outputs
  */
 
-import test from "node:test";
+import test, { describe } from "node:test";
 import assert from "node:assert/strict";
 
 import {
@@ -399,4 +399,310 @@ test("B3: help is unchanged when opts.width is not provided", () => {
   );
   // No width given — full help string should be present.
   assert.match(out.help, /\[9\] label-item/);
+});
+
+// ─── Slice 10: VQ-1 coloredLine assertions ──────────────────────
+//
+// Slice 9 added a `coloredLine` field on RenderedRow plus a per-state
+// ANSI prefix table (`ansiPrefixFor`). These tests pin the contract
+// the overlay's TTY render path relies on:
+//
+//   - strip-ANSI(coloredLine) === line for every state
+//   - per-state ANSI codes are exactly the ones documented in the
+//     ansiPrefixFor switch (catches accidental palette drift)
+//   - neutral states inject NO ANSI (plain coloredLine)
+//   - lines[] still uses plain `row.line` (so non-TTY consumers and
+//     existing snapshot-style tests don't see escapes injected on rows)
+//   - colorHint mapping is unchanged after the slice 9 refactor
+
+const ANSI_RE_GLOBAL = /\x1b\[[0-9;]*m/g;
+const ANSI_RE_TEST = /\x1b\[[0-9;]*m/;
+
+const ALL_STATES: RunSummary["state"][] = [
+  "pending",
+  "approved",
+  "running",
+  "paused",
+  "done",
+  "failed",
+  "stopped",
+  "cancelled-pre-run",
+];
+
+const TERMINAL_FOR_TEST: ReadonlySet<RunSummary["state"]> = new Set([
+  "done",
+  "failed",
+  "stopped",
+  "cancelled-pre-run",
+]);
+
+describe("coloredLine (VQ-1)", () => {
+  test("strip-ANSI invariant: coloredLine.replace(ANSI,'') === line for every state", () => {
+    const summaries: RunSummary[] = ALL_STATES.map((state, i) =>
+      summary({
+        runId: `wf-${state.slice(0, 4).padEnd(4, "x")}${String(i).padStart(8, "0")}`,
+        state,
+        // Give terminal states an endedAt so the sort comparator has
+        // both keys; non-terminal rows fall through to the active path.
+        ...(TERMINAL_FOR_TEST.has(state)
+          ? {
+              endedAt: `2026-05-29T11:5${i}:00Z`,
+              durationMs: 30_000,
+            }
+          : {}),
+      }),
+    );
+    const out = renderRunsList(summaries, { nowMs: NOW });
+    assert.equal(
+      out.rows.length,
+      ALL_STATES.length,
+      "every input state must produce a rendered row",
+    );
+    for (const row of out.rows) {
+      const stripped = row.coloredLine.replace(ANSI_RE_GLOBAL, "");
+      assert.equal(
+        stripped,
+        row.line,
+        `[state=${row.state}] strip-ANSI(coloredLine) must equal line; ` +
+          `coloredLine=${JSON.stringify(row.coloredLine)}, ` +
+          `line=${JSON.stringify(row.line)}`,
+      );
+    }
+  });
+
+  test("running state: coloredLine carries bold cyan prefix \\x1b[1;36m", () => {
+    const out = renderRunsList(
+      [summary({ runId: "wf-r0000000001", state: "running" })],
+      { nowMs: NOW },
+    );
+    const row = out.rows[0]!;
+    assert.equal(row.colorHint, "running");
+    assert.ok(
+      row.coloredLine.startsWith("\x1b[1;36m"),
+      `running coloredLine must START with bold cyan; got: ${JSON.stringify(row.coloredLine)}`,
+    );
+    assert.ok(
+      row.coloredLine.endsWith("\x1b[0m"),
+      `running coloredLine must end with reset; got: ${JSON.stringify(row.coloredLine)}`,
+    );
+  });
+
+  test("failed state: coloredLine carries bold red prefix \\x1b[1;31m", () => {
+    const out = renderRunsList(
+      [
+        summary({
+          runId: "wf-f0000000001",
+          state: "failed",
+          endedAt: "2026-05-29T12:00:00Z",
+          durationMs: 1000,
+        }),
+      ],
+      { nowMs: NOW },
+    );
+    const row = out.rows[0]!;
+    assert.equal(row.colorHint, "failed");
+    assert.ok(
+      row.coloredLine.startsWith("\x1b[1;31m"),
+      `failed coloredLine must START with bold red; got: ${JSON.stringify(row.coloredLine)}`,
+    );
+    assert.ok(row.coloredLine.endsWith("\x1b[0m"));
+  });
+
+  test("done state: coloredLine carries bold green prefix \\x1b[1;32m", () => {
+    const out = renderRunsList(
+      [
+        summary({
+          runId: "wf-d0000000001",
+          state: "done",
+          endedAt: "2026-05-29T12:00:00Z",
+          durationMs: 1000,
+        }),
+      ],
+      { nowMs: NOW },
+    );
+    const row = out.rows[0]!;
+    assert.equal(row.colorHint, "done");
+    assert.ok(
+      row.coloredLine.startsWith("\x1b[1;32m"),
+      `done coloredLine must START with bold green; got: ${JSON.stringify(row.coloredLine)}`,
+    );
+    assert.ok(row.coloredLine.endsWith("\x1b[0m"));
+  });
+
+  test("paused state: coloredLine carries bold yellow prefix \\x1b[1;33m", () => {
+    const out = renderRunsList(
+      [summary({ runId: "wf-p0000000001", state: "paused" })],
+      { nowMs: NOW },
+    );
+    const row = out.rows[0]!;
+    assert.equal(row.colorHint, "paused");
+    assert.ok(
+      row.coloredLine.startsWith("\x1b[1;33m"),
+      `paused coloredLine must START with bold yellow; got: ${JSON.stringify(row.coloredLine)}`,
+    );
+    assert.ok(row.coloredLine.endsWith("\x1b[0m"));
+  });
+
+  test("stopped + cancelled-pre-run states: coloredLine carries dim prefix \\x1b[2m", () => {
+    const out = renderRunsList(
+      [
+        summary({
+          runId: "wf-s0000000001",
+          state: "stopped",
+          endedAt: "2026-05-29T12:00:00Z",
+          durationMs: 1000,
+        }),
+        summary({
+          runId: "wf-c0000000001",
+          state: "cancelled-pre-run",
+          endedAt: "2026-05-29T12:00:01Z",
+          durationMs: 1000,
+        }),
+      ],
+      { nowMs: NOW },
+    );
+    const stopped = out.rows.find((r) => r.runId === "wf-s0000000001")!;
+    const cancelled = out.rows.find((r) => r.runId === "wf-c0000000001")!;
+    assert.equal(stopped.colorHint, "stopped");
+    assert.equal(cancelled.colorHint, "cancelled");
+    assert.ok(
+      stopped.coloredLine.startsWith("\x1b[2m"),
+      `stopped coloredLine must START with dim; got: ${JSON.stringify(stopped.coloredLine)}`,
+    );
+    assert.ok(
+      cancelled.coloredLine.startsWith("\x1b[2m"),
+      `cancelled coloredLine must START with dim; got: ${JSON.stringify(cancelled.coloredLine)}`,
+    );
+    assert.ok(stopped.coloredLine.endsWith("\x1b[0m"));
+    assert.ok(cancelled.coloredLine.endsWith("\x1b[0m"));
+    // Belt-and-braces: dim states must NOT accidentally pick up a
+    // bold-color escape (catches a swap-table mutation).
+    assert.ok(
+      !stopped.coloredLine.includes("\x1b[1;"),
+      `stopped must not include any bold-color escape; got: ${JSON.stringify(stopped.coloredLine)}`,
+    );
+    assert.ok(
+      !cancelled.coloredLine.includes("\x1b[1;"),
+      `cancelled must not include any bold-color escape; got: ${JSON.stringify(cancelled.coloredLine)}`,
+    );
+  });
+
+  test("neutral states (pending, approved): coloredLine === line, no ANSI injected", () => {
+    const out = renderRunsList(
+      [
+        summary({ runId: "wf-pend00000001", state: "pending" }),
+        summary({ runId: "wf-appr00000001", state: "approved" }),
+      ],
+      { nowMs: NOW },
+    );
+    assert.equal(out.rows.length, 2);
+    for (const row of out.rows) {
+      assert.equal(
+        row.colorHint,
+        "neutral",
+        `[state=${row.state}] expected colorHint=neutral`,
+      );
+      assert.equal(
+        row.coloredLine,
+        row.line,
+        `[state=${row.state}] neutral coloredLine must equal line; got: ${JSON.stringify(row.coloredLine)}`,
+      );
+      assert.ok(
+        !ANSI_RE_TEST.test(row.coloredLine),
+        `[state=${row.state}] neutral coloredLine must contain no ANSI; got: ${JSON.stringify(row.coloredLine)}`,
+      );
+    }
+  });
+
+  test("colorHint mapping unchanged across all states (regression after slice 9)", () => {
+    const summaries: RunSummary[] = ALL_STATES.map((state, i) =>
+      summary({
+        runId: `wf-${state.slice(0, 4).padEnd(4, "x")}${String(i).padStart(8, "0")}`,
+        state,
+        ...(TERMINAL_FOR_TEST.has(state)
+          ? {
+              endedAt: `2026-05-29T11:5${i}:00Z`,
+              durationMs: 30_000,
+            }
+          : {}),
+      }),
+    );
+    const out = renderRunsList(summaries, { nowMs: NOW });
+    const byState = new Map(out.rows.map((r) => [r.state, r.colorHint]));
+    assert.equal(byState.get("pending"), "neutral");
+    assert.equal(byState.get("approved"), "neutral");
+    assert.equal(byState.get("running"), "running");
+    assert.equal(byState.get("paused"), "paused");
+    assert.equal(byState.get("done"), "done");
+    assert.equal(byState.get("failed"), "failed");
+    assert.equal(byState.get("stopped"), "stopped");
+    assert.equal(byState.get("cancelled-pre-run"), "cancelled");
+  });
+
+  test("lines[] uses plain row.line — no per-state ANSI escapes leak onto row entries", () => {
+    const summaries: RunSummary[] = [
+      summary({ runId: "wf-running00001", state: "running" }),
+      summary({ runId: "wf-paused000001", state: "paused" }),
+      summary({
+        runId: "wf-failed000001",
+        state: "failed",
+        endedAt: "2026-05-29T12:00:00Z",
+        durationMs: 1000,
+      }),
+      summary({
+        runId: "wf-done00000001",
+        state: "done",
+        endedAt: "2026-05-29T12:00:01Z",
+        durationMs: 1000,
+      }),
+      summary({
+        runId: "wf-stopped00001",
+        state: "stopped",
+        endedAt: "2026-05-29T12:00:02Z",
+        durationMs: 1000,
+      }),
+    ];
+    const out = renderRunsList(summaries, { nowMs: NOW });
+    // Each row's plain line is in lines[]; the colored variant is NOT.
+    for (const row of out.rows) {
+      assert.ok(
+        out.lines.includes(row.line),
+        `lines[] must contain plain row.line for ${row.runId}`,
+      );
+      // coloredLine differs from line only when an ANSI prefix was
+      // applied — guard the negative assertion behind that check so
+      // the neutral case (coloredLine === line) doesn't false-fail.
+      if (row.coloredLine !== row.line) {
+        assert.ok(
+          !out.lines.includes(row.coloredLine),
+          `lines[] must NOT contain row.coloredLine for ${row.runId} (state=${row.state})`,
+        );
+      }
+    }
+    // Per-state color escapes (the ones from ansiPrefixFor) must not
+    // appear in any row entry of lines[]. We restrict the search to
+    // row entries — the header is intentionally bold per VQ-7 and
+    // uses \x1b[1m which is distinct from these per-state codes.
+    const rowLineSet = new Set(out.rows.map((r) => r.line));
+    const rowEntries = out.lines.filter((l) => rowLineSet.has(l));
+    assert.equal(
+      rowEntries.length,
+      out.rows.length,
+      "every row.line must appear exactly once in lines[]",
+    );
+    for (const code of [
+      "\x1b[1;36m",
+      "\x1b[1;31m",
+      "\x1b[1;32m",
+      "\x1b[1;33m",
+      "\x1b[2m",
+    ]) {
+      for (const entry of rowEntries) {
+        assert.ok(
+          !entry.includes(code),
+          `row entry in lines[] must not include per-state color ${JSON.stringify(code)}; got: ${JSON.stringify(entry)}`,
+        );
+      }
+    }
+  });
 });
