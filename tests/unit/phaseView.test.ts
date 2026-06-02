@@ -361,3 +361,139 @@ test("phase view: long agent summary truncates at COL_SUMMARY", () => {
   // Must end with ellipsis in the summary region
   assert.ok(agentLine.includes("\u2026"), "summary must be truncated with ellipsis");
 });
+
+// ──────────────────────────────────────────────────────────────
+// P2-S8 — card pipeline renderer
+// ──────────────────────────────────────────────────────────────
+
+import { renderPhaseViewCards } from "../../src/runtime/phaseView.js";
+
+function cardsRegistry(): PhaseRegistry {
+  const reg = new PhaseRegistry();
+  reg.applyEntry({
+    customType: "pi-workflows.meta.phases",
+    data: {
+      runId: baseSummary.runId,
+      phases: [
+        { title: "recon", description: "Parallel audit of TUI code" },
+        { title: "live", description: "Live TUI test via tmux" },
+        { title: "synth" },
+      ],
+    },
+  });
+  reg.applyEntry({
+    customType: "pi-workflows.phase.started",
+    data: { runId: baseSummary.runId, phaseName: "recon", agentCount: 4, startedAt: "2026-05-29T12:01:00Z" },
+  });
+  for (let i = 0; i < 4; i++) {
+    reg.applyEntry({
+      customType: "pi-workflows.agent.ended",
+      data: {
+        runId: baseSummary.runId,
+        phaseName: "recon",
+        agentId: `r-${i}`,
+        durationMs: 1000,
+        usage: { input: 10000, output: 1000, cacheRead: 0, cacheWrite: 0, totalTokens: 11000 },
+      },
+    });
+  }
+  reg.applyEntry({
+    customType: "pi-workflows.phase.ended",
+    data: { runId: baseSummary.runId, phaseName: "recon", durationMs: 12_000 },
+  });
+  reg.applyEntry({
+    customType: "pi-workflows.phase.started",
+    data: { runId: baseSummary.runId, phaseName: "live", agentCount: 1, startedAt: "2026-05-29T12:02:00Z" },
+  });
+  reg.applyEntry({
+    customType: "pi-workflows.agent.started",
+    data: { runId: baseSummary.runId, phaseName: "live", agentId: "live-0", startedAt: "2026-05-29T12:02:00Z" },
+  });
+  return reg;
+}
+
+test("cards: done phase renders as bordered box", () => {
+  const reg = cardsRegistry();
+  const snap = reg.getRunSnapshot(baseSummary.runId)!;
+  const out = renderPhaseViewCards(baseSummary, snap, { nowMs: FIXED_NOW, width: 80 });
+  const c0 = out.cards[0]!;
+  assert.equal(c0.phaseName, "recon");
+  assert.ok(
+    c0.lines[0]!.startsWith("  \u250c") || c0.lines[0]!.startsWith("\u25b8 \u250c"),
+    `expected box top, got: ${c0.lines[0]}`,
+  );
+  assert.ok(c0.lines[c0.lines.length - 1]!.includes("\u2514"));
+  assert.match(c0.statusBadge, /\u2713 4\/4/);
+});
+
+test("cards: running phase status badge contains spinner braille glyph", () => {
+  const reg = cardsRegistry();
+  const snap = reg.getRunSnapshot(baseSummary.runId)!;
+  const out = renderPhaseViewCards(baseSummary, snap, {
+    nowMs: FIXED_NOW,
+    width: 80,
+    spinnerFrame: 3,
+  });
+  const running = out.cards.find((c) => c.state === "running")!;
+  assert.ok(running !== undefined, "expected a running card");
+  assert.match(running.statusBadge, /[\u2800-\u28ff]/, `badge: ${running.statusBadge}`);
+});
+
+test("cards: not-started phase is collapsed single line, no box", () => {
+  const reg = cardsRegistry();
+  const snap = reg.getRunSnapshot(baseSummary.runId)!;
+  const out = renderPhaseViewCards(baseSummary, snap, { nowMs: FIXED_NOW, width: 80 });
+  const synth = out.cards.find((c) => c.phaseName === "synth")!;
+  assert.ok(synth !== undefined);
+  assert.equal(synth.isCollapsed, true);
+  assert.equal(synth.lines.length, 1);
+  assert.ok(!synth.lines[0]!.includes("\u250c"), "collapsed line must not contain ┌");
+  assert.match(synth.statusBadge, /\u25cb not started/);
+});
+
+test("cards: cursor card carries ▸ prefix on its first line", () => {
+  const reg = cardsRegistry();
+  const snap = reg.getRunSnapshot(baseSummary.runId)!;
+  const out = renderPhaseViewCards(baseSummary, snap, { nowMs: FIXED_NOW, width: 80, cursor: 0 });
+  assert.equal(out.cards[0]!.isCursor, true);
+  assert.ok(
+    out.cards[0]!.lines[0]!.includes("\u25b8"),
+    `expected ▸ in first line: ${out.cards[0]!.lines[0]}`,
+  );
+  assert.ok(!out.cards[1]!.lines[0]!.includes("\u25b8"));
+});
+
+test("cards: description appears as second line inside the box", () => {
+  const reg = cardsRegistry();
+  const snap = reg.getRunSnapshot(baseSummary.runId)!;
+  const out = renderPhaseViewCards(baseSummary, snap, { nowMs: FIXED_NOW, width: 80 });
+  const c0 = out.cards[0]!;
+  assert.equal(c0.description, "Parallel audit of TUI code");
+  assert.ok(
+    c0.lines[1]!.includes("Parallel audit of TUI code"),
+    `expected description in line[1]: ${c0.lines[1]}`,
+  );
+});
+
+test("cards: composite lines include ↓ between adjacent boxed cards", () => {
+  const reg = cardsRegistry();
+  const snap = reg.getRunSnapshot(baseSummary.runId)!;
+  const out = renderPhaseViewCards(baseSummary, snap, { nowMs: FIXED_NOW, width: 80 });
+  const composite = out.lines.join("\n");
+  assert.match(composite, /\u2193/, "expected ↓ arrow between boxed cards");
+  // recon (boxed) → live (boxed): one arrow. live (boxed) → synth (collapsed): no arrow.
+  const arrowCount = (composite.match(/\u2193/g) ?? []).length;
+  assert.equal(arrowCount, 1, `expected exactly 1 arrow, got ${arrowCount}`);
+});
+
+test("cards: each card is independently renderable from its own lines", () => {
+  const reg = cardsRegistry();
+  const snap = reg.getRunSnapshot(baseSummary.runId)!;
+  const out = renderPhaseViewCards(baseSummary, snap, { nowMs: FIXED_NOW, width: 80 });
+  const c0 = out.cards[0]!;
+  assert.ok(c0.lines.length >= 3, `expected ≥3 lines for boxed card, got ${c0.lines.length}`);
+  assert.ok(c0.lines[0]!.includes("\u250c"));
+  assert.ok(c0.lines.at(-1)!.includes("\u2514"));
+  const widths = new Set(c0.lines.map((l) => l.length));
+  assert.equal(widths.size, 1, `card lines should be equal width, got: ${[...widths].join(",")}`);
+});

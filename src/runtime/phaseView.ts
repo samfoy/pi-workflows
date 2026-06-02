@@ -58,6 +58,36 @@ export interface PhaseViewRender {
   }>;
   readonly title: string;
   readonly subtitle: string;
+  /**
+   * P2-S8 — bordered phase cards. Empty for the legacy flat renderer;
+   * populated by `renderPhaseViewCards`. Slice 9 will switch the overlay
+   * over to read from `cards`.
+   */
+  readonly cards: ReadonlyArray<PhaseViewCard>;
+}
+
+/**
+ * P2-S8 — a single phase rendered as either a bordered card (running/done
+ * phases) or a single collapsed line (not-started phases).
+ *
+ * Each card is independently renderable: `lines` is a self-contained block
+ * that can be spliced into a larger render with no other context.
+ */
+export interface PhaseViewCard {
+  readonly phaseName: string;
+  readonly description?: string;
+  readonly agentsDone: number;
+  readonly agentsTotal: number;
+  readonly state: "pending" | "running" | "done" | "failed";
+  readonly tokensTotal?: number;
+  readonly elapsedMs?: number;
+  readonly isCursor: boolean;
+  /** Card lines (boxed) OR a single collapsed line. */
+  readonly lines: string[];
+  /** e.g. "\u2713 4/4", "\u28f8 0/1", "\u25cb not started". */
+  readonly statusBadge: string;
+  /** True for not-started phases (single line, no box). */
+  readonly isCollapsed: boolean;
 }
 
 export interface PhaseViewOpts {
@@ -107,6 +137,20 @@ function elapsedFor(
 }
 
 export function renderPhaseView(
+  summary: RunSummary,
+  snapshot: RunPhaseSnapshot | undefined,
+  opts: PhaseViewOpts = {},
+): PhaseViewRender {
+  return _renderPhaseViewFlat(summary, snapshot, opts);
+}
+
+/**
+ * P2-S8 — legacy flat-text renderer kept under an unexported alias so
+ * Slice 9 can flip `renderPhaseView` to delegate to
+ * `renderPhaseViewCards` without losing this implementation. Existing
+ * unit tests still exercise this path through `renderPhaseView`.
+ */
+function _renderPhaseViewFlat(
   summary: RunSummary,
   snapshot: RunPhaseSnapshot | undefined,
   opts: PhaseViewOpts = {},
@@ -239,7 +283,207 @@ export function renderPhaseView(
     lines.push(help);
   }
 
-  return { lines, agentRows, title, subtitle };
+  return { lines, agentRows, title, subtitle, cards: [] };
+}
+
+// ──────────────────────────────────────────────────────────────
+// P2-S8 — card pipeline renderer
+// ──────────────────────────────────────────────────────────────
+
+function centerPad(s: string, width: number): string {
+  if (s.length >= width) return s;
+  const left = Math.floor((width - s.length) / 2);
+  return " ".repeat(left) + s + " ".repeat(width - s.length - left);
+}
+
+function badgeFor(
+  status: PhaseSnapshot["status"],
+  done: number,
+  total: number,
+  spinnerFrame: number | undefined,
+): string {
+  if (status === "pending") return "\u25cb not started";
+  if (status === "done") return `\u2713 ${done}/${total}`;
+  const glyph = spinnerGlyph(spinnerFrame ?? 0);
+  return `${glyph} ${done}/${total}`;
+}
+
+function buildCard(
+  phase: PhaseSnapshot,
+  isCursor: boolean,
+  cardWidth: number,
+  nowMs: number,
+  spinnerFrame: number | undefined,
+): PhaseViewCard {
+  const done = phase.agents.filter((a) => a.state === "done").length;
+  const total = phase.agentCount;
+  const badge = badgeFor(phase.status, done, total, spinnerFrame);
+  const collapsed = phase.status === "pending";
+  const elapsedMs =
+    phase.durationMs !== undefined
+      ? phase.durationMs
+      : phase.startedAt !== undefined
+        ? nowMs - Date.parse(phase.startedAt)
+        : undefined;
+
+  if (collapsed) {
+    // Collapsed single line — `▸ ` or `  ` margin, then phase name padded
+    // to 14 chars, then status badge.
+    const margin = isCursor ? "\u25b8 " : "  ";
+    const line = `${margin}${pad(phase.phaseName, 14)} ${badge}`;
+    const card: PhaseViewCard = {
+      phaseName: phase.phaseName,
+      ...(phase.description !== undefined ? { description: phase.description } : {}),
+      agentsDone: done,
+      agentsTotal: total,
+      state: phase.status,
+      ...(phase.totalTokens > 0 ? { tokensTotal: phase.totalTokens } : {}),
+      ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+      isCursor,
+      lines: [line],
+      statusBadge: badge,
+      isCollapsed: true,
+    };
+    return card;
+  }
+
+  const innerWidth = Math.max(10, cardWidth - 4); // "│ " + content + " │"
+  const cursorPrefix = isCursor ? "\u25b8 " : "  ";
+  const plainPrefix = "  ";
+
+  // Top border embeds the phase name: `┌─ phaseName ───┐`. Status badge
+  // sits outside the box (right margin) and is exposed via statusBadge.
+  const nameLabel = ` ${phase.phaseName} `;
+  const dashesTotal = Math.max(2, cardWidth - 2 - nameLabel.length);
+  const leftDashes = 1;
+  const rightDashes = Math.max(1, dashesTotal - leftDashes);
+  const topBorder =
+    "\u250c" + "\u2500".repeat(leftDashes) + nameLabel + "\u2500".repeat(rightDashes) + "\u2510";
+  const bottomBorder = "\u2514" + "\u2500".repeat(cardWidth - 2) + "\u2518";
+
+  const lines: string[] = [];
+  lines.push(`${cursorPrefix}${topBorder}`);
+  if (phase.description !== undefined && phase.description.length > 0) {
+    const desc = phase.description;
+    const truncated = desc.length > innerWidth ? desc.slice(0, innerWidth - 1) + "\u2026" : desc;
+    lines.push(`${plainPrefix}\u2502 ${truncated.padEnd(innerWidth)} \u2502`);
+  }
+  // Stats line: "N/N · Xk tok · Xs"
+  const statsParts: string[] = [`${done}/${total}`];
+  if (phase.totalTokens > 0) statsParts.push(fmtTokens(phase.totalTokens));
+  if (elapsedMs !== undefined && Number.isFinite(elapsedMs))
+    statsParts.push(fmtDuration(elapsedMs));
+  const stats = statsParts.join(" \u00b7 ");
+  const statsTruncated = stats.length > innerWidth ? stats.slice(0, innerWidth - 1) + "\u2026" : stats;
+  lines.push(`${plainPrefix}\u2502 ${statsTruncated.padEnd(innerWidth)} \u2502`);
+  lines.push(`${plainPrefix}${bottomBorder}`);
+
+  const card: PhaseViewCard = {
+    phaseName: phase.phaseName,
+    ...(phase.description !== undefined ? { description: phase.description } : {}),
+    agentsDone: done,
+    agentsTotal: total,
+    state: phase.status,
+    ...(phase.totalTokens > 0 ? { tokensTotal: phase.totalTokens } : {}),
+    ...(elapsedMs !== undefined ? { elapsedMs } : {}),
+    isCursor,
+    lines,
+    statusBadge: badge,
+    isCollapsed: false,
+  };
+  return card;
+}
+
+/**
+ * P2-S8 — bordered card-per-phase pipeline renderer.
+ *
+ * Returns one `PhaseViewCard` per phase. Boxed cards for running/done
+ * phases, single-line collapsed entries for not-started phases. DAG
+ * `\u2193` arrows are inserted between adjacent boxed cards in the
+ * composite `lines[]`; arrows are skipped between a boxed card and a
+ * collapsed line.
+ *
+ * Width: `Math.min((opts.width ?? 80) - 6, 68)` — leaves 2-char margin
+ * for the `\u25b8 ` cursor prefix and room for the right-aligned badge.
+ */
+export function renderPhaseViewCards(
+  summary: RunSummary,
+  snapshot: RunPhaseSnapshot | undefined,
+  opts: PhaseViewOpts = {},
+): PhaseViewRender {
+  const nowMs = opts.nowMs ?? Date.now();
+  const elapsed = elapsedFor(
+    summary.startedAt,
+    summary.endedAt,
+    summary.durationMs,
+    nowMs,
+  );
+  const startedRel =
+    summary.startedAt !== undefined ? fmtRelative(summary.startedAt, nowMs) : "\u2014";
+  const title = `${summary.runId}  ${summary.workflowName}  ${summary.state}  ${elapsed}`;
+  const subtitleParts: string[] = [];
+  if (summary.startedAt) subtitleParts.push(`Started: ${startedRel}`);
+  if (summary.runDir) subtitleParts.push(`Path: ${summary.runDir}`);
+  if (summary.approvalReason) subtitleParts.push(`Approval: ${summary.approvalReason}`);
+  const subtitle = subtitleParts.join("   ");
+
+  const cardWidth = Math.min((opts.width ?? 80) - 6, 68);
+  const cursorIdx = opts.cursor;
+
+  const lines: string[] = [title, subtitle];
+  if (opts.banner !== undefined && opts.banner.length > 0) {
+    lines.push("");
+    lines.push(opts.banner);
+  }
+  lines.push("");
+  lines.push("Phases");
+
+  const cards: PhaseViewCard[] = [];
+  const agentRows: { phaseName: string; agentId: string; lineIndex: number }[] = [];
+
+  if (snapshot === undefined || snapshot.phases.length === 0) {
+    lines.push("  (no phases yet)");
+  } else {
+    snapshot.phases.forEach((phase, i) => {
+      const isCursor = cursorIdx !== undefined && cursorIdx === i;
+      const card = buildCard(phase, isCursor, cardWidth, nowMs, opts.spinnerFrame);
+      cards.push(card);
+    });
+
+    for (let i = 0; i < cards.length; i++) {
+      const card = cards[i]!;
+      lines.push(...card.lines);
+      const next = cards[i + 1];
+      if (next !== undefined && !card.isCollapsed && !next.isCollapsed) {
+        // DAG arrow between two boxed cards. Center under the box (which
+        // starts at column 2 due to the cursor/margin prefix).
+        lines.push(centerPad("\u2193", cardWidth + 2));
+      }
+    }
+  }
+
+  // Log tail.
+  if (snapshot !== undefined && snapshot.logTail.length > 0) {
+    lines.push("");
+    lines.push(`Log (last ${Math.min(MAX_LOG_RENDERED, snapshot.logTail.length)})`);
+    const tail = snapshot.logTail.slice(-MAX_LOG_RENDERED);
+    for (const log of tail) {
+      const ts = log.at.length >= 19 ? log.at.slice(11, 19) : log.at;
+      lines.push(`  ${ts}  ${log.message}`);
+    }
+  }
+
+  // Help.
+  const helpBullets = opts.help ?? [];
+  if (helpBullets.length > 0) {
+    lines.push("");
+    const help = helpBullets
+      .map((b) => (b.disabled ? `(${b.key} ${b.label})` : `[${b.key}] ${b.label}`))
+      .join("  ");
+    lines.push(help);
+  }
+
+  return { lines, agentRows, title, subtitle, cards };
 }
 
 /** Map a state to a one-word label for the phase-view help text. */
