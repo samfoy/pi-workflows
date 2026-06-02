@@ -156,6 +156,34 @@ const COL_REL = 11;
 const COL_DURATION = 11;
 const COL_TOKENS = 9;
 
+/**
+ * P2-S5 — width-responsive column budget. Returns which optional
+ * columns the renderer should emit for the given terminal width.
+ *
+ * Tiers (per `docs/tui-phase2-plan.md` §Slice 5):
+ *   - `width < 80`:  essentials only (runId + workflow + state + started)
+ *   - `80 ≤ w < 120`: + duration + tokens
+ *   - `w ≥ 120`:     + duration + tokens + approval
+ *
+ * `width === undefined` keeps the legacy wide behavior (all columns)
+ * for backward-compat with callers that don't thread width — see plan
+ * acceptance criteria.
+ */
+export interface ColumnBudget {
+  readonly duration: boolean;
+  readonly tokens: boolean;
+  readonly approval: boolean;
+}
+
+export function computeColumnBudget(width: number | undefined): ColumnBudget {
+  if (width === undefined) {
+    return { duration: true, tokens: true, approval: true };
+  }
+  if (width < 80) return { duration: false, tokens: false, approval: false };
+  if (width < 120) return { duration: true, tokens: true, approval: false };
+  return { duration: true, tokens: true, approval: true };
+}
+
 function pad(s: string, n: number): string {
   if (s.length >= n) return s.slice(0, Math.max(0, n - 1)) + "…";
   return s + " ".repeat(n - s.length);
@@ -277,15 +305,18 @@ export function renderRunsList(
       ? `  /  ${opts.filterText}█`
       : "");
 
-  const headerCols = [
+  // P2-S5 — width-responsive column budget.
+  const budget = computeColumnBudget(opts.width);
+
+  const headerCols: string[] = [
     pad("run id", COL_RUN_ID),
     pad("workflow", COL_WORKFLOW),
     pad("state", COL_STATE),
     pad("started", COL_REL),
-    pad("duration", COL_DURATION),
-    pad("tokens", COL_TOKENS),
-    "approval",
   ];
+  if (budget.duration) headerCols.push(pad("duration", COL_DURATION));
+  if (budget.tokens) headerCols.push(pad("tokens", COL_TOKENS));
+  if (budget.approval) headerCols.push("approval");
   const rawHeader = headerCols.join(" ");
   const tableWidth = opts.width ?? rawHeader.length;
   // VQ-7: bold header row.
@@ -323,15 +354,15 @@ export function renderRunsList(
       r.state === "running"
         ? `${spinnerGlyph(opts.spinnerFrame ?? 0)} ${r.state}`
         : r.state;
-    const cells = [
+    const cells: string[] = [
       pad(shortId(r.runId), COL_RUN_ID),
       pad(workflowCell, COL_WORKFLOW),
       pad(stateCell, COL_STATE),
       pad(startedRel, COL_REL),
-      pad(dur, COL_DURATION),
-      pad(tokCell, COL_TOKENS),
-      approvalCell + remoteBadge,
     ];
+    if (budget.duration) cells.push(pad(dur, COL_DURATION));
+    if (budget.tokens) cells.push(pad(tokCell, COL_TOKENS));
+    if (budget.approval) cells.push(approvalCell + remoteBadge);
     const hint = colorHint(r.state);
     const plain = cursor + cells.join(" ");
     const prefix = ansiPrefixFor(hint);
