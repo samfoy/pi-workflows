@@ -42,10 +42,27 @@
  * Refs: PRD §10.1, §10.5, plan.md §4 Slice 13, slice_13_concerns.
  */
 
-import { closeSync, fsyncSync, mkdirSync, openSync, renameSync, writeSync } from "node:fs";
+import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
 import { dirname } from "node:path";
 import type { Run } from "../runManager.js";
 import type { RunOutcome } from "../types/internal.js";
+import { isParentAlive } from "./crashSweep.js";
+import { manifestPath } from "../util/paths.js";
+
+/**
+ * Stale-PID liveness check (B6). Thin wrapper around `isParentAlive`
+ * from crashSweep, exposed here so `sweepStalePids` and tests share a
+ * single import point rather than pulling in the full sweep stack.
+ *
+ * Synchronous throughout; never throws (returns `true` on error to
+ * prefer false-negative over false-positive for live runs).
+ */
+export function isAlive(opts: {
+  parentPid: number;
+  parentBootId: string;
+}): boolean {
+  return isParentAlive(opts);
+}
 
 /** Lightweight state used by hotkey/state-guard dispatch. Same labels
  * as `RunStateMachine.state` in slice 7's ledger — kept in sync via
@@ -437,6 +454,55 @@ export class ActiveRunsRegistry {
    * Best-effort: all errors are swallowed so a filesystem hiccup never
    * disrupts the running workflow.
    */
+  /**
+   * Sweep all `running` summaries for stale parent PIDs (TUI B6).
+   *
+   * For each summary with state `"running"`, reads `manifest.json` to
+   * find `parentPid` + `parentBootId`, then calls the liveness predicate.
+   * If the parent process is dead, coerces the summary state to `"failed"`
+   * in the display layer — **no ledger mutation**.
+   *
+   * Runs are skipped (graceful degradation) when:
+   *   - `manifest.json` is missing or unreadable
+   *   - `parentPid` is absent from the manifest
+   *
+   * Called by `mountOverlay` to clean up stuck `running` rows left after
+   * a parent pi-process crash (PRD TUI B6).
+   *
+   * @returns Number of summaries coerced to `"failed"`.
+   */
+  sweepStalePids(opts?: {
+    /** Override liveness predicate (test seam). Defaults to `isAlive`. */
+    readonly isAlive?: (opts: { parentPid: number; parentBootId: string }) => boolean;
+    /** Override manifest path resolver (test seam). */
+    readonly manifestPathFn?: (runId: string) => string;
+  }): number {
+    const aliveFn = opts?.isAlive ?? isParentAlive;
+    const manifestFn = opts?.manifestPathFn ?? manifestPath;
+    let coerced = 0;
+    for (const [runId, summary] of this.#summaries) {
+      if (summary.state !== "running") continue;
+      let parentPid: number | undefined;
+      let parentBootId = "";
+      try {
+        const raw = readFileSync(manifestFn(runId), "utf-8");
+        const parsed = JSON.parse(raw) as Record<string, unknown>;
+        if (typeof parsed.parentPid === "number") parentPid = parsed.parentPid;
+        if (typeof parsed.parentBootId === "string") parentBootId = parsed.parentBootId;
+      } catch {
+        // manifest missing or unreadable — skip this run
+        continue;
+      }
+      if (parentPid === undefined) continue;
+      if (aliveFn({ parentPid, parentBootId })) continue;
+      // Parent is dead — coerce to failed (display-layer only, no ledger write).
+      this.#summaries.set(runId, { ...summary, state: "failed" });
+      coerced++;
+    }
+    if (coerced > 0) this.#notify();
+    return coerced;
+  }
+
   writeActiveIndex(path: string): void {
     const runs: string[] = [];
     for (const [id, s] of this.#summaries) {

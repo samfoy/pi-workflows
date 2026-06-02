@@ -436,3 +436,167 @@ test("isTerminalState classifies the four user-visible terminal outcomes", () =>
   assert.equal(isTerminalState("pending"), false);
 });
 
+// ─── isAlive export + sweepStalePids (B6) ────────────────────────────
+
+import { writeFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { isAlive } from "../../src/runtime/activeRuns.js";
+import { currentBootId } from "../../src/runtime/crashSweep.js";
+
+test("isAlive: non-existent PID returns false", () => {
+  assert.equal(isAlive({ parentPid: 99999999, parentBootId: "" }), false);
+});
+
+test("isAlive: current process PID with matching boot ID returns true", () => {
+  assert.equal(
+    isAlive({ parentPid: process.pid, parentBootId: currentBootId() }),
+    true,
+  );
+});
+
+test("sweepStalePids: running summary with dead PID coerced to failed", () => {
+  const r = new ActiveRunsRegistry();
+  r.applyEntry({
+    customType: "pi-workflows.run.started",
+    data: { runId: "wf-s1aaaaaaaaa0", workflowName: "demo", startedAt: new Date().toISOString() },
+  });
+  assert.equal(r.getSummary("wf-s1aaaaaaaaa0")?.state, "running");
+
+  const tmpDir = mkdtempSync(join(tmpdir(), "wf-stale-test-"));
+  writeFileSync(
+    join(tmpDir, "manifest.json"),
+    JSON.stringify({ parentPid: 99999999, parentBootId: "" }),
+  );
+
+  const swept = r.sweepStalePids({
+    manifestPathFn: () => join(tmpDir, "manifest.json"),
+  });
+
+  assert.equal(swept, 1);
+  assert.equal(r.getSummary("wf-s1aaaaaaaaa0")?.state, "failed");
+});
+
+test("sweepStalePids: running summary with live PID stays running", () => {
+  const r = new ActiveRunsRegistry();
+  r.applyEntry({
+    customType: "pi-workflows.run.started",
+    data: { runId: "wf-s2aaaaaaaaa0", workflowName: "demo", startedAt: new Date().toISOString() },
+  });
+
+  const tmpDir = mkdtempSync(join(tmpdir(), "wf-live-test-"));
+  writeFileSync(
+    join(tmpDir, "manifest.json"),
+    JSON.stringify({ parentPid: process.pid, parentBootId: currentBootId() }),
+  );
+
+  const swept = r.sweepStalePids({
+    manifestPathFn: () => join(tmpDir, "manifest.json"),
+  });
+
+  assert.equal(swept, 0);
+  assert.equal(r.getSummary("wf-s2aaaaaaaaa0")?.state, "running");
+});
+
+test("sweepStalePids: missing manifest skips run gracefully", () => {
+  const r = new ActiveRunsRegistry();
+  r.applyEntry({
+    customType: "pi-workflows.run.started",
+    data: { runId: "wf-s3aaaaaaaaa0", workflowName: "demo", startedAt: new Date().toISOString() },
+  });
+
+  const swept = r.sweepStalePids({
+    manifestPathFn: () => "/tmp/__nonexistent_wf_manifest_99999__.json",
+  });
+
+  assert.equal(swept, 0);
+  assert.equal(r.getSummary("wf-s3aaaaaaaaa0")?.state, "running");
+});
+
+test("sweepStalePids: manifest without parentPid skips run gracefully", () => {
+  const r = new ActiveRunsRegistry();
+  r.applyEntry({
+    customType: "pi-workflows.run.started",
+    data: { runId: "wf-s4aaaaaaaaa0", workflowName: "demo", startedAt: new Date().toISOString() },
+  });
+
+  const tmpDir = mkdtempSync(join(tmpdir(), "wf-nopid-test-"));
+  writeFileSync(
+    join(tmpDir, "manifest.json"),
+    JSON.stringify({ workflowName: "demo" }), // no parentPid
+  );
+
+  const swept = r.sweepStalePids({
+    manifestPathFn: () => join(tmpDir, "manifest.json"),
+  });
+
+  assert.equal(swept, 0);
+  assert.equal(r.getSummary("wf-s4aaaaaaaaa0")?.state, "running");
+});
+
+test("sweepStalePids: terminal states are not touched", () => {
+  const r = new ActiveRunsRegistry();
+  r.applyEntry({
+    customType: "pi-workflows.run.ended",
+    data: { runId: "wf-s5aaaaaaaaa0", workflowName: "demo", outcome: "done" },
+  });
+  assert.equal(r.getSummary("wf-s5aaaaaaaaa0")?.state, "done");
+
+  const swept = r.sweepStalePids({
+    isAlive: () => false, // pretend everything is dead
+    manifestPathFn: () => "/tmp/__not-called.json",
+  });
+
+  assert.equal(swept, 0);
+  assert.equal(r.getSummary("wf-s5aaaaaaaaa0")?.state, "done");
+});
+
+test("sweepStalePids: isAlive override used as test seam", () => {
+  const r = new ActiveRunsRegistry();
+  r.applyEntry({
+    customType: "pi-workflows.run.started",
+    data: { runId: "wf-s6aaaaaaaaa0", workflowName: "demo", startedAt: new Date().toISOString() },
+  });
+
+  const tmpDir = mkdtempSync(join(tmpdir(), "wf-seam-test-"));
+  writeFileSync(
+    join(tmpDir, "manifest.json"),
+    JSON.stringify({ parentPid: process.pid, parentBootId: currentBootId() }),
+  );
+
+  // Override isAlive to say dead even though PID is live.
+  const swept = r.sweepStalePids({
+    isAlive: () => false,
+    manifestPathFn: () => join(tmpDir, "manifest.json"),
+  });
+
+  assert.equal(swept, 1);
+  assert.equal(r.getSummary("wf-s6aaaaaaaaa0")?.state, "failed");
+});
+
+test("sweepStalePids: subscribers notified when summaries are coerced", async () => {
+  const r = new ActiveRunsRegistry();
+  r.applyEntry({
+    customType: "pi-workflows.run.started",
+    data: { runId: "wf-s7aaaaaaaaa0", workflowName: "demo", startedAt: new Date().toISOString() },
+  });
+
+  const tmpDir = mkdtempSync(join(tmpdir(), "wf-notify-test-"));
+  writeFileSync(
+    join(tmpDir, "manifest.json"),
+    JSON.stringify({ parentPid: 99999999, parentBootId: "" }),
+  );
+
+  let notified = 0;
+  const unsub = r.subscribe(() => { notified++; });
+
+  r.sweepStalePids({
+    manifestPathFn: () => join(tmpDir, "manifest.json"),
+  });
+
+  // Notification is microtask-coalesced — drain the queue.
+  await Promise.resolve();
+
+  assert.equal(notified >= 1, true, "subscriber should have been called");
+  unsub();
+});

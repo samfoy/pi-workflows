@@ -202,6 +202,16 @@ export interface MountOverlayOpts {
    */
   readonly gcCutoffDays?: number;
   readonly gcRunsRootOverride?: string;
+  /**
+   * Stale-PID sweep options (B6). Forwarded to `registry.sweepStalePids()`
+   * on every mount so stuck `running` rows are cleaned up immediately.
+   * Provide `isAlive` + `manifestPathFn` overrides in tests to avoid
+   * real filesystem / PID-space access.
+   */
+  readonly stalePidOpts?: {
+    readonly isAlive?: (opts: { parentPid: number; parentBootId: string }) => boolean;
+    readonly manifestPathFn?: (runId: string) => string;
+  };
 }
 
 /**
@@ -394,6 +404,12 @@ export async function mountOverlay(
   opts: MountOverlayOpts,
 ): Promise<MountResult> {
   const registry = opts.registry ?? getActiveRuns();
+
+  // Stale-PID sweep (B6): coerce stuck `running` rows to `failed` when
+  // the parent pi-process is no longer alive. Display-layer only — no
+  // ledger mutation. Runs synchronously so the first render already
+  // shows the corrected state.
+  registry.sweepStalePids(opts.stalePidOpts);
 
   if (_overlayOpen) {
     return { mounted: false, mode: "already-open" };
