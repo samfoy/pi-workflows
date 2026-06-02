@@ -63,6 +63,7 @@ export interface PhaseViewRender {
 export interface PhaseViewOpts {
   /** Now (epoch ms) — used for elapsed calculation on running phases/agents. */
   readonly nowMs?: number;
+  readonly width?: number;
   /** Cursor index over `agentRows` (0-based). Out-of-bounds = no highlight. */
   readonly cursor?: number;
   /** Pre-formatted help bullets (same shape as runsList). */

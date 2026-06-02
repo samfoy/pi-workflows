@@ -746,7 +746,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     }
   };
 
-  const buildRender = () => {
+  const buildRender = (width?: number) => {
     // Slice 15: GC dialog takes priority when open.
     if (gcDialogState !== null) {
       return { lines: renderGcDialog(gcDialogState).lines };
@@ -797,12 +797,13 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           ...(transcriptPath !== undefined ? { transcriptPath } : {}),
         };
         const detailHelp = helpVisible ? helpForState("agent-detail", undefined) : [];
-        const detailOpts: { nowMs?: number; help?: typeof detailHelp; banner?: string; scrollOffset?: number } = {
+        const detailOpts: { nowMs?: number; width?: number; help?: typeof detailHelp; banner?: string; scrollOffset?: number } = {
           nowMs: opts.nowMs(),
           help: detailHelp,
           // BUG-034: pass current scroll offset so log view respects j/k navigation.
           scrollOffset: agentLogScrollOffset,
         };
+        if (width !== undefined) detailOpts.width = width;
         if (liveBannerText !== undefined) detailOpts.banner = liveBannerText;
         const rendered = renderAgentDetail(snap, detailOpts);
         return { lines: rendered.lines };
@@ -836,6 +837,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           nowMs: opts.nowMs(),
           help,
         };
+        if (width !== undefined) (opts2 as { width?: number }).width = width;
         if (liveBannerText !== undefined) (opts2 as { banner?: string }).banner = liveBannerText;
         if (
           phaseSnap !== undefined &&
@@ -876,6 +878,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       title: "pi-workflows  ·  /workflows overlay",
       nowMs: opts.nowMs(),
       ...(sorted.length > 0 ? { cursor } : {}),
+      ...(width !== undefined ? { width } : {}),
       help,
       localRunIds: localIds,
       tokenTotals,
@@ -1424,7 +1427,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   // Component contract per pi-tui's `Component` interface.
   const component: TuiComponentLike = {
     render(_width: number): string[] {
-      return buildRender().lines;
+      return buildRender(_width).lines;
     },
     handleInput(data: string): void {
       handleKey(data);

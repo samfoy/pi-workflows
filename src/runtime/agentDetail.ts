@@ -33,6 +33,7 @@ export interface AgentDetailRender {
 
 export interface AgentDetailOpts {
   readonly nowMs?: number;
+  readonly width?: number;
   readonly help?: ReadonlyArray<HelpBullet>;
   readonly banner?: string;
   /**

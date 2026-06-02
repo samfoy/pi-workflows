@@ -62,6 +62,7 @@ export interface RenderedRunsList {
 export interface RenderOpts {
   readonly title?: string;
   readonly nowMs?: number;
+  readonly width?: number;
   /**
    * Index of the highlighted row (0-based among rendered rows). If
    * out-of-bounds the renderer treats it as "no highlight"; the
