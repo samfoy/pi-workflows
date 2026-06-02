@@ -42,6 +42,13 @@ export interface AgentDetailOpts {
    * [0, logTail.length - MAX_LOG_LINES]. BUG-034.
    */
   readonly scrollOffset?: number;
+  /**
+   * P2-S3 — braille-spinner frame; threaded through from the
+   * overlay's animation tick so future running-state glyphs in this
+   * view (PhaseView Phase 2 work) can share the same cycle. Unused
+   * by the current renderer.
+   */
+  readonly spinnerFrame?: number;
 }
 
 export const MAX_LOG_LINES = 12;

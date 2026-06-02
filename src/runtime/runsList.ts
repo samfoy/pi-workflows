@@ -105,6 +105,38 @@ export interface RenderOpts {
    * renders a `tokens` column alongside duration.
    */
   readonly tokenTotals?: ReadonlyMap<string, number>;
+  /**
+   * P2-S3 — current braille-spinner frame index. The overlay drives
+   * a `setInterval(120ms)` that increments this counter; renderers
+   * use it to animate running-row glyphs. When undefined, running
+   * rows display the static `⠋` (frame 0) glyph. Modulo-10 wrap is
+   * applied internally so callers can pass any non-negative integer.
+   */
+  readonly spinnerFrame?: number;
+}
+
+/**
+ * P2-S3 — braille spinner frames. Index modulo 10.
+ * Exported so phaseView can share the same animation cycle.
+ */
+export const SPINNER_FRAMES: ReadonlyArray<string> = [
+  "\u280B", // ⠋
+  "\u2819", // ⠙
+  "\u2839", // ⠹
+  "\u2838", // ⠸
+  "\u283C", // ⠼
+  "\u2834", // ⠴
+  "\u2826", // ⠦
+  "\u2827", // ⠧
+  "\u2807", // ⠇
+  "\u280F", // ⠏
+];
+
+/** P2-S3 — return the braille glyph for `frame`, wrapping mod-10. */
+export function spinnerGlyph(frame: number): string {
+  const n = SPINNER_FRAMES.length;
+  const idx = ((frame % n) + n) % n;
+  return SPINNER_FRAMES[idx]!;
 }
 
 const DEFAULT_MAX = 50;
@@ -260,10 +292,17 @@ export function renderRunsList(
       r.parentRunId !== undefined
         ? `${r.workflowName} (fork of ${shortId(r.parentRunId)})`
         : r.workflowName;
+    // P2-S3 — running rows show an animated braille spinner inline
+    // with the state label. Terminal/non-running states are
+    // unaffected by spinnerFrame.
+    const stateCell =
+      r.state === "running"
+        ? `${spinnerGlyph(opts.spinnerFrame ?? 0)} ${r.state}`
+        : r.state;
     const cells = [
       pad(shortId(r.runId), COL_RUN_ID),
       pad(workflowCell, COL_WORKFLOW),
-      pad(r.state, COL_STATE),
+      pad(stateCell, COL_STATE),
       pad(startedRel, COL_REL),
       pad(dur, COL_DURATION),
       pad(tokCell, COL_TOKENS),

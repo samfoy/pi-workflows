@@ -26,7 +26,7 @@
 import type { RunSummary, RunSummaryState } from "./activeRuns.js";
 import { isTerminalState } from "./activeRuns.js";
 import type { PhaseSnapshot, RunPhaseSnapshot } from "./phaseRegistry.js";
-import { fmtDuration, fmtRelative } from "./runsList.js";
+import { fmtDuration, fmtRelative, spinnerGlyph } from "./runsList.js";
 
 /** Truncate to n-1 chars + '…' if longer, else right-pad to n. */
 function pad(s: string, n: number): string {
@@ -70,19 +70,25 @@ export interface PhaseViewOpts {
   readonly help?: ReadonlyArray<{ key: string; label: string; disabled: boolean }>;
   /** Banner inserted under subtitle (e.g. confirm prompts, save outcomes). */
   readonly banner?: string;
+  /**
+   * P2-S3 — braille-spinner frame for animating running phase / agent
+   * glyphs. When undefined, falls back to the static ▸ / ● glyphs
+   * (preserves backward compat with existing snapshot tests).
+   */
+  readonly spinnerFrame?: number;
 }
 
 const MAX_LOG_RENDERED = 5;
 
-function phaseGlyph(s: PhaseSnapshot["status"]): string {
+function phaseGlyph(s: PhaseSnapshot["status"], spinnerFrame?: number): string {
   if (s === "done") return "✓";
-  if (s === "running") return "▸";
+  if (s === "running") return spinnerFrame !== undefined ? spinnerGlyph(spinnerFrame) : "▸";
   return "·";
 }
 
-function agentGlyph(s: "queued" | "running" | "done"): string {
+function agentGlyph(s: "queued" | "running" | "done", spinnerFrame?: number): string {
   if (s === "done") return "✓";
-  if (s === "running") return "●";
+  if (s === "running") return spinnerFrame !== undefined ? spinnerGlyph(spinnerFrame) : "●";
   return "○";
 }
 
@@ -147,7 +153,7 @@ export function renderPhaseView(
     lines.push("  (no phases yet)");
   } else {
     for (const phase of snapshot.phases) {
-      const glyph = phaseGlyph(phase.status);
+      const glyph = phaseGlyph(phase.status, opts.spinnerFrame);
       const completed = phase.agents.filter((a) => a.state === "done").length;
       const running = phase.agents.filter((a) => a.state === "running").length;
       const queued = phase.agents.filter((a) => a.state === "queued").length;
@@ -180,7 +186,7 @@ export function renderPhaseView(
       // a one-line summary; pending phases show only their name.)
       if (phase.status === "running") {
         for (const agent of phase.agents) {
-          const ag = agentGlyph(agent.state);
+          const ag = agentGlyph(agent.state, opts.spinnerFrame);
           const dur = elapsedFor(
             agent.startedAt,
             agent.endedAt,

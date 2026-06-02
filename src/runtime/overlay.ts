@@ -99,6 +99,17 @@ let _gatePromptState:
   | null = null;
 
 /**
+ * P2-S3 — module-level braille-spinner frame counter. Driven by a
+ * `setInterval(120ms)` started in `mountOverlay` and cleared on
+ * cleanup. Modulo-10 is enforced on increment so renderers can use
+ * the value directly. Lives at module scope so the value persists
+ * across overlay close/reopen — no functional reason it has to, but
+ * it keeps the spinner from "jumping back to frame 0" if the user
+ * toggles the overlay rapidly.
+ */
+let _spinnerFrame = 0;
+
+/**
  * Default banner TTL — 4s feels long enough to read a one-line toast
  * but short enough that a stale banner doesn't read as a stuck UI.
  * Per gap analysis 2026-05-31 ("Banner state has no TTL").
@@ -110,6 +121,7 @@ export function __resetOverlayOpenForTest(): void {
   _overlayOpen = false;
   _pendingInterrupts.clear();
   _gatePromptState = null;
+  _spinnerFrame = 0;
 }
 
 /** Test/inspection seam — read the open flag without mutating. */
@@ -675,6 +687,21 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   };
 
   const unsub = opts.registry.subscribe(debouncedRender);
+  // P2-S3: drive the braille-spinner frame counter at 120ms while
+  // the overlay is mounted. Each tick bumps `_spinnerFrame` and
+  // schedules a debounced render — the existing `if (renderTimer !==
+  // null) return` guard inside `debouncedRender` coalesces concurrent
+  // calls so the interval can't stack timers.
+  const spinnerInterval: ReturnType<typeof setInterval> = setInterval(() => {
+    _spinnerFrame = (_spinnerFrame + 1) % 10;
+    debouncedRender();
+  }, 120);
+  // Don't keep the event loop alive solely for the spinner — if pi
+  // is otherwise idle and trying to exit, the overlay must not
+  // block shutdown.
+  if (typeof spinnerInterval === "object" && spinnerInterval !== null && "unref" in spinnerInterval) {
+    (spinnerInterval as { unref: () => void }).unref();
+  }
   const unsubPhase = opts.phaseRegistry.subscribe((rid) => {
     // Coalesce phase-view repaints through the same debounce.
     if ((view === "phase-view" || view === "agent-detail") && rid === openedRunId) {
@@ -790,6 +817,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       clearTimeout(renderTimer);
       renderTimer = null;
     }
+    clearInterval(spinnerInterval);
     if (agentDetailDebounceTimer !== null) {
       clearTimeout(agentDetailDebounceTimer);
       agentDetailDebounceTimer = null;
@@ -871,11 +899,13 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           ...(transcriptPath !== undefined ? { transcriptPath } : {}),
         };
         const detailHelp = helpVisible ? helpForState("agent-detail", undefined) : [];
-        const detailOpts: { nowMs?: number; width?: number; help?: typeof detailHelp; banner?: string; scrollOffset?: number } = {
+        const detailOpts: { nowMs?: number; width?: number; help?: typeof detailHelp; banner?: string; scrollOffset?: number; spinnerFrame?: number } = {
           nowMs: opts.nowMs(),
           help: detailHelp,
           // BUG-034: pass current scroll offset so log view respects j/k navigation.
           scrollOffset: agentLogScrollOffset,
+          // P2-S3: thread the spinner frame through.
+          spinnerFrame: _spinnerFrame,
         };
         if (width !== undefined) detailOpts.width = width;
         if (liveBannerText !== undefined) detailOpts.banner = liveBannerText;
@@ -919,6 +949,8 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         const opts2: Parameters<typeof renderPhaseView>[2] = {
           nowMs: opts.nowMs(),
           help,
+          // P2-S3: thread the spinner frame through to phase view.
+          spinnerFrame: _spinnerFrame,
         };
         if (width !== undefined) (opts2 as { width?: number }).width = width;
         if (liveBannerText !== undefined) (opts2 as { banner?: string }).banner = liveBannerText;
@@ -973,6 +1005,8 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       help,
       localRunIds: localIds,
       tokenTotals,
+      // P2-S3: thread the spinner frame through to the runs list.
+      spinnerFrame: _spinnerFrame,
     });
     // VQ-1 — swap plain `row.line` entries in `lines[]` for their
     // ANSI-colored equivalents so state labels render with color in
