@@ -726,6 +726,8 @@ export type {
   AgentUsage,
   AgentResult,
   RunMeta,
+  WorkflowMeta,
+  WorkflowMetaPhase,
   MemoryScope,
   MemoryCompactResult,
   IsolationMode,

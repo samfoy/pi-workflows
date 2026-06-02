@@ -29,6 +29,58 @@ When you type `/my-workflow <question>` in a pi session, pi:
 
 ---
 
+## 1.1 Declaring `meta` (and why phases matter)
+
+A workflow file should start with `export const meta = { ... }` as the
+first statement. The runtime reads it at trust-check time and surfaces
+the fields throughout the TUI:
+
+```js
+export const meta = {
+  name: "my-workflow",
+  description: "What this workflow does",
+  version: "1.0.0",
+  whenToUse: "Hint for the model about when to call write_workflow for this task type",
+  phases: [
+    { title: "Recon",     description: "Map the surface area" },
+    { title: "Analyze",   description: "Per-file deep dive in parallel" },
+    { title: "Summarize", description: "Roll up findings into one report" },
+  ],
+  // Optional: auto-approve file edits for all sub-agents.
+  acceptEdits: false,
+};
+```
+
+**Phase entries** are `{ title: string; description?: string }`. The
+optional `description` is a one-line hint shown inside the phase card
+in the TUI's pipeline view — keep it under ~60 chars so it fits the
+box. Phases declared here render as **collapsed not-started cards**
+before your `ctx.phase(name, ...)` calls fire, so users can see what's
+coming.
+
+The public type is `WorkflowMeta` from `@samfp/pi-workflows`:
+
+```ts
+import type { WorkflowMeta } from "@samfp/pi-workflows";
+export const meta: WorkflowMeta = { /* ... */ };
+```
+
+### TUI features powered by `meta`
+
+| Feature | Source |
+|---|---|
+| Footer status (`⠋ workflow  N/M phases  Xs`) | `meta.name` + live phase count |
+| Phase card title + collapsed not-started rows | `meta.phases[].title` |
+| Phase card description line | `meta.phases[].description` |
+| `whenToUse` hint surfaced to the model | `meta.whenToUse` |
+
+Users can press `w` to open the full overlay (runs list, card pipeline,
+agent detail), `Space` to peek at the selected run's log tail inline,
+and `/` to filter the list. The footer status appears automatically
+while any run is active — no `w` press needed for at-a-glance progress.
+
+---
+
 ## 2. Discovery and naming
 
 The workflow name is the filename without extension. `my-workflow.js` becomes

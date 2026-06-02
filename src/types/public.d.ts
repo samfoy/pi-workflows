@@ -139,6 +139,54 @@ export interface RunMeta {
   readonly resumed: boolean;
 }
 
+// ─── Workflow `meta` declaration (author-facing) ─────────────────────
+
+/**
+ * One declared phase in a workflow's `export const meta = { phases: [...] }`.
+ *
+ * `description?` (Phase 2) surfaces inside the phase card in the TUI
+ * pipeline view — a one-line hint shown directly under the phase title
+ * while the run is in flight. Backward-compatible: omitting it falls
+ * back to the title-only card layout unchanged.
+ */
+export interface WorkflowMetaPhase {
+  /** Phase title shown in the TUI card and DAG visualization. */
+  readonly title: string;
+  /**
+   * Optional one-line description shown inside the phase card in the
+   * TUI pipeline view. Kept short (≤ ~60 chars) so it fits the box.
+   */
+  readonly description?: string;
+}
+
+/**
+ * Parsed `export const meta = { ... }` declaration at the top of a
+ * workflow script. The runtime reads these at trust-check time and
+ * surfaces them in the runs list and TUI overlay.
+ *
+ * The shape here is the **author-facing contract**. Internal extension
+ * code may carry additional fields; new public fields require a
+ * minor-version bump.
+ */
+export interface WorkflowMeta {
+  /** Workflow name (becomes `/<name>`). */
+  readonly name: string;
+  /** One-line description shown in the TUI and slash-command listings. */
+  readonly description: string;
+  /** Author-managed semantic version of the workflow script. */
+  readonly version?: string;
+  /** Hint to the model about when to invoke this workflow. */
+  readonly whenToUse?: string;
+  /** Expected phases — surfaced upfront in the TUI before they start. */
+  readonly phases?: ReadonlyArray<WorkflowMetaPhase>;
+  /**
+   * When `true`, sub-agents spawned by this workflow run with file-edit
+   * permissions automatically approved (Claude Code's `acceptEdits`
+   * parity). Default: `false`.
+   */
+  readonly acceptEdits?: boolean;
+}
+
 // ─── Persistent agent memory (ZONE_MEMORY) ───────────────────────────
 
 /** Memory-scope tag accepted by `ctx.agent({memory})` and `ctx.memory.*`. */

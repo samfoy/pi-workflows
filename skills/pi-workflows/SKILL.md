@@ -84,8 +84,8 @@ export const meta = {
   // Optional: auto-approve file edits for all subagents (like CC's acceptEdits mode).
   acceptEdits: true,
   phases: [
-    { title: "Analyze" },
-    { title: "Implement" },
+    { title: "Analyze", description: "Read files and surface key risks" },
+    { title: "Implement", description: "Apply the approved fix" },
   ],
 };
 
@@ -429,21 +429,37 @@ For file/shell operations, use `ctx.agent` with a pi tool call.
 
 ## TUI overlay
 
-Open with `w` from any pi session while a workflow is running.
+Open with `w` from any pi session. While any run is active you'll also
+see a one-line **footer status** automatically (no `w` needed) showing
+workflow name, phase progress, and elapsed time. The status clears when
+all runs reach a terminal state.
+
+### What users see
+
+- **Footer status panel** — active runs render as `⠋ workflow  N/M phases  Xs` in pi's footer while running. Driven by `ctx.ui.setStatus`; no overlay needed to glance at progress.
+- **Runs list (`w`)** — active runs grouped by state (Running → Paused → Failed → Done), with ANSI colour, an animated spinner on the running rows, width-responsive columns, and a `[remote]` badge for runs from other terminals.
+- **Phase view** — a Claude-Code-style **card pipeline**: one bordered card per phase with the phase description inside the box, a status badge right-aligned (`✓ 1/1`, `○ 0/6`, `○ not started`), and `↓` arrows between cards. Not-started phases collapse to a single line.
+- **Peek panel (`Space`)** — inline log tail for the selected run without leaving the runs list. Press `Space` again to dismiss.
+- **Filter mode (`/`)** — narrow the list as you type by workflow-name prefix or run-id substring; `Esc` clears.
+- **Agent detail** — transcript scroll, open in `$EDITOR`, copy prompt.
 
 ### Runs list
 
 | Key | Action |
 |---|---|
 | `↑`/`↓` / `j`/`k` | Move selection |
+| `g g` | Jump to first row (vim chord, 300ms window) |
 | `Enter` | Drill into phase view |
-| `p` | Pause / resume |
+| `Space` | Toggle peek panel (inline log tail) |
+| `/` | Enter filter mode (typed chars narrow the list; `Esc` clears) |
+| `p` | Pause |
+| `u` | Unpause / resume (paused runs only) |
 | `x` | Stop |
-| `r` | Restart (terminal) / resume (paused). Disabled on remote runs. |
+| `r` | Restart (terminal runs only). Disabled on remote runs. |
 | `v` | Render the run's DAG to a `.mmd` tmp file |
 | `i` | Answer the oldest pending `ctx.interrupt(...)` (enabled when there's a pending interrupt) |
 | `f` | Fork from checkpoint (interactive `atPhase` + overrides JSON dialog) |
-| `g` | GC dialog |
+| `G` | GC dialog |
 | `Esc` | Close |
 | `?` | Toggle help |
 
