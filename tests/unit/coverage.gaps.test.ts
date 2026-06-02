@@ -393,9 +393,13 @@ test("overlay: toggle-help key hides/shows help line", async () => {
   reg.applyEntry({ customType: "pi-workflows.run.started", data: { runId: "wf-help000001", workflowName: "wf", startedAt: new Date().toISOString() } } as any);
   let handle: any;
   await mountOverlay({ pi, ctx, registry: reg, phaseRegistry: phaseReg, forceTTY: true, onMounted: (h) => { handle = h; } });
-  const withHelp = handle.currentLines().some((l: string) => l.includes("["));
+  // Check for help bullets: `[key] label` pattern (bracket + non-whitespace + bracket).
+  // Using a regex that does NOT match ANSI escape sequences like \x1b[1m or \x1b[0m.
+  const hasHelpBullet = (lines: string[]) =>
+    lines.some((l: string) => /\[\S+\]/.test(l));
+  const withHelp = hasHelpBullet(handle.currentLines());
   handle.handleKey("?");
-  const withoutHelp = handle.currentLines().some((l: string) => l.includes("["));
+  const withoutHelp = hasHelpBullet(handle.currentLines());
   assert.notEqual(withHelp, withoutHelp, "? key should toggle help visibility");
   handle.close();
 });

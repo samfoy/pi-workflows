@@ -195,7 +195,11 @@ export function renderRunsList(
     pad("tokens", COL_TOKENS),
     "approval",
   ];
-  const header = headerCols.join(" ");
+  const rawHeader = headerCols.join(" ");
+  const tableWidth = opts.width ?? rawHeader.length;
+  // VQ-7: bold header row.
+  const header = `\x1b[1m${rawHeader}\x1b[0m`;
+  const separator = "─".repeat(tableWidth);
 
   const rows: RenderedRow[] = trimmed.map((r, idx) => {
     const startedRel = fmtRelative(r.startedAt, nowMs);
@@ -239,7 +243,7 @@ export function renderRunsList(
   });
 
   const helpBullets = opts.help ?? [];
-  const help =
+  const rawHelp =
     helpBullets.length === 0
       ? ""
       : helpBullets
@@ -247,12 +251,29 @@ export function renderRunsList(
             b.disabled ? `(${b.key} ${b.label})` : `[${b.key}] ${b.label}`,
           )
           .join("  ");
+  // B3: clamp help bar to terminal width − 2 (leave a 1-char gutter on each side).
+  const maxHelpLen = opts.width !== undefined ? opts.width - 2 : Infinity;
+  let help = rawHelp;
+  if (Number.isFinite(maxHelpLen) && help.length > maxHelpLen) {
+    // Prefer cutting at a clean item boundary (two-space separator before [ or ().
+    const cutTarget = help.slice(0, maxHelpLen as number);
+    const lastBoundary = Math.max(
+      cutTarget.lastIndexOf("  ["),
+      cutTarget.lastIndexOf("  ("),
+    );
+    if (lastBoundary > 0) {
+      help = help.slice(0, lastBoundary);
+    } else {
+      help = help.slice(0, (maxHelpLen as number) - 1) + "…";
+    }
+  }
 
   const lines: string[] = [
     title,
     subtitle,
     "",
     header,
+    separator,
   ];
   if (rows.length === 0) {
     lines.push("(no runs)");

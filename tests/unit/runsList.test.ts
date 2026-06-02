@@ -306,3 +306,97 @@ test("fork badge: non-fork run has no '(fork of ...)' suffix", () => {
     `non-fork run must not carry a fork badge; got: ${out.rows[0]!.line}`,
   );
 });
+
+// ─── Slice 6: VQ-7 bold header + separator, B3 help clamp ────────
+
+test("VQ-7: header string is wrapped in bold ANSI escapes", () => {
+  const out = renderRunsList([], { nowMs: NOW });
+  assert.ok(
+    out.header.startsWith("\x1b[1m"),
+    `header must start with bold escape; got: ${JSON.stringify(out.header)}`,
+  );
+  assert.ok(
+    out.header.endsWith("\x1b[0m"),
+    `header must end with reset escape; got: ${JSON.stringify(out.header)}`,
+  );
+});
+
+test("VQ-7: separator line appears immediately after header in lines[]", () => {
+  const out = renderRunsList([], { nowMs: NOW });
+  const headerIdx = out.lines.indexOf(out.header);
+  assert.ok(headerIdx >= 0, "header must appear in lines[]");
+  const sep = out.lines[headerIdx + 1];
+  assert.ok(
+    sep !== undefined && /^\u2500+$/.test(sep),
+    `separator line must follow header; got: ${JSON.stringify(sep)}`,
+  );
+});
+
+test("VQ-7: separator width equals opts.width when provided", () => {
+  const out = renderRunsList([], { nowMs: NOW, width: 80 });
+  const headerIdx = out.lines.indexOf(out.header);
+  const sep = out.lines[headerIdx + 1]!;
+  assert.equal(sep.length, 80, `separator must be 80 chars; got ${sep.length}`);
+});
+
+test("VQ-7: separator width falls back to header visual width when no opts.width", () => {
+  const out = renderRunsList([], { nowMs: NOW });
+  // Strip ANSI escapes to get visual width.
+  const visualHeader = out.header.replace(/\x1b\[[0-9;]*m/g, "");
+  const headerIdx = out.lines.indexOf(out.header);
+  const sep = out.lines[headerIdx + 1]!;
+  assert.equal(
+    sep.length,
+    visualHeader.length,
+    `separator must match visual header length (${visualHeader.length}); got ${sep.length}`,
+  );
+});
+
+test("B3: help string is NOT truncated when it fits within opts.width", () => {
+  const out = renderRunsList(
+    [summary({ runId: "wf-a", state: "running" })],
+    {
+      nowMs: NOW,
+      width: 200,
+      help: [{ key: "\u21d5", label: "navigate", disabled: false }],
+    },
+  );
+  assert.match(out.help, /\[\u21d5\] navigate/);
+  assert.ok(out.help.length <= 198, `help must fit within width-2; len=${out.help.length}`);
+});
+
+test("B3: help string is clamped to opts.width - 2 at a clean boundary", () => {
+  // Build enough help items to overflow width=80.
+  const manyHelp = Array.from({ length: 10 }, (_, i) => ({
+    key: String(i),
+    label: "label-item",
+    disabled: false,
+  }));
+  const out = renderRunsList(
+    [summary({ runId: "wf-a", state: "running" })],
+    { nowMs: NOW, width: 80, help: manyHelp },
+  );
+  assert.ok(
+    out.help.length <= 78,
+    `help must be \u226478 chars at width=80; got ${out.help.length}: ${out.help}`,
+  );
+  // Must not end with a dangling '[' or '(' — clean boundary.
+  assert.ok(
+    !out.help.endsWith("[") && !out.help.endsWith("("),
+    `help must not end with dangling bracket; got: ${out.help}`,
+  );
+});
+
+test("B3: help is unchanged when opts.width is not provided", () => {
+  const manyHelp = Array.from({ length: 10 }, (_, i) => ({
+    key: String(i),
+    label: "label-item",
+    disabled: false,
+  }));
+  const out = renderRunsList(
+    [summary({ runId: "wf-a", state: "running" })],
+    { nowMs: NOW, help: manyHelp },
+  );
+  // No width given — full help string should be present.
+  assert.match(out.help, /\[9\] label-item/);
+});
