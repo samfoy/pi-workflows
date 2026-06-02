@@ -156,7 +156,10 @@ export function buildRender(
       handleAction({ kind: "navigate-back" }, state, opts, helpers);
       return { lines: [] };
     }
-    const sorted = sortAndClamp(state.lastSnapshot);
+    const sorted = sortAndClamp(state.lastSnapshot, {
+      groupBy: "state",
+      expandCompleted: state.expandCompleted,
+    });
     const selected = sorted[state.cursor];
     // Slice 15 (I1): include a deferred gate in the `i`-enable count.
     const deferredGateForListSelected =
@@ -194,6 +197,9 @@ export function buildRender(
       tokenTotals,
       // P2-S3: thread the spinner frame through to the runs list.
       spinnerFrame: getSpinnerFrame(),
+      // P2-S4: state grouping is the default for the live overlay.
+      groupBy: "state",
+      expandCompleted: state.expandCompleted,
       // P2-S7: thread filter text when in filter mode.
       ...(state.filterMode ? { filterText: state.filterText } : {}),
     });

@@ -301,6 +301,25 @@ export function bindRegistryToFeed(
       if (entry !== null) registry.applyEntry(entry);
       const phaseEntry = narrowPhaseEntry(customType, data);
       if (phaseEntry !== null) phaseRegistry.applyEntry(phaseEntry);
+      // P2-S4 — mirror interrupt.requested/resolved into
+      // `RunSummary.hasPendingInterrupt` so the runs-list state
+      // grouping buckets the run under ⚠  Needs input. Patches are
+      // load-once via bindRegistryToFeed (not per-mount) so the flag
+      // survives overlay close/reopen.
+      if (
+        (customType === "pi-workflows.interrupt.requested" ||
+          customType === "pi-workflows.interrupt.resolved") &&
+        data !== null &&
+        typeof data === "object"
+      ) {
+        const d = data as { runId?: unknown };
+        if (typeof d.runId === "string") {
+          registry.patchSummary(d.runId, {
+            hasPendingInterrupt:
+              customType === "pi-workflows.interrupt.requested",
+          });
+        }
+      }
       // IPC inspection surface: also write the appendEntry event to
       // the run's ledger.jsonl so a supervisor can observe all events
       // by tailing a single file. Only events with a `runId` payload

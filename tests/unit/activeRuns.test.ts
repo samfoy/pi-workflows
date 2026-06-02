@@ -725,3 +725,83 @@ test("hydrateRegistryFromDisk: 200-run cap enforced", async () => {
   await hydrateRegistryFromDisk(r, root);
   assert.equal(r.total, 200, "must cap at 200 runs");
 });
+
+// ───────────────────────────────────────────────────────────────────
+//  P2-S4 — patchSummary + hasPendingInterrupt
+// ───────────────────────────────────────────────────────────────────
+
+test("patchSummary: sets hasPendingInterrupt on a known run, preserves other fields", () => {
+  const r = new ActiveRunsRegistry();
+  r.applyEntry({
+    customType: "pi-workflows.run.started",
+    data: {
+      runId: "wf-int000000001",
+      workflowName: "interruptible",
+      startedAt: "2026-01-01T00:00:00.000Z",
+    },
+  });
+  r.patchSummary("wf-int000000001", { hasPendingInterrupt: true });
+  const s = r.getSummary("wf-int000000001");
+  assert.equal(s?.hasPendingInterrupt, true);
+  assert.equal(s?.workflowName, "interruptible", "other fields preserved");
+  assert.equal(s?.startedAt, "2026-01-01T00:00:00.000Z");
+  // Clear the flag.
+  r.patchSummary("wf-int000000001", { hasPendingInterrupt: false });
+  assert.equal(r.getSummary("wf-int000000001")?.hasPendingInterrupt, false);
+});
+
+test("patchSummary: silent no-op when runId is unknown", () => {
+  const r = new ActiveRunsRegistry();
+  // No throw, no insertion.
+  r.patchSummary("wf-missing00001", { hasPendingInterrupt: true });
+  assert.equal(r.getSummary("wf-missing00001"), undefined);
+  assert.equal(r.total, 0);
+});
+
+test("patchSummary: notifies subscribers", async () => {
+  const r = new ActiveRunsRegistry();
+  r.applyEntry({
+    customType: "pi-workflows.run.started",
+    data: {
+      runId: "wf-not000000001",
+      workflowName: "n",
+      startedAt: "2026-01-01T00:00:00.000Z",
+    },
+  });
+  // Drain the started-entry notification first.
+  await new Promise<void>((res) => queueMicrotask(res));
+  let count = 0;
+  const unsub = r.subscribe(() => {
+    count++;
+  });
+  r.patchSummary("wf-not000000001", { hasPendingInterrupt: true });
+  await new Promise<void>((res) => queueMicrotask(res));
+  await new Promise<void>((res) => queueMicrotask(res));
+  assert.equal(count, 1, "patchSummary must trigger a subscriber notification");
+  unsub();
+});
+
+test("hasPendingInterrupt survives subsequent applyEntry transitions", () => {
+  // The flag should not be wiped when run.transitioned arrives — the
+  // overlay clears it explicitly via `interrupt.resolved`.
+  const r = new ActiveRunsRegistry();
+  r.applyEntry({
+    customType: "pi-workflows.run.started",
+    data: {
+      runId: "wf-pres00000001",
+      workflowName: "p",
+      startedAt: "2026-01-01T00:00:00.000Z",
+    },
+  });
+  r.patchSummary("wf-pres00000001", { hasPendingInterrupt: true });
+  // Normal state transition (e.g. paused → running).
+  r.applyEntry({
+    customType: "pi-workflows.run.transitioned",
+    data: { runId: "wf-pres00000001", toState: "paused" },
+  });
+  assert.equal(
+    r.getSummary("wf-pres00000001")?.hasPendingInterrupt,
+    true,
+    "hasPendingInterrupt must persist across run.transitioned",
+  );
+});

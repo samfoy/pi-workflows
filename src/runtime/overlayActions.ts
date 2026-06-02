@@ -19,6 +19,7 @@
 
 import type { ExtensionAPI } from "../types/internal.js";
 import type { ActiveRunsRegistry } from "./activeRuns.js";
+import { isTerminalState } from "./activeRuns.js";
 import {
   dispatchHotkey,
   type HotkeyAction,
@@ -46,6 +47,30 @@ export interface OverlayHelpers {
   clearBanner: () => void;
   close: () => void;
   liveBanner: () => string | undefined;
+}
+
+/** P2-S4 — cap on visible Completed rows when collapsed. Mirrors
+ * `runsList.ts:COMPLETED_COLLAPSED_LIMIT` so the overlay knows when
+ * a `… N more` sentinel is being rendered without re-running the
+ * full layout pass. */
+const COMPLETED_COLLAPSED_LIMIT = 3;
+
+/**
+ * P2-S4 — returns true when the runs-list is rendering a
+ * `… N more` sentinel below the Completed section. Used by
+ * `navigate-down` to extend the cursor's max position by 1, and by
+ * `open-phase-view` (Enter) to detect when the cursor is on the
+ * sentinel and toggle `expandCompleted` instead of opening a run.
+ */
+function hasMoreSentinel(state: OverlayInstanceState): boolean {
+  if (state.view !== "runs-list") return false;
+  if (state.expandCompleted) return false;
+  let completed = 0;
+  for (const s of state.lastSnapshot) {
+    if (isTerminalState(s.state)) completed++;
+    if (completed > COMPLETED_COLLAPSED_LIMIT) return true;
+  }
+  return false;
 }
 
 /**
@@ -133,8 +158,15 @@ export function handleAction(
           }
           return;
         }
-        const sorted = sortAndClamp(state.lastSnapshot);
-        if (state.cursor < sorted.length - 1) {
+        const sorted = sortAndClamp(state.lastSnapshot, {
+          groupBy: "state",
+          expandCompleted: state.expandCompleted,
+        });
+        // P2-S4: when the Completed section is collapsed and there
+        // are hidden completed runs, the cursor may land on the
+        // `… N more` sentinel (one past the last visible row).
+        const maxCursor = sorted.length - 1 + (hasMoreSentinel(state) ? 1 : 0);
+        if (state.cursor < maxCursor) {
           state.cursor++;
           helpers.requestRender();
         }
@@ -222,6 +254,23 @@ export function handleAction(
         helpers.close();
         return;
       case "open-phase-view":
+        // P2-S4: Enter on the `… N more` sentinel toggles the
+        // collapsed Completed section. Detect by `runId === undefined`
+        // (no run under the cursor) AND `state.cursor === sorted.length`
+        // (one past the last visible row) AND a sentinel actually
+        // being rendered. Without all three, fall through to the
+        // existing no-op-on-undefined behavior.
+        if (action.runId === undefined && state.view === "runs-list" && hasMoreSentinel(state)) {
+          const sorted = sortAndClamp(state.lastSnapshot, {
+            groupBy: "state",
+            expandCompleted: state.expandCompleted,
+          });
+          if (state.cursor === sorted.length) {
+            state.expandCompleted = !state.expandCompleted;
+            helpers.requestRender();
+            return;
+          }
+        }
         // Slice 14: actually open the phase state.view in this overlay.
         if (action.runId) {
           state.openedRunId = action.runId;
@@ -750,7 +799,10 @@ export function handleKey(
       handleAction(action, state, opts, helpers);
       return;
     }
-    const sorted = sortAndClamp(state.lastSnapshot);
+    const sorted = sortAndClamp(state.lastSnapshot, {
+      groupBy: "state",
+      expandCompleted: state.expandCompleted,
+    });
     const selected = sorted[state.cursor];
     const isRemote =
       selected !== undefined && !opts.registry.wasLocalRun(selected.runId);

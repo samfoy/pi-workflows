@@ -81,6 +81,12 @@ export interface OverlayInstanceState {
   helpVisible: boolean;
   filterMode: boolean;
   filterText: string;
+  /**
+   * P2-S4 — when `true`, the runs-list Completed section renders
+   * every terminal run; when `false` (default) it caps at 3 with a
+   * `… N more` sentinel. Toggled by Enter on the sentinel row.
+   */
+  expandCompleted: boolean;
   lastSnapshot: ReadonlyArray<RunSummary>;
 }
 
@@ -101,6 +107,7 @@ export function makeOverlayState(initialSnapshot: ReadonlyArray<RunSummary>): Ov
     helpVisible: true,
     filterMode: false,
     filterText: "",
+    expandCompleted: false,
     lastSnapshot: initialSnapshot,
   };
 }
@@ -151,9 +158,20 @@ export const DEFAULT_BANNER_TTL_MS = 4000;
 /**
  * Sort the snapshot the same way `runsList.ts` does so cursor
  * indexing matches the rendered view.
+ *
+ * P2-S4: when `groupBy: 'state'` is passed, `renderRunsList` groups
+ * runs into Needs-input/Working/Completed sections and may collapse
+ * the Completed bucket to 3 entries with a `… N more` sentinel below.
+ * Threading the same opts here keeps `state.cursor` indexing aligned
+ * with what the user sees — the visible runs come first (in render
+ * order), then any collapsed Completed runs (in their would-be
+ * render order, so they re-appear in place when expanded).
  */
-export function sortAndClamp(snap: ReadonlyArray<RunSummary>): RunSummary[] {
-  const view = renderRunsList(snap, { nowMs: 0 });
+export function sortAndClamp(
+  snap: ReadonlyArray<RunSummary>,
+  opts: { readonly groupBy?: "state" | "time"; readonly expandCompleted?: boolean } = {},
+): RunSummary[] {
+  const view = renderRunsList(snap, { nowMs: 0, ...opts });
   const ids = new Map(view.rows.map((r, i) => [r.runId, i] as const));
   const sortedAll = [...snap].sort((a, b) => {
     const ia = ids.get(a.runId);

@@ -69,6 +69,14 @@ export interface RenderedRunsList {
   readonly help: string;
   /** All lines composed in order — what the overlay component renders. */
   readonly lines: string[];
+  /**
+   * P2-S4 — number of completed runs hidden behind the
+   * `… N more` sentinel when `groupBy === 'state'` and
+   * `expandCompleted` is false. `0` (or absent) means no sentinel
+   * was emitted. The overlay reads this to know whether the cursor
+   * may land on the sentinel position (`cursor === rows.length`).
+   */
+  readonly hiddenCompletedCount?: number;
 }
 
 export interface RenderOpts {
@@ -121,6 +129,23 @@ export interface RenderOpts {
    * with a block-cursor indicator.
    */
   readonly filterText?: string;
+  /**
+   * P2-S4 — grouping mode for the runs list. `'state'` partitions
+   * runs into three sections (`⚠  Needs input`, `▶  Working`,
+   * `✓  Completed`) with section headers interleaved into
+   * `lines[]`. `'time'` (or undefined) preserves the legacy flat
+   * sort: active runs first (by startedAt asc), then terminal runs
+   * newest-first. The overlay defaults to `'state'`; existing tests
+   * and IPC fallback callers omit it.
+   */
+  readonly groupBy?: "state" | "time";
+  /**
+   * P2-S4 — when grouping by state, expand the Completed section to
+   * show all terminal runs. When `false` (default), the section is
+   * truncated to 3 rows with a `… N more` sentinel below. The overlay
+   * toggles this via Enter on the sentinel row.
+   */
+  readonly expandCompleted?: boolean;
 }
 
 /**
@@ -272,6 +297,66 @@ function sortRuns(runs: RunSummary[]): RunSummary[] {
   return [...active, ...terminal];
 }
 
+/**
+ * P2-S4 — partition runs into the three state-grouped buckets used
+ * by `groupBy: 'state'`. Each bucket is internally sorted to match
+ * the section's display contract:
+ *
+ *   - **needsInput** (⚠): non-terminal runs with `hasPendingInterrupt`
+ *     set, sorted by `startedAt` ascending (FIFO — oldest pending
+ *     first).
+ *   - **working** (▶): non-terminal runs without a pending
+ *     interrupt (running + paused), sorted by `startedAt` ascending.
+ *   - **completed** (✓): terminal runs, sorted by `endedAt`
+ *     descending (newest first).
+ *
+ * Exported for use by `sortAndClamp` in `overlayState.ts` so the
+ * cursor's row index agrees with the rendered order.
+ */
+export function partitionByState(
+  runs: ReadonlyArray<RunSummary>,
+): {
+  needsInput: RunSummary[];
+  working: RunSummary[];
+  completed: RunSummary[];
+} {
+  const needsInput: RunSummary[] = [];
+  const working: RunSummary[] = [];
+  const completed: RunSummary[] = [];
+  for (const r of runs) {
+    if (isTerminalState(r.state)) {
+      completed.push(r);
+    } else if (r.hasPendingInterrupt === true) {
+      needsInput.push(r);
+    } else {
+      working.push(r);
+    }
+  }
+  needsInput.sort((a, b) => (a.startedAt < b.startedAt ? -1 : 1));
+  working.sort((a, b) => (a.startedAt < b.startedAt ? -1 : 1));
+  completed.sort((a, b) => {
+    const ka = a.endedAt ?? a.startedAt;
+    const kb = b.endedAt ?? b.startedAt;
+    return ka < kb ? 1 : -1;
+  });
+  return { needsInput, working, completed };
+}
+
+/** P2-S4 — cap on the visible Completed rows when collapsed. */
+const COMPLETED_COLLAPSED_LIMIT = 3;
+
+/**
+ * P2-S4 — section header glyphs and labels. Pure for testability.
+ * The label width is fixed so headers align across re-renders.
+ */
+function sectionHeader(
+  glyph: string,
+  label: string,
+  count: number,
+): string {
+  return `${glyph}  ${label}  (${count})`;
+}
+
 export function renderRunsList(
   runs: ReadonlyArray<RunSummary>,
   opts: RenderOpts = {},
@@ -290,8 +375,49 @@ export function renderRunsList(
           r.runId.toLowerCase().startsWith(filterLower),
       )
     : runs;
-  const sorted = sortRuns([...filtered]);
-  const trimmed = sorted.slice(0, max);
+
+  // P2-S4 — grouping decision. `'state'` groups + caps Completed;
+  // `'time'` (or undefined) preserves the legacy flat sort.
+  const groupBy = opts.groupBy ?? "time";
+  const expandCompleted = opts.expandCompleted ?? false;
+
+  let ordered: RunSummary[];
+  let needsInput: RunSummary[] = [];
+  let working: RunSummary[] = [];
+  let completedAll: RunSummary[] = [];
+  let completedVisible: RunSummary[] = [];
+  let hiddenCompletedCount = 0;
+  if (groupBy === "state") {
+    const parts = partitionByState(filtered);
+    needsInput = parts.needsInput;
+    working = parts.working;
+    completedAll = parts.completed;
+    if (!expandCompleted && completedAll.length > COMPLETED_COLLAPSED_LIMIT) {
+      completedVisible = completedAll.slice(0, COMPLETED_COLLAPSED_LIMIT);
+      hiddenCompletedCount = completedAll.length - COMPLETED_COLLAPSED_LIMIT;
+    } else {
+      completedVisible = completedAll;
+    }
+    ordered = [...needsInput, ...working, ...completedVisible];
+  } else {
+    ordered = sortRuns([...filtered]);
+  }
+  // maxRows still applies after grouping: trim from the end so the
+  // cap honors the order callers see (oldest terminal disappear first).
+  const trimmed = ordered.slice(0, max);
+  // If trimming dropped completedVisible rows, recompute the visible
+  // bucket counts so section headers reflect what's actually shown.
+  if (groupBy === "state" && trimmed.length < ordered.length) {
+    let consumed = 0;
+    needsInput = needsInput.slice(0, Math.max(0, trimmed.length - consumed));
+    consumed += needsInput.length;
+    working = working.slice(0, Math.max(0, trimmed.length - consumed));
+    consumed += working.length;
+    completedVisible = completedVisible.slice(
+      0,
+      Math.max(0, trimmed.length - consumed),
+    );
+  }
 
   const activeCount = trimmed.filter((r) => !isTerminalState(r.state)).length;
   const totalCount = trimmed.length;
@@ -299,7 +425,7 @@ export function renderRunsList(
   const title = opts.title ?? "pi-workflows";
   const subtitle =
     `${activeCount} active · ${totalCount} total` +
-    (sorted.length > max ? ` · +${sorted.length - max} hidden` : "") +
+    (ordered.length > max ? ` · +${ordered.length - max} hidden` : "") +
     // P2-S7 — filter indicator with block-cursor suffix.
     (opts.filterText !== undefined && opts.filterText.length > 0
       ? `  /  ${opts.filterText}█`
@@ -409,8 +535,43 @@ export function renderRunsList(
     header,
     separator,
   ];
-  if (rows.length === 0) {
+  if (rows.length === 0 && hiddenCompletedCount === 0) {
     lines.push("(no runs)");
+  } else if (groupBy === "state") {
+    // P2-S4 — emit per-section headers + rows. `rows[]` order is
+    // [needsInput..., working..., completedVisible...]; we walk
+    // through them in groups, peeling off rows[] entries as we go.
+    let i = 0;
+    if (needsInput.length > 0) {
+      lines.push(sectionHeader("\u26a0", "Needs input", needsInput.length));
+      for (let k = 0; k < needsInput.length; k++) lines.push(rows[i++]!.line);
+    }
+    if (working.length > 0) {
+      lines.push(sectionHeader("\u25b6", "Working", working.length));
+      for (let k = 0; k < working.length; k++) lines.push(rows[i++]!.line);
+    }
+    if (completedVisible.length > 0 || hiddenCompletedCount > 0) {
+      // The header count reflects the FULL completed bucket (visible
+      // + hidden) so users see total terminal runs at a glance.
+      lines.push(
+        sectionHeader(
+          "\u2713",
+          "Completed",
+          completedVisible.length + hiddenCompletedCount,
+        ),
+      );
+      for (let k = 0; k < completedVisible.length; k++) {
+        lines.push(rows[i++]!.line);
+      }
+      if (hiddenCompletedCount > 0) {
+        // Cursor lands on the sentinel when `cursor === rows.length`.
+        const sentinelCursor =
+          opts.cursor !== undefined && opts.cursor === rows.length
+            ? "▸ "
+            : "  ";
+        lines.push(`${sentinelCursor}… ${hiddenCompletedCount} more`);
+      }
+    }
   } else {
     for (const r of rows) lines.push(r.line);
   }
@@ -430,5 +591,6 @@ export function renderRunsList(
     rows,
     help,
     lines,
+    ...(hiddenCompletedCount > 0 ? { hiddenCompletedCount } : {}),
   };
 }

@@ -39,6 +39,9 @@ function summary(p: Partial<RunSummary> & Pick<RunSummary, "runId">): RunSummary
       ? { approvalReason: p.approvalReason }
       : {}),
     ...(p.runDir !== undefined ? { runDir: p.runDir } : {}),
+    ...(p.hasPendingInterrupt !== undefined
+      ? { hasPendingInterrupt: p.hasPendingInterrupt }
+      : {}),
   };
 }
 
@@ -704,5 +707,273 @@ describe("coloredLine (VQ-1)", () => {
         );
       }
     }
+  });
+});
+
+// ───────────────────────────────────────────────────────────────────
+//  P2-S4 — state grouping + hasPendingInterrupt + Completed sentinel
+// ───────────────────────────────────────────────────────────────────
+
+describe("P2-S4: state grouping (groupBy: 'state')", () => {
+  test("groupBy: 'state' — running run appears under '▶  Working' header", () => {
+    const out = renderRunsList(
+      [summary({ runId: "wf-run000000001", state: "running" })],
+      { nowMs: NOW, groupBy: "state" },
+    );
+    const idx = out.lines.findIndex((l) => l.startsWith("\u25b6  Working"));
+    assert.ok(idx >= 0, `expected a '▶  Working' header in lines[]; got ${JSON.stringify(out.lines)}`);
+    assert.equal(
+      out.lines[idx],
+      "\u25b6  Working  (1)",
+      "section header must include the bucket count",
+    );
+    // The run row must come AFTER the section header.
+    assert.ok(
+      out.lines[idx + 1]!.includes("wf-run000000"),
+      "running row should appear immediately under the Working header",
+    );
+  });
+
+  test("groupBy: 'state' — hasPendingInterrupt run lands under '⚠  Needs input', not '▶  Working'", () => {
+    const out = renderRunsList(
+      [
+        summary({
+          runId: "wf-int000000001",
+          state: "running",
+          hasPendingInterrupt: true,
+        }),
+      ],
+      { nowMs: NOW, groupBy: "state" },
+    );
+    const needs = out.lines.find((l) => l.startsWith("\u26a0  Needs input"));
+    const working = out.lines.find((l) => l.startsWith("\u25b6  Working"));
+    assert.equal(
+      needs,
+      "\u26a0  Needs input  (1)",
+      "running run with hasPendingInterrupt must surface under Needs input",
+    );
+    assert.equal(
+      working,
+      undefined,
+      "empty Working group must be omitted entirely (no header)",
+    );
+  });
+
+  test("groupBy: 'state' — empty bucket has no header", () => {
+    // Only a completed run; no Needs-input, no Working.
+    const out = renderRunsList(
+      [
+        summary({
+          runId: "wf-done00000001",
+          state: "done",
+          endedAt: "2026-05-29T11:00:00Z",
+          durationMs: 1000,
+        }),
+      ],
+      { nowMs: NOW, groupBy: "state" },
+    );
+    assert.ok(
+      !out.lines.some((l) => l.startsWith("\u26a0  Needs input")),
+      "empty Needs input section must be omitted",
+    );
+    assert.ok(
+      !out.lines.some((l) => l.startsWith("\u25b6  Working")),
+      "empty Working section must be omitted",
+    );
+    assert.ok(
+      out.lines.some((l) => l.startsWith("\u2713  Completed")),
+      "non-empty Completed section must show its header",
+    );
+  });
+
+  test("groupBy: 'state' — paused run buckets under Working (no pending interrupt)", () => {
+    const out = renderRunsList(
+      [summary({ runId: "wf-paused000001", state: "paused" })],
+      { nowMs: NOW, groupBy: "state" },
+    );
+    assert.ok(
+      out.lines.some((l) => l === "\u25b6  Working  (1)"),
+      "paused run without pending interrupt belongs under Working",
+    );
+  });
+
+  test("groupBy: 'state' — Completed truncates to 3 with sentinel; expandCompleted shows all", () => {
+    const completed = Array.from({ length: 6 }, (_, i) =>
+      summary({
+        runId: `wf-d${String(i).padStart(11, "0")}`,
+        state: "done",
+        startedAt: `2026-05-29T11:0${i}:00Z`,
+        endedAt: `2026-05-29T11:0${i}:30Z`,
+        durationMs: 30_000,
+      }),
+    );
+    const collapsed = renderRunsList(completed, { nowMs: NOW, groupBy: "state" });
+    assert.equal(
+      collapsed.rows.length,
+      3,
+      "collapsed Completed shows exactly 3 rows",
+    );
+    assert.equal(collapsed.hiddenCompletedCount, 3);
+    assert.ok(
+      collapsed.lines.some((l) => l.includes("\u2026 3 more")),
+      "sentinel '… 3 more' must appear when 6 completed runs collapse to 3",
+    );
+    // Header still reflects the full count, not the visible slice.
+    assert.ok(
+      collapsed.lines.some((l) => l === "\u2713  Completed  (6)"),
+      "Completed header count is the FULL terminal-run count",
+    );
+
+    const expanded = renderRunsList(completed, {
+      nowMs: NOW,
+      groupBy: "state",
+      expandCompleted: true,
+    });
+    assert.equal(expanded.rows.length, 6, "expanded Completed shows all 6");
+    assert.ok(
+      expanded.hiddenCompletedCount === undefined ||
+        expanded.hiddenCompletedCount === 0,
+      "no sentinel when expanded",
+    );
+    assert.ok(
+      !expanded.lines.some((l) => l.includes(" more")),
+      "no sentinel line when expandCompleted: true",
+    );
+  });
+
+  test("groupBy: 'state' — sentinel suppressed at exactly 3 completed runs (no truncation)", () => {
+    const three = Array.from({ length: 3 }, (_, i) =>
+      summary({
+        runId: `wf-d${String(i).padStart(11, "0")}`,
+        state: "done",
+        endedAt: `2026-05-29T11:0${i}:00Z`,
+        durationMs: 1000,
+      }),
+    );
+    const out = renderRunsList(three, { nowMs: NOW, groupBy: "state" });
+    assert.equal(out.rows.length, 3);
+    assert.ok(
+      out.hiddenCompletedCount === undefined ||
+        out.hiddenCompletedCount === 0,
+    );
+    assert.ok(
+      !out.lines.some((l) => l.includes(" more")),
+      "no sentinel when completed.length === 3",
+    );
+  });
+
+  test("groupBy: 'state' — cursor on sentinel renders ▸ marker", () => {
+    const four = Array.from({ length: 4 }, (_, i) =>
+      summary({
+        runId: `wf-d${String(i).padStart(11, "0")}`,
+        state: "done",
+        endedAt: `2026-05-29T11:0${i}:00Z`,
+        durationMs: 1000,
+      }),
+    );
+    // cursor === rows.length (3) is the sentinel position.
+    const out = renderRunsList(four, {
+      nowMs: NOW,
+      groupBy: "state",
+      cursor: 3,
+    });
+    const sentinel = out.lines.find((l) => l.includes("more"));
+    assert.ok(sentinel !== undefined);
+    assert.ok(
+      sentinel!.startsWith("\u25b8 "),
+      `sentinel should be cursored when cursor === rows.length; got ${JSON.stringify(sentinel)}`,
+    );
+  });
+
+  test("groupBy: 'state' — three sections in display order: Needs input → Working → Completed", () => {
+    const out = renderRunsList(
+      [
+        summary({
+          runId: "wf-int000000001",
+          state: "running",
+          hasPendingInterrupt: true,
+        }),
+        summary({ runId: "wf-run000000001", state: "running" }),
+        summary({
+          runId: "wf-done00000001",
+          state: "done",
+          endedAt: "2026-05-29T11:00:00Z",
+          durationMs: 1000,
+        }),
+      ],
+      { nowMs: NOW, groupBy: "state" },
+    );
+    const headerIndices = out.lines
+      .map((l, i) => ({ l, i }))
+      .filter(({ l }) =>
+        l.startsWith("\u26a0  ") ||
+          l.startsWith("\u25b6  ") ||
+          l.startsWith("\u2713  "),
+      );
+    assert.equal(headerIndices.length, 3);
+    assert.ok(headerIndices[0]!.l.startsWith("\u26a0  Needs input"));
+    assert.ok(headerIndices[1]!.l.startsWith("\u25b6  Working"));
+    assert.ok(headerIndices[2]!.l.startsWith("\u2713  Completed"));
+  });
+});
+
+describe("P2-S4: groupBy: 'time' (legacy) backward compat", () => {
+  test("groupBy: 'time' — flat list, no section headers", () => {
+    const out = renderRunsList(
+      [
+        summary({
+          runId: "wf-int000000001",
+          state: "running",
+          hasPendingInterrupt: true,
+        }),
+        summary({ runId: "wf-run000000001", state: "running" }),
+      ],
+      { nowMs: NOW, groupBy: "time" },
+    );
+    assert.ok(
+      !out.lines.some(
+        (l) =>
+          l.startsWith("\u26a0  ") ||
+          l.startsWith("\u25b6  ") ||
+          l.startsWith("\u2713  "),
+      ),
+      "groupBy: 'time' must not emit any section headers",
+    );
+    assert.equal(out.rows.length, 2);
+  });
+
+  test("undefined groupBy preserves legacy flat behavior (no headers, no sentinel)", () => {
+    const completed = Array.from({ length: 6 }, (_, i) =>
+      summary({
+        runId: `wf-d${String(i).padStart(11, "0")}`,
+        state: "done",
+        endedAt: `2026-05-29T11:0${i}:00Z`,
+        durationMs: 1000,
+      }),
+    );
+    // No groupBy passed at all.
+    const out = renderRunsList(completed, { nowMs: NOW });
+    assert.equal(
+      out.rows.length,
+      6,
+      "legacy flat sort shows every run (no truncation)",
+    );
+    assert.ok(
+      out.hiddenCompletedCount === undefined ||
+        out.hiddenCompletedCount === 0,
+    );
+    assert.ok(
+      !out.lines.some((l) => l.includes(" more")),
+      "no sentinel in legacy mode",
+    );
+    assert.ok(
+      !out.lines.some(
+        (l) =>
+          l.startsWith("\u26a0  ") ||
+          l.startsWith("\u25b6  ") ||
+          l.startsWith("\u2713  "),
+      ),
+      "no section headers in legacy mode",
+    );
   });
 });

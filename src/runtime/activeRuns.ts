@@ -120,6 +120,14 @@ export interface RunSummary {
    * with `parentRunId`; absent on non-fork runs.
    */
   readonly forkAtPhase?: string;
+  /**
+   * P2-S4 — set when a `pi-workflows.interrupt.requested` is
+   * outstanding for this run. Cleared on `interrupt.resolved`. Used
+   * by `runsList.ts` state grouping to bucket the run under the
+   * `⚠  Needs input` section instead of `▶  Working`. Patched in
+   * via {@link ActiveRunsRegistry.patchSummary}.
+   */
+  readonly hasPendingInterrupt?: boolean;
 }
 
 export type ActiveRunsListener = () => void;
@@ -226,6 +234,11 @@ export class ActiveRunsRegistry {
         : prior?.forkAtPhase !== undefined
           ? { forkAtPhase: prior.forkAtPhase }
           : {}),
+      ...(summaryPatch?.hasPendingInterrupt !== undefined
+        ? { hasPendingInterrupt: summaryPatch.hasPendingInterrupt }
+        : prior?.hasPendingInterrupt !== undefined
+          ? { hasPendingInterrupt: prior.hasPendingInterrupt }
+          : {}),
     };
     this.#summaries.set(runId, next);
     this.#notify();
@@ -319,6 +332,9 @@ export class ActiveRunsRegistry {
           ...(prior?.forkAtPhase !== undefined
             ? { forkAtPhase: prior.forkAtPhase }
             : {}),
+          ...(prior?.hasPendingInterrupt !== undefined
+            ? { hasPendingInterrupt: prior.hasPendingInterrupt }
+            : {}),
         };
         this.#summaries.set(d.runId, next);
         this.#notify();
@@ -347,6 +363,9 @@ export class ActiveRunsRegistry {
             : {}),
           ...(prior?.forkAtPhase !== undefined
             ? { forkAtPhase: prior.forkAtPhase }
+            : {}),
+          ...(prior?.hasPendingInterrupt !== undefined
+            ? { hasPendingInterrupt: prior.hasPendingInterrupt }
             : {}),
         };
         this.#summaries.set(d.runId, next);
@@ -413,6 +432,25 @@ export class ActiveRunsRegistry {
         return;
       }
     }
+  }
+
+  /**
+   * P2-S4 — patch fields on an existing summary in place, preserving
+   * everything not in `patch`. No-op if `runId` is unknown (silent).
+   * Used by the overlay to flip {@link RunSummary.hasPendingInterrupt}
+   * on `pi-workflows.interrupt.{requested,resolved}` events without
+   * going through a full state transition.
+   *
+   * Listeners are notified on the next microtask via `#notify`, even
+   * when the patch is a no-op-by-value (the watcher's job is to debounce
+   * — we don't second-guess identity here).
+   */
+  patchSummary(runId: string, patch: Partial<RunSummary>): void {
+    const prior = this.#summaries.get(runId);
+    if (prior === undefined) return; // unknown run — silent no-op
+    const next: RunSummary = { ...prior, ...patch, runId };
+    this.#summaries.set(runId, next);
+    this.#notify();
   }
 
   /** Subscribe a listener; returns the unsubscribe function. */
