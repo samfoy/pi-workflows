@@ -76,7 +76,9 @@ import { MAX_INPUT_LENGTH } from "./util/limits.js";
  * Uses a regex rather than a full AST parse — only handles the common literal
  * array shape. Returns empty array if not found or unparseable.
  */
-export function extractMetaPhases(source: string): Array<{ title: string }> {
+export function extractMetaPhases(
+  source: string,
+): Array<{ title: string; description?: string }> {
   // Match: phases: [ { title: '...' }, ... ] or phases: [{ title: "..." }, ...]
   // Use a balanced-bracket scan so nested arrays don't truncate the match.
   const phasesStart = /phases\s*:\s*(\[)/.exec(source);
@@ -94,16 +96,38 @@ export function extractMetaPhases(source: string): Array<{ title: string }> {
     }
   }
   if (start === -1 || end === -1) return [];
-  const block = source.slice(start, end + 1);
-  const titles: Array<{ title: string }> = [];
-  const titleRe = /title\s*:\s*['"]([^'"]+)['"]/g;
-  let m: RegExpExecArray | null;
-  // biome-ignore lint/suspicious/noAssignInExpressions: idiomatic exec loop
-  while ((m = titleRe.exec(block)) !== null) {
-    const t = m[1];
-    if (t !== undefined) titles.push({ title: t });
+  const block = source.slice(start + 1, end);
+  // Walk the block to extract each top-level `{ ... }` object literal so we
+  // can match `title` and `description` per-phase rather than globally (a
+  // global title sweep can't pair fields inside the same object).
+  const objects: string[] = [];
+  let objDepth = 0;
+  let objStart = -1;
+  for (let i = 0; i < block.length; i++) {
+    const c = block[i];
+    if (c === "{") {
+      if (objDepth === 0) objStart = i;
+      objDepth++;
+    } else if (c === "}") {
+      objDepth--;
+      if (objDepth === 0 && objStart !== -1) {
+        objects.push(block.slice(objStart, i + 1));
+        objStart = -1;
+      }
+    }
   }
-  return titles;
+  const titleRe = /title\s*:\s*['"]([^'"]+)['"]/;
+  const descRe = /description\s*:\s*['"]([^'"]*)['"]/;
+  const out: Array<{ title: string; description?: string }> = [];
+  for (const obj of objects) {
+    const tm = titleRe.exec(obj);
+    if (tm === null || tm[1] === undefined) continue;
+    const dm = descRe.exec(obj);
+    const entry: { title: string; description?: string } = { title: tm[1] };
+    if (dm !== null && dm[1] !== undefined) entry.description = dm[1];
+    out.push(entry);
+  }
+  return out;
 }
 
 /**

@@ -195,3 +195,22 @@ test("PhaseRegistry: agent.ended without usage leaves totals at 0", () => {
   assert.equal(phase.cachedTokens, 0);
   assert.equal(snap.totalTokens, 0);
 });
+
+test("PhaseRegistry: meta.phases description flows to PhaseSnapshot.description (P2-S1)", () => {
+  const reg = new PhaseRegistry();
+  reg.applyEntry({
+    customType: "pi-workflows.meta.phases",
+    data: {
+      runId: RUN_ID,
+      phases: [
+        { title: "A", description: "Do B" },
+        { title: "C" },
+      ],
+    },
+  });
+  const snap = reg.getRunSnapshot(RUN_ID)!;
+  const a = snap.phases.find((p) => p.phaseName === "A")!;
+  const c = snap.phases.find((p) => p.phaseName === "C")!;
+  assert.equal(a.description, "Do B");
+  assert.equal(c.description, undefined);
+});

@@ -387,3 +387,28 @@ test("extractMetaPhases: returns empty array when no phases declared", () => {
   const src = `export const meta = { name: "x", description: "y" };`;
   assert.deepEqual(extractMetaPhases(src), []);
 });
+
+test("extractMetaPhases: extracts description alongside title", () => {
+  const src = `export const meta = { phases: [{title: "A", description: "Do B"}] };`;
+  assert.deepEqual(extractMetaPhases(src), [{ title: "A", description: "Do B" }]);
+});
+
+test("extractMetaPhases: omits description when not present (no regression)", () => {
+  const src = `export const meta = { phases: [{title: "A"}] };`;
+  const result = extractMetaPhases(src);
+  assert.deepEqual(result, [{ title: "A" }]);
+  assert.equal(result[0]?.description, undefined);
+});
+
+test("extractMetaPhases: pairs description per-phase, not globally", () => {
+  const src = `export const meta = { phases: [
+    { title: "recon", description: "Fan-out reads" },
+    { title: "analyze" },
+    { title: "report", description: "Final write-up" },
+  ] };`;
+  assert.deepEqual(extractMetaPhases(src), [
+    { title: "recon", description: "Fan-out reads" },
+    { title: "analyze" },
+    { title: "report", description: "Final write-up" },
+  ]);
+});

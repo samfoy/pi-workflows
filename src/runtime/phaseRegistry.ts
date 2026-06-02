@@ -42,6 +42,8 @@ export interface PhaseSnapshot {
   readonly phaseName: string;
   readonly status: PhaseStatus;
   readonly agentCount: number;
+  /** Optional description from `meta.phases[].description` (Phase 2 / TUI cards). */
+  readonly description?: string;
   readonly startedAt?: string;
   readonly endedAt?: string;
   readonly durationMs?: number;
@@ -73,7 +75,7 @@ export type PhaseFeedEntry =
       readonly data: {
         readonly runId: string;
         /** Phase titles declared in `meta.phases` — seeded as pending before any run. */
-        readonly phases: ReadonlyArray<{ readonly title: string }>;
+        readonly phases: ReadonlyArray<{ readonly title: string; readonly description?: string }>;
       };
     }
   | {
@@ -137,6 +139,7 @@ interface MutablePhase {
   phaseName: string;
   status: PhaseStatus;
   agentCount: number;
+  description?: string;
   startedAt?: string;
   endedAt?: string;
   durationMs?: number;
@@ -169,7 +172,8 @@ export class PhaseRegistry {
         // Pre-seed pending phases from meta declaration.
         // Only inserts phases that don't already exist (run may have started).
         for (const p of entry.data.phases) {
-          if (!run.phases.has(p.title)) {
+          const prior = run.phases.get(p.title);
+          if (prior === undefined) {
             run.phases.set(p.title, {
               phaseName: p.title,
               status: "pending",
@@ -177,7 +181,10 @@ export class PhaseRegistry {
               agents: new Map(),
               totalTokens: 0,
               cachedTokens: 0,
+              ...(p.description !== undefined ? { description: p.description } : {}),
             });
+          } else if (p.description !== undefined && prior.description === undefined) {
+            prior.description = p.description;
           }
         }
         break;
@@ -356,6 +363,7 @@ export class PhaseRegistry {
         phaseName: phase.phaseName,
         status: phase.status,
         agentCount: phase.agentCount,
+        ...(phase.description !== undefined ? { description: phase.description } : {}),
         ...(phase.startedAt !== undefined ? { startedAt: phase.startedAt } : {}),
         ...(phase.endedAt !== undefined ? { endedAt: phase.endedAt } : {}),
         ...(phase.durationMs !== undefined ? { durationMs: phase.durationMs } : {}),
