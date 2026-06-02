@@ -39,7 +39,10 @@ import { makeConfirmDialog } from "./runtime/approval.js";
 import { sweepCrashedRuns } from "./runtime/crashSweep.js";
 import { bindRegistryToFeed } from "./runtime/overlay.js";
 import { createHotReloadWatcher } from "./runtime/hotReload.js";
-import { getActiveRuns } from "./runtime/activeRuns.js";
+import { getActiveRuns, isTerminalState } from "./runtime/activeRuns.js";
+import { getPhaseRegistry } from "./runtime/phaseRegistry.js";
+import { SPINNER_FRAMES } from "./runtime/runsList.js";
+import { fmtDuration } from "./util/time.js";
 import { createOtelExporter, type OtelExporterHandle, type TailRunLedgerHandle } from "./runtime/otelExporter.js";
 import {
   createOtelMetricsExporter,
@@ -242,44 +245,97 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     });
   }
 
-  // ── Inline run progress in footer status line ──────────────────────
-  // Shows "⚡ workflow-name · running" or "⚡ N workflows running" in
-  // the TUI footer whenever there are active runs. Clears when idle.
-  // Updated on every registry state change (no polling needed).
+  // ── P2-S10: Live task panel via ctx.ui.setStatus ───────────────────
+  // Shows a spinner-animated status line in the pi footer whenever
+  // any workflow run is active — no `w` keypress needed. The line
+  // updates every 120ms (spinner cadence) and refreshes phase
+  // progress + elapsed time on each tick. Cleared automatically
+  // when all runs terminate, and torn down on session_shutdown.
   //
-  // statusCtx is captured from session_start and updated on each
-  // session (the ctx object wraps live TUI state and is safe to
-  // hold across event handlers).
+  // statusCtx is captured from session_start and refreshed each
+  // session. The ctx.ui object wraps live TUI state and is safe to
+  // hold across event handlers.
   let _statusCtx: ExtensionContextLike | null = null;
+  let _statusSpinnerFrame = 0;
+  let _statusInterval: ReturnType<typeof setInterval> | null = null;
   const STATUS_KEY = "pi-workflows";
+  const STATUS_TICK_MS = 120;
+
+  const _renderStatusLine = (): string | undefined => {
+    const summaries = getActiveRuns().listSummaries();
+    const active = summaries.filter((s) => !isTerminalState(s.state));
+    if (active.length === 0) return undefined;
+    const phaseReg = getPhaseRegistry();
+    const glyph = SPINNER_FRAMES[_statusSpinnerFrame % SPINNER_FRAMES.length]!;
+    const fmtOne = (s: typeof active[number]): string => {
+      const snap = phaseReg.getRunSnapshot(s.runId);
+      const total = snap?.phases.length ?? 0;
+      const done = snap?.phases.filter((p) => p.status === "done").length ?? 0;
+      const cur = total > 0 ? Math.min(done + 1, total) : 0;
+      const elapsed = s.startedAt.length > 0
+        ? fmtDuration(Date.now() - Date.parse(s.startedAt))
+        : "—";
+      const phasePart = total > 0 ? `  phase ${cur}/${total}` : "";
+      return `${glyph} ${s.workflowName}${phasePart}  ${elapsed}`;
+    };
+    if (active.length === 1) return fmtOne(active[0]!);
+    const head = active[0]!;
+    const extras = active.length - 1;
+    return `${glyph} ${active.length} workflows running  (${head.workflowName} +${extras})`;
+  };
 
   const _updateRunStatus = (): void => {
     if (_statusCtx === null) return;
-    // Explicit assertion: TS won't narrow a let-captured variable inside a
-    // closure, so we assert non-null after the early-exit.
     const sctx = _statusCtx as ExtensionContextLike;
     const setStatus = (sctx.ui as { setStatus?: (k: string, v: string | undefined) => void }).setStatus;
     if (!setStatus) return;
-    const summaries = getActiveRuns().listSummaries();
-    const active = summaries.filter(
-      (s) => s.state === "running" || s.state === "paused",
-    );
     try {
-      if (active.length === 0) {
-        setStatus(STATUS_KEY, undefined);
-      } else if (active.length === 1) {
-        const s = active[0]!;
-        const stateIcon = s.state === "paused" ? "⏸" : "⚡";
-        setStatus(STATUS_KEY, `${stateIcon} ${s.workflowName} · ${s.state}`);
-      } else {
-        setStatus(STATUS_KEY, `⚡ ${active.length} workflows running`);
-      }
+      setStatus(STATUS_KEY, _renderStatusLine());
     } catch { /* swallow — TUI may not be mounted yet */ }
   };
 
-  // Subscribe once at extension load. The same subscriber persists
-  // across sessions (each session_start refreshes _statusCtx).
-  getActiveRuns().subscribe(_updateRunStatus);
+  const _ensureStatusInterval = (): void => {
+    if (_statusInterval !== null) return;
+    _statusInterval = setInterval(() => {
+      _statusSpinnerFrame = (_statusSpinnerFrame + 1) % SPINNER_FRAMES.length;
+      // Auto-stop when no active runs remain so we don't spin idle.
+      const anyActive = getActiveRuns()
+        .listSummaries()
+        .some((s) => !isTerminalState(s.state));
+      if (!anyActive) {
+        _clearStatusInterval();
+        _updateRunStatus(); // final clear (sets undefined)
+        return;
+      }
+      _updateRunStatus();
+    }, STATUS_TICK_MS);
+    // Don't keep the host process alive solely for the spinner.
+    (_statusInterval as { unref?: () => void }).unref?.();
+  };
+
+  const _clearStatusInterval = (): void => {
+    if (_statusInterval !== null) {
+      clearInterval(_statusInterval);
+      _statusInterval = null;
+    }
+  };
+
+  // Subscribe once at extension load. On every registry notification,
+  // refresh the line and (re)start the interval if needed. The
+  // subscriber persists across sessions; each session_start refreshes
+  // _statusCtx.
+  getActiveRuns().subscribe(() => {
+    const anyActive = getActiveRuns()
+      .listSummaries()
+      .some((s) => !isTerminalState(s.state));
+    if (anyActive) {
+      _ensureStatusInterval();
+      _updateRunStatus();
+    } else {
+      _clearStatusInterval();
+      _updateRunStatus(); // clears
+    }
+  });
 
   // `/workflows` so its handler can return the documented error
   // message; we just don't expose `/<workflowName>`.
@@ -566,6 +622,14 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
   // pass; for slice 10 we only emit a notify line so users see the
   // hook firing in their session log.
   pi.on("session_shutdown", (_event, ctx) => {
+    // P2-S10: tear down the footer status spinner + clear the line so
+    // the footer doesn't carry a stale workflow indicator past shutdown.
+    _clearStatusInterval();
+    try {
+      const setStatus = (ctx.ui as { setStatus?: (k: string, v: string | undefined) => void }).setStatus;
+      setStatus?.(STATUS_KEY, undefined);
+    } catch { /* ignore */ }
+    _statusCtx = null;
     // Slice 16: close the hot-reload watcher.
     if (hotReloadHandle !== null) {
       hotReloadHandle.dispose().catch(() => { /* ignore shutdown errors */ });
