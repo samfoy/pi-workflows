@@ -5,8 +5,8 @@
  * binding three pure modules:
  *
  *   - `activeRuns.ts` (data) — Map of in-process Run handles + summary
- *     view subscribed to the appendEntry feed.
- *   - `hotkeys.ts`    (input) — state-guarded `(key, view, runState) →
+ *     state.view subscribed to the appendEntry feed.
+ *   - `hotkeys.ts`    (input) — state-guarded `(key, state.view, runState) →
  *     Action` dispatcher.
  *   - `runsList.ts`   (view)  — pure `(state) → string[]` render.
  *
@@ -42,8 +42,6 @@
  * Refs: PRD §10.1, §10.5, §10.6, §10.9, plan.md §4 Slice 13.
  */
 
-import { closeSync, fsyncSync, openSync, writeSync } from "node:fs";
-import { join } from "node:path";
 import type {
   ExtensionAPI,
   ExtensionCommandContextLike,
@@ -56,25 +54,35 @@ import {
   ActiveRunsRegistry,
   getActiveRuns,
   hydrateRegistryFromDisk,
-  type RunFeedEntry,
-  type RunSummary,
 } from "./activeRuns.js";
-import {
-  dispatchHotkey,
-  helpForState,
-  type HotkeyAction,
-  type OverlayView,
-} from "./hotkeys.js";
+import { type OverlayView } from "./hotkeys.js";
 import { renderRunsList } from "./runsList.js";
 import {
   PhaseRegistry,
   getPhaseRegistry,
-  type PhaseFeedEntry,
 } from "./phaseRegistry.js";
-import { renderPhaseView } from "./phaseView.js";
-import { renderAgentDetail, MAX_LOG_LINES as AGENT_DETAIL_MAX_LOG_LINES, type AgentDetailSnapshot } from "./agentDetail.js";
-import { renderGcDialog, loadGcCandidates, applyGc, type GcDialogState } from "./gcDialog.js";
-import { agentTranscriptPath } from "./transcriptOpen.js";
+import {
+  handleAction as handleAction_ext,
+  handleKey as handleKey_ext,
+  type OverlayHelpers,
+} from "./overlayActions.js";
+import { buildRender as buildRender_ext } from "./overlayRender.js";
+export { runKill } from "./overlayActions.js";
+import {
+  makeOverlayState,
+  _resetModuleState,
+  appendEntryToLedger,
+  applyOverlayEvent,
+  DEFAULT_BANNER_TTL_MS,
+  narrowEntry,
+  narrowPhaseEntry,
+  shortenId,
+  sortAndClamp,
+  tickSpinnerFrame,
+  type InterruptAnswerResult,
+  type PendingInterruptPayload,
+} from "./overlayState.js";
+export type { InterruptAnswerResult, PendingInterruptPayload } from "./overlayState.js";
 
 /** Module-level flag enforcing PRD §10.1's "second invocation is no-op". */
 let _overlayOpen = false;
@@ -93,35 +101,10 @@ let _overlayOpen = false;
  * missed (the appendEntry listener is per-mount); recovering those
  * would require a ledger replay on mount and is out of scope here.
  */
-const _pendingInterrupts: Map<string, PendingInterruptPayload[]> = new Map();
-let _gatePromptState:
-  | { runId: string; message: string; defaultAnswer: boolean; deferred?: boolean }
-  | null = null;
-
-/**
- * P2-S3 — module-level braille-spinner frame counter. Driven by a
- * `setInterval(120ms)` started in `mountOverlay` and cleared on
- * cleanup. Modulo-10 is enforced on increment so renderers can use
- * the value directly. Lives at module scope so the value persists
- * across overlay close/reopen — no functional reason it has to, but
- * it keeps the spinner from "jumping back to frame 0" if the user
- * toggles the overlay rapidly.
- */
-let _spinnerFrame = 0;
-
-/**
- * Default banner TTL — 4s feels long enough to read a one-line toast
- * but short enough that a stale banner doesn't read as a stuck UI.
- * Per gap analysis 2026-05-31 ("Banner state has no TTL").
- */
-const DEFAULT_BANNER_TTL_MS = 4000;
-
 /** Test-only seam — reset the open flag between tests. */
 export function __resetOverlayOpenForTest(): void {
   _overlayOpen = false;
-  _pendingInterrupts.clear();
-  _gatePromptState = null;
-  _spinnerFrame = 0;
+  _resetModuleState();
 }
 
 /** Test/inspection seam — read the open flag without mutating. */
@@ -181,13 +164,13 @@ export interface MountOverlayOpts {
   readonly onVisualizeRequested?: (runId: string) => Promise<string | undefined> | string | undefined;
   /**
    * Per-agent stop: called when the user hits `x` on a selected running
-   * agent in phase-view. The overlay doesn't own abort logic — it just
+   * agent in phase-state.view. The overlay doesn't own abort logic — it just
    * signals intent to the Run handle.
    */
   readonly onStopAgent?: (runId: string, agentId: string) => void;
   /**
    * Per-agent restart: called when the user hits `r` on a selected running
-   * agent in phase-view. The overlay doesn't own dispatch logic — it just
+   * agent in phase-state.view. The overlay doesn't own dispatch logic — it just
    * signals intent to the Run handle.
    */
   readonly onRestartAgent?: (runId: string, agentId: string) => void;
@@ -207,7 +190,7 @@ export interface MountOverlayOpts {
   readonly onCopyPrompt?: (text: string) => string | undefined;
   /**
    * ZONE_HITL TUI surface — hotkey `i` (answer pending interrupt) on
-   * runs-list / phase-view. Receives the runId plus the pending
+   * runs-list / phase-state.view. Receives the runId plus the pending
    * interrupt payload (question/choices/default and key). The host
    * is responsible for prompting the operator (typically through
    * `pi.ui.input` or `pi.ui.select`) and calling
@@ -255,41 +238,6 @@ export interface MountOverlayOpts {
   readonly runsDir?: string;
 }
 
-/**
- * ZONE_HITL TUI surface — the payload an `interrupt_requested`
- * appendEntry carries forward to the overlay's interrupt-answer
- * callback. The overlay tracks one entry per (runId, key) pair and
- * passes the OLDEST pending entry to the callback when the operator
- * presses `i`.
- */
-export interface PendingInterruptPayload {
-  readonly key: string;
-  readonly question: string;
-  readonly choices?: ReadonlyArray<string>;
-  readonly default?: unknown;
-}
-
-/**
- * Slice 15/16 (I1+I2) — result of an interrupt-answer prompt
- * dispatched by the overlay to the host (`workflowCmd.ts`).
- *
- * The overlay POPs the pending payload from its FIFO before invoking
- * the host callback (so a second `i` press doesn't re-prompt the same
- * entry while the modal is open). When the host can't post an answer
- * (operator dismissed the prompt with `Esc`, or the prompt threw),
- * the host returns `{ outcome: "snoozed" }` so the overlay can
- * **restore** the payload to the head of the FIFO and the run stays
- * answerable. Returning a bare string or `undefined` preserves the
- * legacy contract (treated as a resolved outcome — no restore).
- */
-export type InterruptAnswerResult =
-  | string
-  | undefined
-  | {
-      readonly banner?: string;
-      readonly outcome?: "resolved" | "snoozed" | "cancelled";
-    };
-
 /** Test-only handle exposing internal overlay state for assertion. */
 export interface OverlayHandleForTest {
   readonly close: () => void;
@@ -317,37 +265,8 @@ export interface MountResult {
  * the registry's `applyEntry()` (which sets `runDir` on the summary)
  * has already run before we look up the path.
  */
-function appendEntryToLedger(
-  customType: string,
-  data: unknown,
-  registry: ActiveRunsRegistry,
-): void {
-  const d = data as Record<string, unknown> | null | undefined;
-  if (typeof d?.runId !== "string") return;
-  const runId = d.runId;
-  // Prefer the registry's runDir (set by run.started); fall back to
-  // the standard path derivation so events that arrive before the
-  // summary is populated still land in the right file.
-  const summary = registry.getSummary(runId);
-  const dir = summary?.runDir ?? null;
-  if (!dir) return; // no runDir yet — skip (run.started not seen)
-  const line =
-    JSON.stringify({
-      type: "appendEntry",
-      at: new Date().toISOString(),
-      customType,
-      data: d,
-    }) + "\n";
-  try {
-    const fd = openSync(join(dir, "ledger.jsonl"), "a", 0o644);
-    try {
-      writeSync(fd, line);
-      fsyncSync(fd);
-    } finally {
-      closeSync(fd);
-    }
-  } catch { /* best-effort */ }
-}
+/**
+ * Public entry point. The slash-command handler awaits this; on success
 
 /**
  * **F3 / S8** — bind the registry to the appendEntry feed. Should be
@@ -395,66 +314,6 @@ export function bindRegistryToFeed(
     // @ts-ignore -- restoring original
     pi.appendEntry = original;
   };
-}
-
-function narrowPhaseEntry(
-  customType: string,
-  data: unknown,
-): PhaseFeedEntry | null {
-  if (data === null || typeof data !== "object") return null;
-  const d = data as Record<string, unknown>;
-  if (typeof d.runId !== "string") return null;
-  switch (customType) {
-    case "pi-workflows.meta.phases":
-      if (!Array.isArray(d.phases)) return null;
-      return { customType, data: d as never } as PhaseFeedEntry;
-    case "pi-workflows.phase.started":
-      if (typeof d.phaseName !== "string" || typeof d.agentCount !== "number")
-        return null;
-      return { customType, data: d as never } as PhaseFeedEntry;
-    case "pi-workflows.phase.ended":
-      if (typeof d.phaseName !== "string") return null;
-      return { customType, data: d as never } as PhaseFeedEntry;
-    case "pi-workflows.agent.started":
-      if (typeof d.phaseName !== "string" || typeof d.agentId !== "string")
-        return null;
-      return { customType, data: d as never } as PhaseFeedEntry;
-    case "pi-workflows.agent.ended":
-      if (typeof d.phaseName !== "string" || typeof d.agentId !== "string")
-        return null;
-      return { customType, data: d as never } as PhaseFeedEntry;
-    case "pi-workflows.run.log":
-      if (typeof d.message !== "string") return null;
-      return { customType, data: d as never } as PhaseFeedEntry;
-    default:
-      return null;
-  }
-}
-
-function narrowEntry(customType: string, data: unknown): RunFeedEntry | null {
-  if (data === null || typeof data !== "object") return null;
-  const d = data as Record<string, unknown>;
-  if (typeof d.runId !== "string") return null;
-  switch (customType) {
-    case "pi-workflows.run.started":
-      return {
-        customType,
-        data: d as RunFeedEntry["data"] & {
-          runId: string;
-          workflowName: string;
-        },
-      } as RunFeedEntry;
-    case "pi-workflows.run.transitioned":
-      if (typeof d.toState !== "string") return null;
-      return { customType, data: d as never } as RunFeedEntry;
-    case "pi-workflows.run.ended":
-      if (typeof d.outcome !== "string") return null;
-      return { customType, data: d as never } as RunFeedEntry;
-    case "pi-workflows.run.kill-requested":
-      return { customType, data: d as never } as RunFeedEntry;
-    default:
-      return null;
-  }
 }
 
 /**
@@ -564,7 +423,7 @@ export async function mountOverlay(
   return { mounted: true, mode: "tui" };
 }
 
-interface OverlayComponentOpts {
+export interface OverlayComponentOpts {
   readonly tui: TuiInstanceLike;
   readonly theme: TuiThemeLike;
   readonly kb: TuiKeybindingsLike;
@@ -604,29 +463,7 @@ interface OverlayComponentOpts {
 }
 
 function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
-  let view: OverlayView = "runs-list";
-  let cursor = 0;
-  let phaseCursor = 0;
-  // Slice 11 (VQ-2): `gg` chord state. Set when the first `g` arrives
-  // (dispatcher returns noop reason=pending-g). Cleared on any other
-  // key, on view change, on overlay close, or when the chord fires.
-  let pendingG = false;
-  let pendingGAt = 0;
-  let openedRunId: string | undefined;
-  // Slice 15: agent detail state
-  let openedAgentId: string | undefined;
-  let agentLogTail: string[] = [];
-  let agentDetailDebounceTimer: ReturnType<typeof setTimeout> | null = null;
-  // BUG-034: scroll offset for the agent-detail log view (0 = newest).
-  let agentLogScrollOffset = 0;
-  // Slice 15: GC dialog state
-  let gcDialogState: GcDialogState | null = null;
-  let gcBusy = false;
-  let helpVisible = true;
-  // P2-S7 — filter mode state. `_filterMode` toggles when `/` enters
-  // and Enter/Esc exits; `_filterText` accumulates printable chars.
-  let _filterMode = false;
-  let _filterText = "";
+  const state = makeOverlayState(opts.registry.listSummaries());
   /**
    * Banner state — ephemeral one-line message rendered under the
    * subtitle. `expiresAtMs` is wall-clock per `opts.nowMs()`. The
@@ -654,13 +491,12 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     banner = undefined;
     return undefined;
   };
-  let lastSnapshot: ReadonlyArray<RunSummary> = opts.registry.listSummaries();
   // gap/ctx-gate: pending gate prompt state.
   // Slice 16 (I2): pending HITL state lives at module scope so it
   // survives overlay close/reopen — see top of file. The local
   // alias keeps the function-body diff small. The deferred-gate
   // hide+banner+`i`-to-reopen flow lives below.
-  // _gatePromptState and _pendingInterrupts are imported from the
+  // getGatePromptState() and _pendingInterrupts are imported from the
   // module-level scope above.
 
   const requestRender = () => {
@@ -672,18 +508,18 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     if (renderTimer !== null) return;
     renderTimer = setTimeout(() => {
       renderTimer = null;
-      lastSnapshot = opts.registry.listSummaries();
-      const sorted = sortAndClamp(lastSnapshot);
-      if (cursor >= sorted.length) cursor = Math.max(0, sorted.length - 1);
-      // BUG-073: clamp phaseCursor when the running-phase agent list shrinks.
-      if (openedRunId !== undefined) {
-        const snap = opts.phaseRegistry.getRunSnapshot(openedRunId);
+      state.lastSnapshot = opts.registry.listSummaries();
+      const sorted = sortAndClamp(state.lastSnapshot);
+      if (state.cursor >= sorted.length) state.cursor = Math.max(0, sorted.length - 1);
+      // BUG-073: clamp state.phaseCursor when the running-phase agent list shrinks.
+      if (state.openedRunId !== undefined) {
+        const snap = opts.phaseRegistry.getRunSnapshot(state.openedRunId);
         const visibleAgents =
           snap?.phases
             .filter((p) => p.status === "running")
             .flatMap((p) => p.agents).length ?? 0;
-        if (phaseCursor >= visibleAgents) {
-          phaseCursor = Math.max(0, visibleAgents - 1);
+        if (state.phaseCursor >= visibleAgents) {
+          state.phaseCursor = Math.max(0, visibleAgents - 1);
         }
       }
       requestRender();
@@ -692,12 +528,12 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
 
   const unsub = opts.registry.subscribe(debouncedRender);
   // P2-S3: drive the braille-spinner frame counter at 120ms while
-  // the overlay is mounted. Each tick bumps `_spinnerFrame` and
+  // the overlay is mounted. Each tick bumps `getSpinnerFrame()` and
   // schedules a debounced render — the existing `if (renderTimer !==
   // null) return` guard inside `debouncedRender` coalesces concurrent
   // calls so the interval can't stack timers.
   const spinnerInterval: ReturnType<typeof setInterval> = setInterval(() => {
-    _spinnerFrame = (_spinnerFrame + 1) % 10;
+    tickSpinnerFrame();
     debouncedRender();
   }, 120);
   // Don't keep the event loop alive solely for the spinner — if pi
@@ -707,13 +543,13 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     (spinnerInterval as { unref: () => void }).unref();
   }
   const unsubPhase = opts.phaseRegistry.subscribe((rid) => {
-    // Coalesce phase-view repaints through the same debounce.
-    if ((view === "phase-view" || view === "agent-detail") && rid === openedRunId) {
+    // Coalesce phase-state.view repaints through the same debounce.
+    if ((state.view === "phase-view" || state.view === "agent-detail") && rid === state.openedRunId) {
       debouncedRender();
     }
   });
 
-  // Slice 15: Intercept pi-workflows.agent.log to feed agentLogTail
+  // Slice 15: Intercept pi-workflows.agent.log to feed state.agentLogTail
   // when agent-detail is open. We wrap appendEntry locally in a thin
   // shim that peeks at agent.log events; this avoids re-wrapping the
   // bindRegistryToFeed wrapper.
@@ -724,91 +560,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       try {
         originalAppendEntry.call(opts.pi, customType, data);
       } finally {
-        if (
-          customType === "pi-workflows.agent.log" &&
-          view === "agent-detail" &&
-          data !== null &&
-          typeof data === "object"
-        ) {
-          const d = data as Record<string, unknown>;
-          if (
-            typeof d.line === "string" &&
-            d.runId === openedRunId &&
-            d.agentId === openedAgentId
-          ) {
-            agentLogTail = [...agentLogTail, d.line].slice(-50);
-            // Debounce per PRD §10.6 — 100ms per (runId, agentId).
-            if (agentDetailDebounceTimer !== null) {
-              clearTimeout(agentDetailDebounceTimer);
-            }
-            agentDetailDebounceTimer = setTimeout(() => {
-              agentDetailDebounceTimer = null;
-              requestRender();
-            }, 100);
-          }
-        }
-        // gap/ctx-gate: track pending gate prompts.
-        if (customType === "pi-workflows.gate.requested" &&
-          data !== null && typeof data === "object") {
-          const d = data as Record<string, unknown>;
-          if (typeof d.runId === "string" && typeof d.message === "string") {
-            _gatePromptState = {
-              runId: d.runId,
-              message: d.message,
-              defaultAnswer: d.defaultAnswer !== false,
-            };
-            requestRender();
-          }
-        }
-        if (customType === "pi-workflows.gate.resolved") {
-          _gatePromptState = null;
-          requestRender();
-        }
-        // ZONE_HITL TUI: track pending ctx.interrupt() requests per run.
-        if (
-          customType === "pi-workflows.interrupt.requested" &&
-          data !== null &&
-          typeof data === "object"
-        ) {
-          const d = data as Record<string, unknown>;
-          if (typeof d.runId === "string" && typeof d.key === "string") {
-            const list = _pendingInterrupts.get(d.runId) ?? [];
-            const payload: PendingInterruptPayload = {
-              key: d.key,
-              question:
-                typeof d.question === "string" ? d.question : "(no question)",
-              ...(Array.isArray(d.choices)
-                ? { choices: d.choices.filter((c): c is string => typeof c === "string") }
-                : {}),
-              ...("default" in d ? { default: d.default } : {}),
-            };
-            // Idempotent: dedupe on key (re-emits during resume don't double-up).
-            if (!list.some((e) => e.key === payload.key)) {
-              list.push(payload);
-              _pendingInterrupts.set(d.runId, list);
-              requestRender();
-            }
-          }
-        }
-        if (
-          customType === "pi-workflows.interrupt.resolved" &&
-          data !== null &&
-          typeof data === "object"
-        ) {
-          const d = data as Record<string, unknown>;
-          if (typeof d.runId === "string" && typeof d.key === "string") {
-            const list = _pendingInterrupts.get(d.runId);
-            if (list !== undefined) {
-              const idx = list.findIndex((e) => e.key === d.key);
-              if (idx >= 0) {
-                list.splice(idx, 1);
-                if (list.length === 0) _pendingInterrupts.delete(d.runId);
-                else _pendingInterrupts.set(d.runId, list);
-                requestRender();
-              }
-            }
-          }
-        }
+        applyOverlayEvent(state, customType, data, { requestRender });
       }
     };
   }
@@ -822,9 +574,9 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       renderTimer = null;
     }
     clearInterval(spinnerInterval);
-    if (agentDetailDebounceTimer !== null) {
-      clearTimeout(agentDetailDebounceTimer);
-      agentDetailDebounceTimer = null;
+    if (state.agentDetailDebounceTimer !== null) {
+      clearTimeout(state.agentDetailDebounceTimer);
+      state.agentDetailDebounceTimer = null;
     }
     if (bannerTimer !== null) {
       clearTimeout(bannerTimer);
@@ -848,879 +600,25 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     }
   };
 
-  const buildRender = (width?: number) => {
-    // Slice 15: GC dialog takes priority when open.
-    if (gcDialogState !== null) {
-      return { lines: renderGcDialog(gcDialogState).lines };
-    }
-
-    // gap/ctx-gate: gate prompt takes priority over other views.
-    // Slice 15 (I1): when the prompt was deferred via Esc, yield to
-    // the underlying view so the user can navigate / press `x` to
-    // stop / press `i` to re-open. The persistent banner reminds
-    // them the gate is still pending.
-    if (_gatePromptState !== null && _gatePromptState.deferred !== true) {
-      const dflt = _gatePromptState.defaultAnswer ? "Y/n" : "y/N";
-      return {
-        lines: [
-          "",
-          "  ⏸  Workflow paused — human approval required",
-          "",
-          `  ${_gatePromptState.message}`,
-          "",
-          `  [y] Approve    [n] Deny    [Esc] later    (default: ${dflt})`,
-          "",
-        ],
-      };
-    }
-
-    // Compute the live banner text once per render so an expired
-    // banner is dropped (and cleared from `banner`) atomically.
-    const liveBannerText = liveBanner();
-
-    // Slice 15: agent detail view.
-    if (view === "agent-detail" && openedRunId !== undefined && openedAgentId !== undefined) {
-      const summary = opts.registry.getSummary(openedRunId);
-      const phaseSnap = opts.phaseRegistry.getRunSnapshot(openedRunId);
-      // Find agent across all phases.
-      let foundAgent = phaseSnap?.phases
-        .flatMap((p) => p.agents)
-        .find((a) => a.agentId === openedAgentId);
-      if (foundAgent !== undefined) {
-        const phaseName =
-          phaseSnap?.phases.find((p) =>
-            p.agents.some((a) => a.agentId === openedAgentId),
-          )?.phaseName ?? "";
-        const transcriptPath =
-          summary?.runDir !== undefined
-            ? agentTranscriptPath(summary.runDir, openedAgentId)
-            : undefined;
-        const snap: AgentDetailSnapshot = {
-          runId: openedRunId,
-          phaseName,
-          agent: foundAgent,
-          logTail: agentLogTail,
-          ...(transcriptPath !== undefined ? { transcriptPath } : {}),
-        };
-        const detailHelp = helpVisible ? helpForState("agent-detail", undefined) : [];
-        const detailOpts: { nowMs?: number; width?: number; help?: typeof detailHelp; banner?: string; scrollOffset?: number; spinnerFrame?: number } = {
-          nowMs: opts.nowMs(),
-          help: detailHelp,
-          // BUG-034: pass current scroll offset so log view respects j/k navigation.
-          scrollOffset: agentLogScrollOffset,
-          // P2-S3: thread the spinner frame through.
-          spinnerFrame: _spinnerFrame,
-        };
-        if (width !== undefined) detailOpts.width = width;
-        if (liveBannerText !== undefined) detailOpts.banner = liveBannerText;
-        const rendered = renderAgentDetail(snap, detailOpts);
-        return { lines: rendered.lines };
-      }
-      // Agent vanished — fall back to phase view.
-      // BUG-074: use handleAction to clear all stale state atomically.
-      handleAction({ kind: "navigate-back" });
-      return { lines: [] };
-    }
-
-    if (view === "phase-view" && openedRunId !== undefined) {
-      const summary = opts.registry.getSummary(openedRunId);
-      if (summary !== undefined) {
-        const phaseSnap = opts.phaseRegistry.getRunSnapshot(openedRunId);
-        // Determine selected agent's state for context-sensitive help.
-        const runningAgentsForHelp = phaseSnap?.phases
-          .filter((p) => p.status === "running")
-          .flatMap((p) => p.agents) ?? [];
-        const selectedAgentState = runningAgentsForHelp[phaseCursor]?.state;
-        // Slice 15 (I1): include a deferred gate in the `i`-enable
-        // count so the help line shows `[i] answer prompt` when only
-        // a snoozed gate is outstanding (no pending interrupt list).
-        const deferredGateHere =
-          _gatePromptState !== null &&
-          _gatePromptState.deferred === true &&
-          _gatePromptState.runId === openedRunId
-            ? 1
-            : 0;
-        const phasePendingInterrupts =
-          (_pendingInterrupts.get(openedRunId)?.length ?? 0) + deferredGateHere;
-        const help = helpVisible
-          ? helpForState(
-              "phase-view",
-              summary.state,
-              selectedAgentState,
-              phasePendingInterrupts,
-            )
-          : [];
-        const opts2: Parameters<typeof renderPhaseView>[2] = {
-          nowMs: opts.nowMs(),
-          help,
-          // P2-S3: thread the spinner frame through to phase view.
-          spinnerFrame: _spinnerFrame,
-        };
-        if (width !== undefined) (opts2 as { width?: number }).width = width;
-        if (liveBannerText !== undefined) (opts2 as { banner?: string }).banner = liveBannerText;
-        if (
-          phaseSnap !== undefined &&
-          phaseCursor >= 0 &&
-          phaseSnap.totalAgents > 0
-        ) {
-          (opts2 as { cursor?: number }).cursor = phaseCursor;
-        }
-        const rendered = renderPhaseView(summary, phaseSnap, opts2);
-        return { lines: rendered.lines };
-      }
-      // Run vanished from registry — fall back to runs list.
-      // BUG-074: use handleAction to clear openedRunId, phaseCursor, banner atomically.
-      handleAction({ kind: "navigate-back" });
-      return { lines: [] };
-    }
-    const sorted = sortAndClamp(lastSnapshot);
-    const selected = sorted[cursor];
-    // Slice 15 (I1): include a deferred gate in the `i`-enable count.
-    const deferredGateForListSelected =
-      selected !== undefined &&
-      _gatePromptState !== null &&
-      _gatePromptState.deferred === true &&
-      _gatePromptState.runId === selected.runId
-        ? 1
-        : 0;
-    const selectedPendingInterrupts =
-      (selected !== undefined
-        ? _pendingInterrupts.get(selected.runId)?.length ?? 0
-        : 0) + deferredGateForListSelected;
-    const help = helpVisible
-      ? helpForState(view, selected?.state, undefined, selectedPendingInterrupts)
-      : [];
-    const localIds = new Set(
-      lastSnapshot.filter((s) => opts.registry.wasLocalRun(s.runId)).map((s) => s.runId),
-    );
-    // Build token totals from phase registry for the tokens column.
-    const tokenTotals = new Map<string, number>();
-    for (const s of sorted) {
-      const phSnap = opts.phaseRegistry.getRunSnapshot(s.runId);
-      if (phSnap !== undefined && phSnap.totalTokens > 0) {
-        tokenTotals.set(s.runId, phSnap.totalTokens);
-      }
-    }
-    const rendered = renderRunsList(sorted, {
-      title: "pi-workflows  ·  /workflows overlay",
-      nowMs: opts.nowMs(),
-      ...(sorted.length > 0 ? { cursor } : {}),
-      ...(width !== undefined ? { width } : {}),
-      help,
-      localRunIds: localIds,
-      tokenTotals,
-      // P2-S3: thread the spinner frame through to the runs list.
-      spinnerFrame: _spinnerFrame,
-      // P2-S7: thread filter text when in filter mode.
-      ...(_filterMode ? { filterText: _filterText } : {}),
-    });
-    // VQ-1 — swap plain `row.line` entries in `lines[]` for their
-    // ANSI-colored equivalents so state labels render with color in
-    // the TTY overlay. `lines[]` from renderRunsList is plain by
-    // contract; we rebuild it here for the TTY render path. The
-    // non-TTY fallback above (`view.lines.join("\n")`) keeps using
-    // the plain `lines[]`.
-    const byPlain = new Map<string, string>();
-    for (const r of rendered.rows) byPlain.set(r.line, r.coloredLine);
-    const ttyLines = rendered.lines.map((ln) => byPlain.get(ln) ?? ln);
-    return { ...rendered, lines: ttyLines };
-  };
-
-  const handleAction = (action: HotkeyAction): void => {
-    switch (action.kind) {
-      case "navigate-up":
-        // BUG-034: scroll the log in agent-detail, don't mutate runs-list cursor.
-        if (view === "agent-detail") {
-          const maxOffset = Math.max(0, agentLogTail.length - AGENT_DETAIL_MAX_LOG_LINES);
-          if (agentLogScrollOffset < maxOffset) {
-            agentLogScrollOffset++;
-            requestRender();
-          }
-          return;
-        }
-        if (view === "phase-view") {
-          if (phaseCursor > 0) {
-            phaseCursor--;
-            requestRender();
-          }
-          return;
-        }
-        if (cursor > 0) {
-          cursor--;
-          requestRender();
-        }
-        return;
-      case "navigate-down": {
-        // BUG-034: scroll the log in agent-detail, don't mutate runs-list cursor.
-        if (view === "agent-detail") {
-          if (agentLogScrollOffset > 0) {
-            agentLogScrollOffset--;
-            requestRender();
-          }
-          return;
-        }
-        if (view === "phase-view") {
-          if (openedRunId !== undefined) {
-            const snap = opts.phaseRegistry.getRunSnapshot(openedRunId);
-            // Only agents in the running phase are rendered as agentRows;
-            // use that count as the bound, not totalAgents (all phases).
-            const visibleAgents =
-              snap?.phases
-                .filter((p) => p.status === "running")
-                .flatMap((p) => p.agents).length ?? 0;
-            if (phaseCursor < Math.max(0, visibleAgents - 1)) {
-              phaseCursor++;
-              requestRender();
-            }
-          }
-          return;
-        }
-        const sorted = sortAndClamp(lastSnapshot);
-        if (cursor < sorted.length - 1) {
-          cursor++;
-          requestRender();
-        }
-        return;
-      }
-      case "navigate-first":
-        // Slice 11 (VQ-2): `gg` chord — jump cursor to the first row.
-        if (view === "phase-view") {
-          if (phaseCursor !== 0) {
-            phaseCursor = 0;
-            requestRender();
-          }
-          return;
-        }
-        if (view === "runs-list") {
-          if (cursor !== 0) {
-            cursor = 0;
-            requestRender();
-          }
-        }
-        return;
-      case "navigate-back":
-        // Agent detail (slice 15): Esc returns to phase view.
-        if (view === "agent-detail") {
-          // BUG-124: clear pending debounce so it doesn't fire after transition.
-          if (agentDetailDebounceTimer !== null) {
-            clearTimeout(agentDetailDebounceTimer);
-            agentDetailDebounceTimer = null;
-          }
-          view = "phase-view";
-          openedAgentId = undefined;
-          agentLogTail = [];
-          // BUG-034: reset scroll offset when leaving agent-detail.
-          agentLogScrollOffset = 0;
-          banner = undefined;
-          requestRender();
-          return;
-        }
-        // Slice 14 — Esc on phase view returns to runs-list.
-        if (view === "phase-view") {
-          view = "runs-list";
-          openedRunId = undefined;
-          phaseCursor = 0;
-          banner = undefined;
-          requestRender();
-          return;
-        }
-        return;
-      case "toggle-help":
-        helpVisible = !helpVisible;
-        requestRender();
-        return;
-      // P2-S7 — filter mode actions.
-      case "filter-enter":
-        if (view === "filter") {
-          // Lock filter — exit text-input mode, stay in runs-list.
-          _filterMode = false;
-          view = "runs-list";
-        } else {
-          _filterMode = true;
-          _filterText = "";
-          view = "filter";
-        }
-        requestRender();
-        return;
-      case "filter-append":
-        if (action.char !== undefined) {
-          _filterText += action.char;
-          requestRender();
-        }
-        return;
-      case "filter-backspace":
-        if (_filterText.length > 0) {
-          _filterText = _filterText.slice(0, -1);
-          requestRender();
-        }
-        return;
-      case "filter-clear":
-        _filterText = "";
-        _filterMode = false;
-        if (view === "filter") view = "runs-list";
-        requestRender();
-        return;
-      case "close-overlay":
-        close();
-        return;
-      case "open-phase-view":
-        // Slice 14: actually open the phase view in this overlay.
-        if (action.runId) {
-          openedRunId = action.runId;
-          view = "phase-view";
-          phaseCursor = 0;
-          banner = undefined;
-          if (typeof opts.pi.appendEntry === "function") {
-            try {
-              opts.pi.appendEntry("pi-workflows.overlay.open-phase-view", {
-                runId: action.runId,
-              });
-            } catch {
-              /* swallow */
-            }
-          }
-          requestRender();
-        }
-        return;
-      case "open-agent-detail":
-        // Slice 15: Enter on phase view opens agent detail for cursor-pointed agent.
-        if (action.runId && openedRunId !== undefined) {
-          const phaseSnap = opts.phaseRegistry.getRunSnapshot(openedRunId);
-          // Index into only the running-phase agents — the same set that
-          // renderPhaseView emits as agentRows — so cursor and target stay in sync.
-          const agentEntry = phaseSnap?.phases
-            .filter((p) => p.status === "running")
-            .flatMap((p) => p.agents)
-            .find((_, idx) => idx === phaseCursor);
-          if (agentEntry !== undefined) {
-            openedAgentId = agentEntry.agentId;
-            agentLogTail = [];
-            view = "agent-detail";
-            banner = undefined;
-            requestRender();
-          }
-        }
-        return;
-      case "pause": {
-        if (!action.runId) return;
-        const run = opts.registry.getRun(action.runId);
-        if (run !== undefined) {
-          run.pause("user-overlay").catch(() => undefined);
-        }
-        return;
-      }
-      case "resume": {
-        if (!action.runId) return;
-        const run = opts.registry.getRun(action.runId);
-        if (run !== undefined) {
-          run.resumePaused("user-overlay").catch(() => undefined);
-        }
-        return;
-      }
-      case "stop": {
-        if (!action.runId) return;
-        runKill(opts.pi, opts.registry, action.runId, "user-overlay");
-        return;
-      }
-      case "stop-agent": {
-        if (!action.runId || !action.agentId) return;
-        opts.onStopAgent?.(action.runId, action.agentId);
-        setBanner(`stopping agent ${action.agentId.slice(0, 12)}…`);
-        requestRender();
-        return;
-      }
-      case "restart-agent": {
-        if (!action.runId || !action.agentId) return;
-        opts.onRestartAgent?.(action.runId, action.agentId);
-        setBanner(`restarting agent ${action.agentId.slice(0, 12)}…`);
-        requestRender();
-        return;
-      }
-      case "restart-requested":
-        // Slice 14: emit the appendEntry stub for cross-process awareness
-        // AND fire the on-restart callback so the host can start a fresh run.
-        if (action.runId) {
-          if (typeof opts.pi.appendEntry === "function") {
-            try {
-              opts.pi.appendEntry("pi-workflows.overlay.restart-requested", {
-                runId: action.runId,
-              });
-            } catch {
-              /* swallow */
-            }
-          }
-          if (opts.onRestartRequested !== undefined) {
-            const runIdCopy = action.runId;
-            Promise.resolve(opts.onRestartRequested(runIdCopy)).catch(() => undefined);
-            setBanner(`restarting run ${shortenId(runIdCopy)}…`);
-            requestRender();
-          }
-        }
-        return;
-      case "save-script-requested":
-        if (action.runId && opts.onSaveScriptRequested !== undefined) {
-          const runIdCopy = action.runId;
-          Promise.resolve(opts.onSaveScriptRequested(runIdCopy)).catch(
-            () => undefined,
-          );
-          setBanner(`saving script for run ${shortenId(runIdCopy)}…`);
-          requestRender();
-        } else if (action.runId) {
-          // No callback wired — surface a clear, time-limited message
-          // rather than a stub literal. Production callers always wire
-          // `onSaveScriptRequested` (see workflowCmd.ts).
-          setBanner("save-script: no handler wired");
-          requestRender();
-        }
-        return;
-      case "visualize-requested":
-        if (action.runId && opts.onVisualizeRequested !== undefined) {
-          const runIdCopy = action.runId;
-          setBanner(`rendering DAG for run ${shortenId(runIdCopy)}…`);
-          requestRender();
-          Promise.resolve(opts.onVisualizeRequested(runIdCopy))
-            .then((target) => {
-              if (typeof target === "string" && target.length > 0) {
-                // Long banner TTL so the user has time to copy the path.
-                setBanner(`viz → ${target}`, 8000);
-                requestRender();
-              }
-            })
-            .catch((err: unknown) => {
-              const msg = err instanceof Error ? err.message : String(err);
-              setBanner(`viz failed: ${msg}`);
-              requestRender();
-            });
-        } else if (action.runId) {
-          setBanner("viz: no handler wired");
-          requestRender();
-        }
-        return;
-      case "open-gc-dialog":
-        if (typeof opts.pi.appendEntry === "function") {
-          try {
-            opts.pi.appendEntry("pi-workflows.overlay.gc-requested", {});
-          } catch {
-            /* swallow */
-          }
-        }
-        // Slice 15: actually load candidates and show the dialog.
-        if (!gcBusy) {
-          gcBusy = true;
-          // BUG-121: query live registry instead of stale lastSnapshot so
-          // runs started after the last debounce cycle are protected.
-          const activeIds = new Set(
-            opts.registry.listSummaries()
-              .filter((s) => s.state === "running" || s.state === "paused")
-              .map((s) => s.runId),
-          );
-          loadGcCandidates({
-            ...(opts.gcCutoffDays !== undefined ? { cutoffDays: opts.gcCutoffDays } : {}),
-            ...(opts.gcRunsRootOverride !== undefined ? { runsRootOverride: opts.gcRunsRootOverride } : {}),
-            activeRunIds: activeIds,
-          })
-            .then((result) => {
-              gcDialogState = {
-                candidates: result.candidates,
-                skippedCount: result.skipped.length,
-                totalScanned: result.scanned,
-                cutoffDays: result.cutoffDays,
-                confirming: false,
-              };
-              requestRender();
-            })
-            .catch(() => {
-              setBanner("gc: error loading candidates");
-              requestRender();
-            })
-            .finally(() => {
-              gcBusy = false;
-            });
-        }
-        return;
-      case "gc-apply":
-        if (gcDialogState !== null && !gcBusy) {
-          if (!gcDialogState.confirming) {
-            gcDialogState = { ...gcDialogState, confirming: true };
-            requestRender();
-          } else {
-            gcBusy = true;
-            const toDelete = [...gcDialogState.candidates];
-            // BUG-036: re-query active run IDs fresh at confirmation time
-            // so any run resumed/retried since dialog-open is protected.
-            const freshActiveIds = new Set(
-              opts.registry.listSummaries()
-                .filter((s) => s.state === "running" || s.state === "paused")
-                .map((s) => s.runId),
-            );
-            applyGc(toDelete, {
-              ...(opts.gcCutoffDays !== undefined ? { cutoffDays: opts.gcCutoffDays } : {}),
-              ...(opts.gcRunsRootOverride !== undefined ? { runsRootOverride: opts.gcRunsRootOverride } : {}),
-              activeRunIds: freshActiveIds,
-            })
-              .then(({ deleted, errors }) => {
-                gcDialogState = {
-                  candidates: [],
-                  skippedCount: gcDialogState?.skippedCount ?? 0,
-                  totalScanned: gcDialogState?.totalScanned ?? 0,
-                  cutoffDays: gcDialogState?.cutoffDays ?? 30,
-                  confirming: false,
-                  done: { deleted: deleted.length, errors: errors.length },
-                };
-                requestRender();
-              })
-              .catch(() => {
-                setBanner("gc: delete failed");
-                gcDialogState = null;
-                requestRender();
-              })
-              .finally(() => {
-                gcBusy = false;
-              });
-          }
-        }
-        return;
-      case "gc-cancel":
-        gcDialogState = null;
-        requestRender();
-        return;
-      case "open-transcript":
-        // The overlay computes the transcript path and delegates the
-        // actual open to the host-supplied `onOpenTranscript` callback
-        // (production wiring: `openTranscriptInEditor` in workflowCmd.ts).
-        // The callback returns the banner text to surface; if it isn't
-        // wired we still show the path so the user can `tail -f` it.
-        if (action.runId !== undefined && openedRunId !== undefined && openedAgentId !== undefined) {
-          const summary = opts.registry.getSummary(openedRunId);
-          const path = agentTranscriptPath(summary?.runDir, openedAgentId);
-          if (path === undefined) {
-            setBanner("transcript: path unknown");
-          } else if (opts.onOpenTranscript !== undefined) {
-            const msg = opts.onOpenTranscript(path);
-            setBanner(msg ?? `transcript: ${path}`);
-          } else {
-            setBanner(`transcript: ${path}`);
-          }
-          requestRender();
-        }
-        return;
-      case "copy-prompt":
-        // The overlay extracts the prompt text from the phase snapshot
-        // and delegates the clipboard write to `onCopyPrompt` (production
-        // wiring: `copyToClipboard` in workflowCmd.ts). No more fake
-        // "copied:" stub — the callback's return value tells us whether
-        // the copy actually succeeded.
-        if (openedRunId !== undefined && openedAgentId !== undefined) {
-          const phaseSnap = opts.phaseRegistry.getRunSnapshot(openedRunId);
-          const agent = phaseSnap?.phases
-            .flatMap((p) => p.agents)
-            .find((a) => a.agentId === openedAgentId);
-          const promptText = agent?.summary;
-          if (promptText === undefined || promptText.length === 0) {
-            setBanner("no prompt to copy");
-          } else if (opts.onCopyPrompt !== undefined) {
-            const msg = opts.onCopyPrompt(promptText);
-            setBanner(msg ?? "clipboard: no handler wired");
-          } else {
-            setBanner("clipboard: no handler wired");
-          }
-          requestRender();
-        }
-        return;
-      case "interrupt-answer-requested": {
-        // ZONE_HITL TUI: dispatch the oldest pending interrupt for the
-        // run to the host callback. The callback owns the actual
-        // ctx.ui.input/select prompting; the overlay just hands off
-        // the payload + runId. We pop the entry optimistically here
-        // so a second `i` press doesn't try the same one while the
-        // modal is open.
-        //
-        // Slice 15 (I1): `i` also re-opens a deferred gate prompt
-        // (_gatePromptState.deferred === true). Re-opening just
-        // clears the deferred flag and re-renders; the modal
-        // intercept handler picks up subsequent y/n/Esc presses.
-        //
-        // Slice 16 (I2): when the host returns `{ outcome: "snoozed" }`
-        // — e.g. the operator dismissed the modal with `Esc`, no
-        // `default` was available, no `respondInterrupt` was called —
-        // we **restore** the payload to the head of the FIFO so the
-        // run isn't wedged in a dead state. A subsequent `i` press
-        // re-runs the same prompt; `x` still stops the run.
-        if (!action.runId) return;
-        // Slice 15 (I1): re-open a deferred gate prompt for this run.
-        if (
-          _gatePromptState !== null &&
-          _gatePromptState.deferred === true &&
-          _gatePromptState.runId === action.runId
-        ) {
-          _gatePromptState = { ..._gatePromptState, deferred: false };
-          requestRender();
-          return;
-        }
-        const list = _pendingInterrupts.get(action.runId);
-        const payload = list && list.length > 0 ? list[0] : undefined;
-        if (payload === undefined) {
-          setBanner("no pending interrupt to answer");
-          requestRender();
-          return;
-        }
-        if (opts.onInterruptAnswerRequested === undefined) {
-          setBanner("interrupt: no handler wired");
-          requestRender();
-          return;
-        }
-        const runIdCopy = action.runId;
-        (list as NonNullable<typeof list>).splice(0, 1); // pop optimistically so a second `i` press skips this entry
-        setBanner(
-          `answering interrupt ${payload.key} on ${shortenId(runIdCopy)}\u2026`,
-        );
-        requestRender();
-        const restorePayload = (): void => {
-          // Re-attach to the head of the FIFO. Use the live list
-          // reference if it still exists; otherwise re-create.
-          const cur = _pendingInterrupts.get(runIdCopy);
-          if (cur === undefined) {
-            _pendingInterrupts.set(runIdCopy, [payload]);
-          } else if (!cur.some((e) => e.key === payload.key)) {
-            // Idempotent restore: the runtime may have re-emitted the
-            // request via `interrupt.requested` while we were prompting;
-            // dedupe on key to avoid double-stacking the same entry.
-            cur.unshift(payload);
-          }
-          requestRender();
-        };
-        Promise.resolve(
-          opts.onInterruptAnswerRequested(runIdCopy, payload),
-        )
-          .then((result) => {
-            // Slice 16 (I2): support the `{ outcome, banner }` shape.
-            // Bare string or undefined preserves legacy semantics
-            // (treated as resolved — no restore).
-            let outcome: "resolved" | "snoozed" | "cancelled" = "resolved";
-            let bannerText: string | undefined;
-            if (typeof result === "string") {
-              bannerText = result;
-            } else if (result !== undefined && result !== null) {
-              outcome = result.outcome ?? "resolved";
-              bannerText = result.banner;
-            }
-            if (outcome === "snoozed" || outcome === "cancelled") {
-              restorePayload();
-            }
-            if (typeof bannerText === "string" && bannerText.length > 0) {
-              setBanner(bannerText);
-              requestRender();
-            }
-          })
-          .catch((err: unknown) => {
-            // Slice 16 (I2): a thrown prompt is the same dead-state
-            // hazard as a dismissed prompt — restore the payload so
-            // the run can still be answered.
-            restorePayload();
-            const msg = err instanceof Error ? err.message : String(err);
-            setBanner(`interrupt failed: ${msg} — [i] retry, [x] stop`);
-            requestRender();
-          });
-        return;
-      }
-      case "fork-requested": {
-        // ZONE_TIMETRAVEL TUI: hand off to the host's fork dialog
-        // (workflowCmd.ts wires the multi-step prompt: select phase,
-        // input overrides JSON, call forkFromCheckpoint). The
-        // callback returns a banner string with the new runId on
-        // success or an error message on failure.
-        if (!action.runId) return;
-        if (opts.onForkRequested === undefined) {
-          setBanner("fork: no handler wired");
-          requestRender();
-          return;
-        }
-        const runIdCopy = action.runId;
-        setBanner(`opening fork dialog for ${shortenId(runIdCopy)}…`);
-        requestRender();
-        Promise.resolve(opts.onForkRequested(runIdCopy))
-          .then((banner) => {
-            if (typeof banner === "string" && banner.length > 0) {
-              // Forks may produce long banners ("forked: wf-xxxxxxxx");
-              // give the user time to read.
-              setBanner(banner, 8000);
-              requestRender();
-            }
-          })
-          .catch((err: unknown) => {
-            const msg = err instanceof Error ? err.message : String(err);
-            setBanner(`fork failed: ${msg}`);
-            requestRender();
-          });
-        return;
-      }
-      case "noop":
-        // Intentional — disabled hotkey or no-selection. The help
-        // line already conveys the disabled state visually.
-        // Exception: remote runs silently reject r/s — show a toast
-        // so the user knows why nothing happened.
-        if (action.reason === "disabled-for-remote") {
-          setBanner("operation requires a local run (r/s unavailable on remote sessions)");
-          requestRender();
-        }
-        // Slice 11 (VQ-2): first `g` of a `gg` chord — record state so
-        // the next `g` within 300ms emits navigate-first. The caller
-        // path (handleKey) already cleared pendingG before dispatch;
-        // we set it here only for the pending-g reason.
-        if (action.reason === "pending-g") {
-          pendingG = true;
-          pendingGAt = Date.now();
-        }
-        return;
+  const clearBanner = (): void => {
+    banner = undefined;
+    if (bannerTimer !== null) {
+      clearTimeout(bannerTimer);
+      bannerTimer = null;
     }
   };
 
-  const handleKey = (key: string): void => {
-    // Slice 15: GC dialog intercepts keys.
-    if (gcDialogState !== null) {
-      const k = key.toLowerCase();
-      if (gcDialogState.done !== undefined) {
-        // Done screen: any key closes it (BUG-076: must be checked before y/Enter).
-        handleAction({ kind: "gc-cancel" });
-      } else if (k === "y" || key === "Enter" || key === "RETURN" || key === "\r" || key === "\n") {
-        handleAction({ kind: "gc-apply" });
-      } else if (k === "n" || key === "Escape" || key === "ESC" || key === "\u001b") {
-        handleAction({ kind: "gc-cancel" });
-      }
-      return;
-    }
-    // P2-S7 — filter input mode intercepts all keys; route directly
-    // to the dispatcher with view='filter'.
-    if (view === "filter") {
-      const action = dispatchHotkey({ key, view: "filter" });
-      handleAction(action);
-      return;
-    }
-    // gap/ctx-gate: gate prompt intercepts keys when a gate is pending
-    // AND the prompt is currently visible. When the operator has
-    // deferred (Esc) the prompt, fall through so they can navigate +
-    // press `i` to re-open or `x` to stop the run (Slice 15 / I1).
-    if (_gatePromptState !== null && _gatePromptState.deferred !== true) {
-      const k = key.toLowerCase();
-      const g = _gatePromptState;
-      const run = opts.registry.getRun(g.runId);
-      if (k === "y" || key === "Enter" || key === "RETURN" || key === "\r" || key === "\n") {
-        // Y or Enter → approve (Enter uses defaultAnswer).
-        const approved = k === "n" ? false : (k === "y" ? true : g.defaultAnswer);
-        _gatePromptState = null;
-        run?.respondGate(approved);
-      } else if (k === "n") {
-        // Slice 15 (I1): only `n` is an explicit deny; `Esc` no
-        // longer routes to deny — see the snooze branch below.
-        _gatePromptState = null;
-        run?.respondGate(false);
-      } else if (key === "Escape" || key === "ESC" || key === "\u001b") {
-        // Slice 15 (I1): Esc = snooze. Hide the modal but leave the
-        // gate unresolved. The persistent banner cues the operator
-        // to press `i` to re-open or `x` to stop. The workflow
-        // keeps blocking on `respondGate` until they decide.
-        _gatePromptState = { ...g, deferred: true };
-        setBanner(
-          "gate snoozed — [i] to re-open, [x] to stop run",
-          DEFAULT_BANNER_TTL_MS * 4,
-        );
-      }
-      requestRender();
-      return;
-    }
-    // Agent detail view.
-    if (view === "agent-detail" && openedRunId !== undefined) {
-      // Slice 11 (VQ-2): snapshot+clear chord state per keypress; the
-      // dispatcher consumes the snapshot and the noop handler re-arms
-      // pendingG when it sees reason=pending-g.
-      const wasPendingG = pendingG;
-      const wasPendingGAt = pendingGAt;
-      pendingG = false;
-      pendingGAt = 0;
-      const action = dispatchHotkey({
-        key,
-        view,
-        pendingG: wasPendingG,
-        pendingGAt: wasPendingGAt,
-      });
-      handleAction(action);
-      return;
-    }
-    if (view === "phase-view" && openedRunId !== undefined) {
-      const summary = opts.registry.getSummary(openedRunId);
-      const isRemote = !opts.registry.wasLocalRun(openedRunId);
-      // Find the agent under the phase cursor for per-agent actions.
-      const phaseSnapForKey = opts.phaseRegistry.getRunSnapshot(openedRunId);
-      const runningAgentRows = phaseSnapForKey?.phases
-        .filter((p) => p.status === "running")
-        .flatMap((p) => p.agents) ?? [];
-      const selectedAgent = runningAgentRows[phaseCursor];
-      // Slice 15 (I1): a deferred gate prompt also enables `i` (re-open).
-      const deferredGateForOpened =
-        _gatePromptState !== null &&
-        _gatePromptState.deferred === true &&
-        _gatePromptState.runId === openedRunId
-          ? 1
-          : 0;
-      const pendingCount =
-        (_pendingInterrupts.get(openedRunId)?.length ?? 0) +
-        deferredGateForOpened;
-      // Slice 11 (VQ-2): snapshot+clear chord state per keypress.
-      const wasPendingG = pendingG;
-      const wasPendingGAt = pendingGAt;
-      pendingG = false;
-      pendingGAt = 0;
-      const action = dispatchHotkey({
-        key,
-        view,
-        isRemote,
-        pendingInterruptCount: pendingCount,
-        pendingG: wasPendingG,
-        pendingGAt: wasPendingGAt,
-        ...(summary !== undefined
-          ? { runState: summary.state, runId: openedRunId }
-          : {}),
-        ...(selectedAgent !== undefined
-          ? { agentId: selectedAgent.agentId, agentState: selectedAgent.state }
-          : {}),
-      });
-      handleAction(action);
-      return;
-    }
-    const sorted = sortAndClamp(lastSnapshot);
-    const selected = sorted[cursor];
-    const isRemote =
-      selected !== undefined && !opts.registry.wasLocalRun(selected.runId);
-    // Slice 15 (I1): a deferred gate prompt also enables `i` (re-open).
-    const deferredGateForSelected =
-      selected !== undefined &&
-      _gatePromptState !== null &&
-      _gatePromptState.deferred === true &&
-      _gatePromptState.runId === selected.runId
-        ? 1
-        : 0;
-    const selectedPendingCount =
-      (selected !== undefined
-        ? _pendingInterrupts.get(selected.runId)?.length ?? 0
-        : 0) + deferredGateForSelected;
-    // Slice 11 (VQ-2): snapshot+clear chord state per keypress.
-    const wasPendingG = pendingG;
-    const wasPendingGAt = pendingGAt;
-    pendingG = false;
-    pendingGAt = 0;
-    const action = dispatchHotkey({
-      key,
-      view,
-      isRemote,
-      pendingInterruptCount: selectedPendingCount,
-      pendingG: wasPendingG,
-      pendingGAt: wasPendingGAt,
-      ...(selected !== undefined
-        ? { runState: selected.state, runId: selected.runId }
-        : {}),
-    });
-    handleAction(action);
+  const helpers: OverlayHelpers = {
+    requestRender,
+    setBanner,
+    clearBanner,
+    close,
+    liveBanner,
   };
+
+  const buildRender = (width?: number) => buildRender_ext(state, opts, helpers, width);
+
+  const handleKey = (key: string): void => handleKey_ext(key, state, opts, helpers);
 
   // Expose test handle.
   opts.onMounted?.({
@@ -1728,11 +626,11 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     handleKey,
     currentLines: () => buildRender().lines,
     currentSelection: () =>
-      sortAndClamp(lastSnapshot)[cursor]?.runId,
+      sortAndClamp(state.lastSnapshot)[state.cursor]?.runId,
   });
 
   // Initial render so `tui` has lines to draw.
-  void view; // mark used by closure
+  void state.view; // mark used by closure
 
   // Component contract per pi-tui's `Component` interface.
   const component: TuiComponentLike = {
@@ -1759,51 +657,3 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   return component;
 }
 
-function sortAndClamp(snap: ReadonlyArray<RunSummary>): RunSummary[] {
-  // Use the same ordering as runsList for cursor-index stability.
-  const view = renderRunsList(snap, { nowMs: 0 });
-  const ids = new Map(view.rows.map((r, i) => [r.runId, i] as const));
-  const sortedAll = [...snap].sort((a, b) => {
-    const ia = ids.get(a.runId);
-    const ib = ids.get(b.runId);
-    if (ia === undefined || ib === undefined) return 0;
-    return ia - ib;
-  });
-  return sortedAll;
-}
-
-function shortenId(runId: string): string {
-  return runId.length > 12 ? runId.slice(0, 12) : runId;
-}
-
-/**
- * **F2** — kill a run by id. Both `/workflows kill <id>` and the `x`
- * hotkey route through here. Idempotent at the Run-handle level (the
- * Run's `stop()` is itself safe to call twice). Always emits an
- * appendEntry so cross-process windows observe the kill request.
- */
-export function runKill(
-  pi: ExtensionAPI,
-  registry: ActiveRunsRegistry,
-  runId: string,
-  reason: string,
-): { found: boolean; emittedEntry: boolean } {
-  const run = registry.getRun(runId);
-  let emittedEntry = false;
-  if (typeof pi.appendEntry === "function") {
-    try {
-      pi.appendEntry("pi-workflows.run.kill-requested", { runId, reason });
-      emittedEntry = true;
-    } catch {
-      /* swallow */
-    }
-  }
-  if (run !== undefined) {
-    try {
-      run.stop(reason);
-    } catch {
-      /* swallow — Run.stop is idempotent */
-    }
-  }
-  return { found: run !== undefined, emittedEntry };
-}
