@@ -80,6 +80,25 @@ import { agentTranscriptPath } from "./transcriptOpen.js";
 let _overlayOpen = false;
 
 /**
+ * Slice 16 (I2) — module-scope HITL state that survives overlay
+ * close/reopen. The previous mount's per-run pending interrupts and
+ * any deferred gate prompt remain visible when the user re-opens
+ * `w`. Without this, closing the overlay would silently lose the
+ * “operator must answer” signal even though the run is still blocked.
+ *
+ * `__resetOverlayOpenForTest()` clears these too so per-test state
+ * doesn't leak through the suite.
+ *
+ * Events that fire between overlay close and re-open are still
+ * missed (the appendEntry listener is per-mount); recovering those
+ * would require a ledger replay on mount and is out of scope here.
+ */
+const _pendingInterrupts: Map<string, PendingInterruptPayload[]> = new Map();
+let _gatePromptState:
+  | { runId: string; message: string; defaultAnswer: boolean; deferred?: boolean }
+  | null = null;
+
+/**
  * Default banner TTL — 4s feels long enough to read a one-line toast
  * but short enough that a stale banner doesn't read as a stuck UI.
  * Per gap analysis 2026-05-31 ("Banner state has no TTL").
@@ -89,6 +108,8 @@ const DEFAULT_BANNER_TTL_MS = 4000;
 /** Test-only seam — reset the open flag between tests. */
 export function __resetOverlayOpenForTest(): void {
   _overlayOpen = false;
+  _pendingInterrupts.clear();
+  _gatePromptState = null;
 }
 
 /** Test/inspection seam — read the open flag without mutating. */
@@ -186,7 +207,9 @@ export interface MountOverlayOpts {
   readonly onInterruptAnswerRequested?: (
     runId: string,
     payload: PendingInterruptPayload,
-  ) => Promise<string | undefined> | string | undefined;
+  ) =>
+    | Promise<InterruptAnswerResult>
+    | InterruptAnswerResult;
   /**
    * ZONE_TIMETRAVEL TUI surface — hotkey `f` (fork from checkpoint)
    * on runs-list. Receives the parent runId. The host is responsible
@@ -233,6 +256,27 @@ export interface PendingInterruptPayload {
   readonly choices?: ReadonlyArray<string>;
   readonly default?: unknown;
 }
+
+/**
+ * Slice 15/16 (I1+I2) — result of an interrupt-answer prompt
+ * dispatched by the overlay to the host (`workflowCmd.ts`).
+ *
+ * The overlay POPs the pending payload from its FIFO before invoking
+ * the host callback (so a second `i` press doesn't re-prompt the same
+ * entry while the modal is open). When the host can't post an answer
+ * (operator dismissed the prompt with `Esc`, or the prompt threw),
+ * the host returns `{ outcome: "snoozed" }` so the overlay can
+ * **restore** the payload to the head of the FIFO and the run stays
+ * answerable. Returning a bare string or `undefined` preserves the
+ * legacy contract (treated as a resolved outcome — no restore).
+ */
+export type InterruptAnswerResult =
+  | string
+  | undefined
+  | {
+      readonly banner?: string;
+      readonly outcome?: "resolved" | "snoozed" | "cancelled";
+    };
 
 /** Test-only handle exposing internal overlay state for assertion. */
 export interface OverlayHandleForTest {
@@ -536,7 +580,9 @@ interface OverlayComponentOpts {
     | ((
         runId: string,
         payload: PendingInterruptPayload,
-      ) => Promise<string | undefined> | string | undefined)
+      ) =>
+        | Promise<InterruptAnswerResult>
+        | InterruptAnswerResult)
     | undefined;
   readonly onForkRequested?:
     | ((runId: string) => Promise<string | undefined> | string | undefined)
@@ -594,13 +640,12 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
   };
   let lastSnapshot: ReadonlyArray<RunSummary> = opts.registry.listSummaries();
   // gap/ctx-gate: pending gate prompt state.
-  let gatePromptState: { runId: string; message: string; defaultAnswer: boolean } | null = null;
-  // ZONE_HITL TUI: per-run FIFO of pending interrupts. Driven by
-  // intercepted appendEntry events (interrupt.requested / .resolved
-  // emitted by runCtx::interruptFn). Cleared per (runId, key) on
-  // resolution. Drives the help-line `i` enable bit and the answer
-  // dispatch payload.
-  const pendingInterrupts: Map<string, PendingInterruptPayload[]> = new Map();
+  // Slice 16 (I2): pending HITL state lives at module scope so it
+  // survives overlay close/reopen — see top of file. The local
+  // alias keeps the function-body diff small. The deferred-gate
+  // hide+banner+`i`-to-reopen flow lives below.
+  // _gatePromptState and _pendingInterrupts are imported from the
+  // module-level scope above.
 
   const requestRender = () => {
     if (typeof opts.tui.requestRender === "function") opts.tui.requestRender();
@@ -676,7 +721,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           data !== null && typeof data === "object") {
           const d = data as Record<string, unknown>;
           if (typeof d.runId === "string" && typeof d.message === "string") {
-            gatePromptState = {
+            _gatePromptState = {
               runId: d.runId,
               message: d.message,
               defaultAnswer: d.defaultAnswer !== false,
@@ -685,7 +730,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           }
         }
         if (customType === "pi-workflows.gate.resolved") {
-          gatePromptState = null;
+          _gatePromptState = null;
           requestRender();
         }
         // ZONE_HITL TUI: track pending ctx.interrupt() requests per run.
@@ -696,7 +741,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         ) {
           const d = data as Record<string, unknown>;
           if (typeof d.runId === "string" && typeof d.key === "string") {
-            const list = pendingInterrupts.get(d.runId) ?? [];
+            const list = _pendingInterrupts.get(d.runId) ?? [];
             const payload: PendingInterruptPayload = {
               key: d.key,
               question:
@@ -709,7 +754,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
             // Idempotent: dedupe on key (re-emits during resume don't double-up).
             if (!list.some((e) => e.key === payload.key)) {
               list.push(payload);
-              pendingInterrupts.set(d.runId, list);
+              _pendingInterrupts.set(d.runId, list);
               requestRender();
             }
           }
@@ -721,13 +766,13 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         ) {
           const d = data as Record<string, unknown>;
           if (typeof d.runId === "string" && typeof d.key === "string") {
-            const list = pendingInterrupts.get(d.runId);
+            const list = _pendingInterrupts.get(d.runId);
             if (list !== undefined) {
               const idx = list.findIndex((e) => e.key === d.key);
               if (idx >= 0) {
                 list.splice(idx, 1);
-                if (list.length === 0) pendingInterrupts.delete(d.runId);
-                else pendingInterrupts.set(d.runId, list);
+                if (list.length === 0) _pendingInterrupts.delete(d.runId);
+                else _pendingInterrupts.set(d.runId, list);
                 requestRender();
               }
             }
@@ -778,16 +823,20 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     }
 
     // gap/ctx-gate: gate prompt takes priority over other views.
-    if (gatePromptState !== null) {
-      const dflt = gatePromptState.defaultAnswer ? "Y/n" : "y/N";
+    // Slice 15 (I1): when the prompt was deferred via Esc, yield to
+    // the underlying view so the user can navigate / press `x` to
+    // stop / press `i` to re-open. The persistent banner reminds
+    // them the gate is still pending.
+    if (_gatePromptState !== null && _gatePromptState.deferred !== true) {
+      const dflt = _gatePromptState.defaultAnswer ? "Y/n" : "y/N";
       return {
         lines: [
           "",
           "  ⏸  Workflow paused — human approval required",
           "",
-          `  ${gatePromptState.message}`,
+          `  ${_gatePromptState.message}`,
           "",
-          `  [y] Approve    [n] Deny    (default: ${dflt})`,
+          `  [y] Approve    [n] Deny    [Esc] later    (default: ${dflt})`,
           "",
         ],
       };
@@ -848,8 +897,17 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
           .filter((p) => p.status === "running")
           .flatMap((p) => p.agents) ?? [];
         const selectedAgentState = runningAgentsForHelp[phaseCursor]?.state;
+        // Slice 15 (I1): include a deferred gate in the `i`-enable
+        // count so the help line shows `[i] answer prompt` when only
+        // a snoozed gate is outstanding (no pending interrupt list).
+        const deferredGateHere =
+          _gatePromptState !== null &&
+          _gatePromptState.deferred === true &&
+          _gatePromptState.runId === openedRunId
+            ? 1
+            : 0;
         const phasePendingInterrupts =
-          pendingInterrupts.get(openedRunId)?.length ?? 0;
+          (_pendingInterrupts.get(openedRunId)?.length ?? 0) + deferredGateHere;
         const help = helpVisible
           ? helpForState(
               "phase-view",
@@ -881,10 +939,18 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     }
     const sorted = sortAndClamp(lastSnapshot);
     const selected = sorted[cursor];
-    const selectedPendingInterrupts =
-      selected !== undefined
-        ? pendingInterrupts.get(selected.runId)?.length ?? 0
+    // Slice 15 (I1): include a deferred gate in the `i`-enable count.
+    const deferredGateForListSelected =
+      selected !== undefined &&
+      _gatePromptState !== null &&
+      _gatePromptState.deferred === true &&
+      _gatePromptState.runId === selected.runId
+        ? 1
         : 0;
+    const selectedPendingInterrupts =
+      (selected !== undefined
+        ? _pendingInterrupts.get(selected.runId)?.length ?? 0
+        : 0) + deferredGateForListSelected;
     const help = helpVisible
       ? helpForState(view, selected?.state, undefined, selectedPendingInterrupts)
       : [];
@@ -1295,13 +1361,32 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         // run to the host callback. The callback owns the actual
         // ctx.ui.input/select prompting; the overlay just hands off
         // the payload + runId. We pop the entry optimistically here
-        // so a second `i` press doesn't try the same one. If the
-        // callback fails, the resolve event from the runtime would
-        // re-deliver — but more likely a callback failure means the
-        // operator dismissed the prompt; the runtime is still blocked
-        // until the next prompt or until the run is killed.
+        // so a second `i` press doesn't try the same one while the
+        // modal is open.
+        //
+        // Slice 15 (I1): `i` also re-opens a deferred gate prompt
+        // (_gatePromptState.deferred === true). Re-opening just
+        // clears the deferred flag and re-renders; the modal
+        // intercept handler picks up subsequent y/n/Esc presses.
+        //
+        // Slice 16 (I2): when the host returns `{ outcome: "snoozed" }`
+        // — e.g. the operator dismissed the modal with `Esc`, no
+        // `default` was available, no `respondInterrupt` was called —
+        // we **restore** the payload to the head of the FIFO so the
+        // run isn't wedged in a dead state. A subsequent `i` press
+        // re-runs the same prompt; `x` still stops the run.
         if (!action.runId) return;
-        const list = pendingInterrupts.get(action.runId);
+        // Slice 15 (I1): re-open a deferred gate prompt for this run.
+        if (
+          _gatePromptState !== null &&
+          _gatePromptState.deferred === true &&
+          _gatePromptState.runId === action.runId
+        ) {
+          _gatePromptState = { ..._gatePromptState, deferred: false };
+          requestRender();
+          return;
+        }
+        const list = _pendingInterrupts.get(action.runId);
         const payload = list && list.length > 0 ? list[0] : undefined;
         if (payload === undefined) {
           setBanner("no pending interrupt to answer");
@@ -1316,22 +1401,53 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         const runIdCopy = action.runId;
         (list as NonNullable<typeof list>).splice(0, 1); // pop optimistically so a second `i` press skips this entry
         setBanner(
-          `answering interrupt ${payload.key} on ${shortenId(runIdCopy)}…`,
+          `answering interrupt ${payload.key} on ${shortenId(runIdCopy)}\u2026`,
         );
         requestRender();
+        const restorePayload = (): void => {
+          // Re-attach to the head of the FIFO. Use the live list
+          // reference if it still exists; otherwise re-create.
+          const cur = _pendingInterrupts.get(runIdCopy);
+          if (cur === undefined) {
+            _pendingInterrupts.set(runIdCopy, [payload]);
+          } else if (!cur.some((e) => e.key === payload.key)) {
+            // Idempotent restore: the runtime may have re-emitted the
+            // request via `interrupt.requested` while we were prompting;
+            // dedupe on key to avoid double-stacking the same entry.
+            cur.unshift(payload);
+          }
+          requestRender();
+        };
         Promise.resolve(
           opts.onInterruptAnswerRequested(runIdCopy, payload),
         )
-          .then((banner) => {
-            // Banner from callback (e.g. "resolved" / "cancelled").
-            if (typeof banner === "string" && banner.length > 0) {
-              setBanner(banner);
+          .then((result) => {
+            // Slice 16 (I2): support the `{ outcome, banner }` shape.
+            // Bare string or undefined preserves legacy semantics
+            // (treated as resolved — no restore).
+            let outcome: "resolved" | "snoozed" | "cancelled" = "resolved";
+            let bannerText: string | undefined;
+            if (typeof result === "string") {
+              bannerText = result;
+            } else if (result !== undefined && result !== null) {
+              outcome = result.outcome ?? "resolved";
+              bannerText = result.banner;
+            }
+            if (outcome === "snoozed" || outcome === "cancelled") {
+              restorePayload();
+            }
+            if (typeof bannerText === "string" && bannerText.length > 0) {
+              setBanner(bannerText);
               requestRender();
             }
           })
           .catch((err: unknown) => {
+            // Slice 16 (I2): a thrown prompt is the same dead-state
+            // hazard as a dismissed prompt — restore the payload so
+            // the run can still be answered.
+            restorePayload();
             const msg = err instanceof Error ? err.message : String(err);
-            setBanner(`interrupt failed: ${msg}`);
+            setBanner(`interrupt failed: ${msg} — [i] retry, [x] stop`);
             requestRender();
           });
         return;
@@ -1402,20 +1518,34 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       }
       return;
     }
-    // gap/ctx-gate: gate prompt intercepts keys when a gate is pending.
-    if (gatePromptState !== null) {
+    // gap/ctx-gate: gate prompt intercepts keys when a gate is pending
+    // AND the prompt is currently visible. When the operator has
+    // deferred (Esc) the prompt, fall through so they can navigate +
+    // press `i` to re-open or `x` to stop the run (Slice 15 / I1).
+    if (_gatePromptState !== null && _gatePromptState.deferred !== true) {
       const k = key.toLowerCase();
-      const g = gatePromptState;
+      const g = _gatePromptState;
       const run = opts.registry.getRun(g.runId);
       if (k === "y" || key === "Enter" || key === "RETURN" || key === "\r" || key === "\n") {
         // Y or Enter → approve (Enter uses defaultAnswer).
         const approved = k === "n" ? false : (k === "y" ? true : g.defaultAnswer);
-        gatePromptState = null;
+        _gatePromptState = null;
         run?.respondGate(approved);
-      } else if (k === "n" || key === "Escape" || key === "ESC" || key === "\u001b") {
-        // N or Esc → deny.
-        gatePromptState = null;
+      } else if (k === "n") {
+        // Slice 15 (I1): only `n` is an explicit deny; `Esc` no
+        // longer routes to deny — see the snooze branch below.
+        _gatePromptState = null;
         run?.respondGate(false);
+      } else if (key === "Escape" || key === "ESC" || key === "\u001b") {
+        // Slice 15 (I1): Esc = snooze. Hide the modal but leave the
+        // gate unresolved. The persistent banner cues the operator
+        // to press `i` to re-open or `x` to stop. The workflow
+        // keeps blocking on `respondGate` until they decide.
+        _gatePromptState = { ...g, deferred: true };
+        setBanner(
+          "gate snoozed — [i] to re-open, [x] to stop run",
+          DEFAULT_BANNER_TTL_MS * 4,
+        );
       }
       requestRender();
       return;
@@ -1447,7 +1577,16 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         .filter((p) => p.status === "running")
         .flatMap((p) => p.agents) ?? [];
       const selectedAgent = runningAgentRows[phaseCursor];
-      const pendingCount = pendingInterrupts.get(openedRunId)?.length ?? 0;
+      // Slice 15 (I1): a deferred gate prompt also enables `i` (re-open).
+      const deferredGateForOpened =
+        _gatePromptState !== null &&
+        _gatePromptState.deferred === true &&
+        _gatePromptState.runId === openedRunId
+          ? 1
+          : 0;
+      const pendingCount =
+        (_pendingInterrupts.get(openedRunId)?.length ?? 0) +
+        deferredGateForOpened;
       // Slice 11 (VQ-2): snapshot+clear chord state per keypress.
       const wasPendingG = pendingG;
       const wasPendingGAt = pendingGAt;
@@ -1474,10 +1613,18 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
     const selected = sorted[cursor];
     const isRemote =
       selected !== undefined && !opts.registry.wasLocalRun(selected.runId);
-    const selectedPendingCount =
-      selected !== undefined
-        ? pendingInterrupts.get(selected.runId)?.length ?? 0
+    // Slice 15 (I1): a deferred gate prompt also enables `i` (re-open).
+    const deferredGateForSelected =
+      selected !== undefined &&
+      _gatePromptState !== null &&
+      _gatePromptState.deferred === true &&
+      _gatePromptState.runId === selected.runId
+        ? 1
         : 0;
+    const selectedPendingCount =
+      (selected !== undefined
+        ? _pendingInterrupts.get(selected.runId)?.length ?? 0
+        : 0) + deferredGateForSelected;
     // Slice 11 (VQ-2): snapshot+clear chord state per keypress.
     const wasPendingG = pendingG;
     const wasPendingGAt = pendingGAt;

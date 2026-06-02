@@ -60,6 +60,14 @@ export type HotkeyActionKind =
   | "save-script-requested"
   | "visualize-requested"
   | "interrupt-answer-requested"
+  // Slice 15 (I1): explicit "defer / leave-pending" semantics for
+  // gate + interrupt prompts. Esc on a HITL prompt no longer denies;
+  // it snoozes — the run stays blocked, the overlay queue stays
+  // intact, and the user can re-open with `i` or stop with `x`.
+  // Overlay state machines emit this kind from the gate-prompt
+  // intercept (overlay.ts) and from the interrupt callback's snooze
+  // result path (workflowCmd.ts onInterruptAnswerRequested).
+  | "snooze"
   | "fork-requested"
   | "open-gc-dialog"
   | "open-transcript"
@@ -504,7 +512,7 @@ export function helpForState(
         dis("x", agentRunning ? "stop agent" : "stop", noSel || (!agentRunning && !isRunning && !isPaused)),
         dis("s", "save script", noSel || !isTerminal),
         dis("v", "viz", noSel),
-        dis("i", "answer prompt", noSel || (pendingInterruptCount ?? 0) === 0),
+        dis("i", "answer prompt (Esc=later)", noSel || (pendingInterruptCount ?? 0) === 0),
         enabled("Esc", "back"),
         enabled("?", "help"),
       ];
@@ -533,7 +541,7 @@ export function helpForState(
     dis("x", "stop", noSel || (!isRunning && !isPaused)),
     dis("r", "restart", noSel || !isTerminal),
     dis("v", "viz", noSel),
-    dis("i", "answer prompt", noSel || (pendingInterruptCount ?? 0) === 0),
+    dis("i", "answer prompt (Esc=later)", noSel || (pendingInterruptCount ?? 0) === 0),
     dis("f", "fork", noSel),
     // Slice 11 (VQ-2): G opens GC; gg jumps to first row.
     enabled("G", "gc"),

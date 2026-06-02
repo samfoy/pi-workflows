@@ -1006,7 +1006,7 @@ interface OverlayCallbacks {
   onInterruptAnswerRequested: (
     runId: string,
     payload: import("../runtime/overlay.js").PendingInterruptPayload,
-  ) => Promise<string | undefined>;
+  ) => Promise<import("../runtime/overlay.js").InterruptAnswerResult>;
   /** ZONE_TIMETRAVEL TUI: prompt for atPhase + overrides JSON, call forkFromCheckpoint. */
   onForkRequested: (runId: string) => Promise<string | undefined>;
 }
@@ -1304,14 +1304,50 @@ function buildOverlayCallbacks(
     onInterruptAnswerRequested: async (
       runId: string,
       payload: import("../runtime/overlay.js").PendingInterruptPayload,
-    ): Promise<string | undefined> => {
+    ): Promise<import("../runtime/overlay.js").InterruptAnswerResult> => {
+      // Slice 16 (I2) helper — if `payload.default` is set, resolve
+      // the interrupt with that default value (run proceeds, no
+      // dead state). Otherwise return a snoozed result so the
+      // overlay restores the payload to the FIFO head and the
+      // operator can re-prompt with `i` (or stop the run with `x`).
+      const applyDefaultOrSnooze = (
+        rid: string,
+        p: import("../runtime/overlay.js").PendingInterruptPayload,
+        snoozeBanner: string,
+      ): import("../runtime/overlay.js").InterruptAnswerResult => {
+        if (p.default !== undefined) {
+          const run = getActiveRuns().getRun(rid);
+          if (run !== undefined) {
+            const ok = run.respondInterrupt(p.default, p.key);
+            if (ok) {
+              return {
+                outcome: "resolved",
+                banner: `interrupt ${p.key} resolved with default value`,
+              };
+            }
+          }
+          // Run vanished or no matching pending entry — snooze rather
+          // than silently drop.
+        }
+        return { outcome: "snoozed", banner: snoozeBanner };
+      };
       // ZONE_HITL TUI: prompt the operator for an answer, then post it
       // to the run's pending interrupt resolver. Choices use
-      // ctx.ui.select; free-text uses ctx.ui.input. When the operator
-      // dismisses the prompt (Esc), we surface a banner and leave the
-      // run blocked — the next `i` will retry.
+      // ctx.ui.select; free-text uses ctx.ui.input.
+      //
+      // Slice 16 (I2) — cancel handling. If the operator dismisses
+      // the prompt (`ctx.ui.input/select` returns undefined) or it
+      // throws, we have two paths (see `applyDefaultOrSnooze`):
+      //
+      //   - `payload.default` is set     → resolve with the default;
+      //                                    run proceeds, no dead state.
+      //   - no default                   → return `{ outcome: "snoozed" }`
+      //                                    so the overlay restores the
+      //                                    payload to the FIFO head.
+      //                                    Run stays blocked, `i`
+      //                                    re-prompts, `x` stops.
       let answer: string | undefined;
-      const title = `Answer interrupt: ${payload.question}`;
+      const title = `Answer interrupt: ${payload.question}  (Esc = later)`;
       try {
         if (
           payload.choices !== undefined &&
@@ -1337,13 +1373,28 @@ function buildOverlayCallbacks(
           return "interrupt: ctx.ui.input/select unavailable";
         }
       } catch (err) {
+        // Slice 16 (I2): a thrown prompt is a dead-state hazard.
+        // Apply the default if available; otherwise snooze so the
+        // overlay can restore the payload and `i` re-prompts.
         const msg = err instanceof Error ? err.message : String(err);
-        return `interrupt prompt failed: ${msg}`;
+        const fallback = applyDefaultOrSnooze(
+          runId,
+          payload,
+          `interrupt prompt threw (${msg}) — [i] retry, [x] stop`,
+        );
+        return fallback;
       }
 
       if (answer === undefined) {
-        // Operator dismissed the prompt. Leave the run blocked.
-        return `interrupt ${payload.key} cancelled — press i to retry`;
+        // Slice 16 (I2): Operator dismissed the prompt with Esc.
+        // Apply the default if one is set; otherwise return a
+        // snoozed result so the overlay restores the payload to the
+        // FIFO head and the run stays answerable.
+        return applyDefaultOrSnooze(
+          runId,
+          payload,
+          `interrupt ${payload.key} snoozed — [i] to answer, [n] to deny, [x] to stop run`,
+        );
       }
 
       // Coerce to JSON if the answer parses; fall back to the raw
