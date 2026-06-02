@@ -55,6 +55,7 @@ import type {
 import {
   ActiveRunsRegistry,
   getActiveRuns,
+  hydrateRegistryFromDisk,
   type RunFeedEntry,
   type RunSummary,
 } from "./activeRuns.js";
@@ -212,6 +213,11 @@ export interface MountOverlayOpts {
     readonly isAlive?: (opts: { parentPid: number; parentBootId: string }) => boolean;
     readonly manifestPathFn?: (runId: string) => string;
   };
+  /**
+   * Async disk hydration root (B1). Defaults to
+   * `~/.pi/agent/workflows/runs`. Tests override with a tmp dir.
+   */
+  readonly runsDir?: string;
 }
 
 /**
@@ -410,6 +416,14 @@ export async function mountOverlay(
   // ledger mutation. Runs synchronously so the first render already
   // shows the corrected state.
   registry.sweepStalePids(opts.stalePidOpts);
+
+  // Async disk hydration (B1): populate the registry with recent runs
+  // from disk so the runs-list shows non-zero totals on first open
+  // even before any in-process Run has been registered. Fire-and-forget;
+  // hydration yields via setImmediate so it never blocks first paint.
+  hydrateRegistryFromDisk(registry, opts.runsDir).catch(() => {
+    /* silent — disk hydration is best-effort */
+  });
 
   if (_overlayOpen) {
     return { mounted: false, mode: "already-open" };

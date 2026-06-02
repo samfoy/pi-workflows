@@ -600,3 +600,128 @@ test("sweepStalePids: subscribers notified when summaries are coerced", async ()
   assert.equal(notified >= 1, true, "subscriber should have been called");
   unsub();
 });
+
+// ─── async disk hydration (B1) ───────────────────────────────────────
+
+import { mkdirSync } from "node:fs";
+import { hydrateRegistryFromDisk } from "../../src/runtime/activeRuns.js";
+
+function seedRunDir(
+  root: string,
+  runId: string,
+  manifest: Record<string, unknown>,
+  opts: { withResult?: boolean } = {},
+): string {
+  const dir = join(root, runId);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "manifest.json"), JSON.stringify(manifest));
+  if (opts.withResult) {
+    writeFileSync(join(dir, "result.json"), JSON.stringify({ ok: true }));
+  }
+  return dir;
+}
+
+test("hydrateRegistryFromDisk: populates registry with disk runs", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wf-hydrate-pop-"));
+  seedRunDir(root, "wf-aaaaaaaaaaa1", {
+    runId: "wf-aaaaaaaaaaa1",
+    workflowName: "demo",
+    startedAt: "2026-01-01T00:00:00.000Z",
+  }, { withResult: true });
+  const r = new ActiveRunsRegistry();
+  await hydrateRegistryFromDisk(r, root);
+  const s = r.getSummary("wf-aaaaaaaaaaa1");
+  assert.notEqual(s, undefined);
+  assert.equal(s?.workflowName, "demo");
+  assert.equal(s?.state, "done");
+});
+
+test("hydrateRegistryFromDisk: done/failed inferred by result.json presence", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wf-hydrate-state-"));
+  seedRunDir(root, "wf-doneaaaaaaaa", {
+    runId: "wf-doneaaaaaaaa",
+    workflowName: "ok",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    state: "done",
+  }, { withResult: true });
+  seedRunDir(root, "wf-failbaaaaaaaa", {
+    runId: "wf-failbaaaaaaaa",
+    workflowName: "broken",
+    startedAt: "2026-01-01T00:00:00.000Z",
+    state: "done", // claims done but no result.json
+  });
+  const r = new ActiveRunsRegistry();
+  await hydrateRegistryFromDisk(r, root);
+  assert.equal(r.getSummary("wf-doneaaaaaaaa")?.state, "done");
+  assert.equal(r.getSummary("wf-failbaaaaaaaa")?.state, "failed");
+});
+
+test("hydrateRegistryFromDisk: live runs take precedence over disk hydration", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wf-hydrate-live-"));
+  seedRunDir(root, "wf-liveaaaaaaaa", {
+    runId: "wf-liveaaaaaaaa",
+    workflowName: "from-disk",
+    startedAt: "2026-01-01T00:00:00.000Z",
+  }, { withResult: true });
+  const r = new ActiveRunsRegistry();
+  r.register("wf-liveaaaaaaaa", fakeRun({ runId: "wf-liveaaaaaaaa" }), {
+    workflowName: "from-live",
+    state: "running",
+  });
+  await hydrateRegistryFromDisk(r, root);
+  const s = r.getSummary("wf-liveaaaaaaaa");
+  assert.equal(s?.workflowName, "from-live", "live workflowName must not be overwritten");
+  assert.equal(s?.state, "running", "live state must not be overwritten");
+});
+
+test("hydrateRegistryFromDisk: missing manifest is skipped silently", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wf-hydrate-missing-"));
+  mkdirSync(join(root, "wf-empty00000000"), { recursive: true });
+  const r = new ActiveRunsRegistry();
+  await hydrateRegistryFromDisk(r, root);
+  assert.equal(r.getSummary("wf-empty00000000"), undefined);
+});
+
+test("hydrateRegistryFromDisk: non-existent runsDir handled gracefully", async () => {
+  const r = new ActiveRunsRegistry();
+  await hydrateRegistryFromDisk(
+    r,
+    join(tmpdir(), "wf-nonexistent-" + Date.now()),
+  );
+  assert.equal(r.total, 0);
+});
+
+test("hydrateRegistryFromDisk: batch notification fires once after hydration", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wf-hydrate-notify-"));
+  for (let i = 0; i < 5; i++) {
+    const id = `wf-notif${String(i).padStart(8, "a")}`;
+    seedRunDir(root, id, {
+      runId: id,
+      workflowName: "n",
+      startedAt: "2026-01-01T00:00:00.000Z",
+    }, { withResult: true });
+  }
+  const r = new ActiveRunsRegistry();
+  let notified = 0;
+  const unsub = r.subscribe(() => { notified++; });
+  await hydrateRegistryFromDisk(r, root);
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(notified, 1, "should fire exactly once after batch hydration");
+  unsub();
+});
+
+test("hydrateRegistryFromDisk: 200-run cap enforced", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wf-hydrate-cap-"));
+  for (let i = 0; i < 250; i++) {
+    const id = `wf-cap${String(i).padStart(9, "0")}`;
+    seedRunDir(root, id, {
+      runId: id,
+      workflowName: "c",
+      startedAt: "2026-01-01T00:00:00.000Z",
+    }, { withResult: true });
+  }
+  const r = new ActiveRunsRegistry();
+  await hydrateRegistryFromDisk(r, root);
+  assert.equal(r.total, 200, "must cap at 200 runs");
+});

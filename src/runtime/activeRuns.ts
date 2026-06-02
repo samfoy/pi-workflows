@@ -42,8 +42,9 @@
  * Refs: PRD §10.1, §10.5, plan.md §4 Slice 13, slice_13_concerns.
  */
 
-import { closeSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
-import { dirname } from "node:path";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, readdirSync, renameSync, statSync, writeSync } from "node:fs";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 import type { Run } from "../runManager.js";
 import type { RunOutcome } from "../types/internal.js";
 import { isParentAlive } from "./crashSweep.js";
@@ -528,6 +529,29 @@ export class ActiveRunsRegistry {
     } catch { /* best-effort — never disrupt a running workflow */ }
   }
 
+  /**
+   * Async disk hydration insert-if-absent helper (B1).
+   *
+   * Adds a {@link RunSummary} to the registry only when no entry for
+   * that runId exists yet — live runs always take precedence so this
+   * is safe to call after the registry has already been populated by
+   * fresh starts. Does NOT call `#notify`; batch hydration callers
+   * should invoke {@link flushNotify} once at the end.
+   */
+  hydrateRun(summary: RunSummary): void {
+    if (this.#summaries.has(summary.runId)) return;
+    this.#summaries.set(summary.runId, summary);
+  }
+
+  /**
+   * Fire the coalesced listener notification once after a batch of
+   * {@link hydrateRun} calls. Safe to call when no mutations occurred
+   * (notification still coalesces via `#notifyScheduled`).
+   */
+  flushNotify(): void {
+    this.#notify();
+  }
+
   /** Test seam: clear all state (handles + summaries + listeners). */
   reset(): void {
     this.#handles.clear();
@@ -548,6 +572,119 @@ export class ActiveRunsRegistry {
   get total(): number {
     return this.#summaries.size;
   }
+}
+
+/* ───────────────────────────────────────────────────────────────────
+ *  Async disk hydration (B1) — populate registry from on-disk runDirs
+ * ─────────────────────────────────────────────────────────────────── */
+
+/** Hard cap on the number of runs hydrated from disk per call. */
+const HYDRATION_CAP = 200;
+
+/**
+ * Hydrate the registry with summaries reconstructed from on-disk
+ * `manifest.json` files. Runs already present in the registry (live
+ * runs) are skipped; fresh entries are added via
+ * {@link ActiveRunsRegistry.hydrateRun}.
+ *
+ * The implementation yields once via `setImmediate` before touching
+ * the filesystem so the overlay's first paint is never blocked by
+ * disk latency. All errors are swallowed — a missing or malformed
+ * runs directory must never disrupt the overlay.
+ *
+ * State inference is conservative: if `result.json` is absent
+ * alongside the manifest, terminal non-done states are coerced to
+ * `"failed"` (a clean completion always writes `result.json`).
+ */
+export async function hydrateRegistryFromDisk(
+  registry: ActiveRunsRegistry,
+  runsDir?: string,
+): Promise<void> {
+  const root = runsDir ?? join(homedir(), ".pi/agent/workflows/runs");
+  // Yield first so the overlay can render before we hit the filesystem.
+  await new Promise<void>((r) => setImmediate(r));
+
+  if (!existsSync(root)) return;
+
+  let entries: string[];
+  try {
+    entries = readdirSync(root);
+  } catch {
+    return;
+  }
+
+  // Decorate each candidate with its mtime so we can sort newest-first
+  // and cap at HYDRATION_CAP.
+  const candidates: { name: string; path: string; mtimeMs: number }[] = [];
+  for (const name of entries) {
+    const p = join(root, name);
+    try {
+      const s = statSync(p);
+      if (!s.isDirectory()) continue;
+      candidates.push({ name, path: p, mtimeMs: s.mtimeMs });
+    } catch {
+      /* skip unreadable entries */
+    }
+  }
+  candidates.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const limited = candidates.slice(0, HYDRATION_CAP);
+
+  for (const c of limited) {
+    let manifest: Record<string, unknown>;
+    try {
+      const raw = readFileSync(join(c.path, "manifest.json"), "utf-8");
+      manifest = JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      continue; // missing / unreadable / malformed — skip silently
+    }
+
+    const runId =
+      typeof manifest.runId === "string" ? manifest.runId : c.name;
+    if (registry.getSummary(runId) !== undefined) continue; // live run wins
+
+    const workflowName =
+      typeof manifest.workflowName === "string"
+        ? manifest.workflowName
+        : "<unknown>";
+    const startedAt =
+      typeof manifest.startedAt === "string" ? manifest.startedAt : "";
+    const finishedAt =
+      typeof manifest.finishedAt === "string" ? manifest.finishedAt : undefined;
+    const parentRunId =
+      typeof manifest.parentRunId === "string"
+        ? manifest.parentRunId
+        : undefined;
+
+    // State inference: result.json present → done; otherwise failed.
+    const hasResult = existsSync(join(c.path, "result.json"));
+    const rawState =
+      typeof manifest.state === "string" ? manifest.state : undefined;
+    let state: RunSummaryState;
+    if (hasResult) {
+      state = "done";
+    } else if (rawState && isTerminalState(rawState as RunSummaryState)) {
+      // Manifest claims terminal but no result.json — coerce to failed.
+      state = "failed";
+    } else if (rawState === "done") {
+      // Defensive: claimed done without result.json → failed.
+      state = "failed";
+    } else {
+      state = "failed";
+    }
+
+    const summary: RunSummary = {
+      runId,
+      workflowName,
+      state,
+      startedAt,
+      ...(finishedAt !== undefined ? { endedAt: finishedAt } : {}),
+      ...(parentRunId !== undefined ? { parentRunId } : {}),
+      runDir: c.path,
+    };
+    registry.hydrateRun(summary);
+  }
+
+  registry.flushNotify();
 }
 
 /* ───────────────────────────────────────────────────────────────────
