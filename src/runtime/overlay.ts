@@ -447,10 +447,16 @@ export async function mountOverlay(
           .map((s) => s.runId),
       ),
     });
+    // VQ-1 — strip any ANSI escapes from the plain `lines[]` payload
+    // so non-TTY consumers (sendMessage card, logs) get clean text.
+    // `lines[]` is plain row text by contract, but `header` carries
+    // bold ANSI (VQ-7); strip both unconditionally for safety.
+    const stripAnsi = (s: string): string =>
+      s.replace(/\x1b\[[0-9;]*m/g, "");
     opts.pi.sendMessage(
       {
         customType: "pi-workflows.overlay-fallback",
-        content: view.lines.join("\n"),
+        content: view.lines.map(stripAnsi).join("\n"),
         display: true,
         details: { rows: view.rows.length, mode: "non-tty", slice: 13 },
       },
@@ -888,7 +894,7 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
         tokenTotals.set(s.runId, phSnap.totalTokens);
       }
     }
-    return renderRunsList(sorted, {
+    const rendered = renderRunsList(sorted, {
       title: "pi-workflows  ·  /workflows overlay",
       nowMs: opts.nowMs(),
       ...(sorted.length > 0 ? { cursor } : {}),
@@ -897,6 +903,16 @@ function makeOverlayComponent(opts: OverlayComponentOpts): TuiComponentLike {
       localRunIds: localIds,
       tokenTotals,
     });
+    // VQ-1 — swap plain `row.line` entries in `lines[]` for their
+    // ANSI-colored equivalents so state labels render with color in
+    // the TTY overlay. `lines[]` from renderRunsList is plain by
+    // contract; we rebuild it here for the TTY render path. The
+    // non-TTY fallback above (`view.lines.join("\n")`) keeps using
+    // the plain `lines[]`.
+    const byPlain = new Map<string, string>();
+    for (const r of rendered.rows) byPlain.set(r.line, r.coloredLine);
+    const ttyLines = rendered.lines.map((ln) => byPlain.get(ln) ?? ln);
+    return { ...rendered, lines: ttyLines };
   };
 
   const handleAction = (action: HotkeyAction): void => {

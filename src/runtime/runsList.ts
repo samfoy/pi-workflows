@@ -33,6 +33,14 @@ export interface RenderedRow {
   readonly runId: string;
   readonly state: RunSummaryState;
   readonly line: string;
+  /**
+   * VQ-1 — ANSI-colorized version of `line`. For uncolored states
+   * (`neutral`, `pending`) this is identical to `line`. For all other
+   * states the entire row line is wrapped in an ANSI prefix +
+   * `\x1b[0m` reset, so stripping ANSI yields exactly `line` again.
+   * Tests rely on this strip-ANSI invariant.
+   */
+  readonly coloredLine: string;
   readonly colorHint:
     | "running"
     | "paused"
@@ -50,6 +58,10 @@ export interface RenderedRunsList {
   readonly subtitle: string;
   /** Header line (column labels). */
   readonly header: string;
+  /** VQ-1 — colored version of `header`. Optional; absent means the
+   * caller should fall back to `header`. The overlay's TTY render
+   * path prefers this when set. */
+  readonly coloredLine?: string;
   /** Run rows in order. The first non-terminal row is the default
    * selection unless the caller pins it. */
   readonly rows: RenderedRow[];
@@ -113,6 +125,29 @@ function shortId(runId: string): string {
   // wf-XXXXXXXXXXXX → wf-XXXXXXXX
   if (runId.startsWith("wf-")) return runId.length <= 12 ? runId : runId.slice(0, 12);
   return runId.length > 12 ? runId.slice(0, 12) : runId;
+}
+
+/**
+ * VQ-1 — ANSI escape prefix for a given color hint. Empty string
+ * means "no color" (neutral / pending). All non-empty prefixes are
+ * paired with `\x1b[0m` at the end of the line to reset.
+ */
+function ansiPrefixFor(hint: RenderedRow["colorHint"]): string {
+  switch (hint) {
+    case "running":
+      return "\x1b[1;36m"; // bold cyan
+    case "failed":
+      return "\x1b[1;31m"; // bold red
+    case "done":
+      return "\x1b[1;32m"; // bold green
+    case "paused":
+      return "\x1b[1;33m"; // bold yellow
+    case "stopped":
+    case "cancelled":
+      return "\x1b[2m"; // dim
+    default:
+      return "";
+  }
 }
 
 function colorHint(state: RunSummaryState): RenderedRow["colorHint"] {
@@ -234,11 +269,16 @@ export function renderRunsList(
       pad(tokCell, COL_TOKENS),
       approvalCell + remoteBadge,
     ];
+    const hint = colorHint(r.state);
+    const plain = cursor + cells.join(" ");
+    const prefix = ansiPrefixFor(hint);
+    const colored = prefix === "" ? plain : `${prefix}${plain}\x1b[0m`;
     return {
       runId: r.runId,
       state: r.state,
-      line: cursor + cells.join(" "),
-      colorHint: colorHint(r.state),
+      line: plain,
+      coloredLine: colored,
+      colorHint: hint,
     };
   });
 
@@ -285,5 +325,16 @@ export function renderRunsList(
     lines.push(help);
   }
 
-  return { title, subtitle, header, rows, help, lines };
+  return {
+    title,
+    subtitle,
+    header,
+    // VQ-1 — `header` is already wrapped in bold ANSI (see VQ-7); expose
+    // a `coloredLine` alias for symmetry with RenderedRow so the
+    // overlay's TTY path has a single consistent field name.
+    coloredLine: header,
+    rows,
+    help,
+    lines,
+  };
 }
