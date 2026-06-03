@@ -261,36 +261,60 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
   const STATUS_KEY = "pi-workflows";
   const STATUS_TICK_MS = 120;
 
-  const _renderStatusLine = (): string | undefined => {
+  const _renderWidgetLines = (): string[] | undefined => {
     const summaries = getActiveRuns().listSummaries();
     const active = summaries.filter((s) => !isTerminalState(s.state));
     if (active.length === 0) return undefined;
     const phaseReg = getPhaseRegistry();
     const glyph = SPINNER_FRAMES[_statusSpinnerFrame % SPINNER_FRAMES.length]!;
-    const fmtOne = (s: typeof active[number]): string => {
-      const snap = phaseReg.getRunSnapshot(s.runId);
-      const total = snap?.phases.length ?? 0;
-      const done = snap?.phases.filter((p) => p.status === "done").length ?? 0;
-      const cur = total > 0 ? Math.min(done + 1, total) : 0;
-      const elapsed = s.startedAt.length > 0
-        ? fmtDuration(Date.now() - Date.parse(s.startedAt))
-        : "—";
-      const phasePart = total > 0 ? `  phase ${cur}/${total}` : "";
-      return `${glyph} ${s.workflowName}${phasePart}  ${elapsed}`;
-    };
-    if (active.length === 1) return fmtOne(active[0]!);
-    const head = active[0]!;
-    const extras = active.length - 1;
-    return `${glyph} ${active.length} workflows running  (${head.workflowName} +${extras})`;
+    if (active.length > 1) {
+      const head = active[0]!;
+      const extras = active.length - 1;
+      const lines = [`${glyph} ${active.length} workflows running`];
+      active.slice(0, 3).forEach((s) => {
+        const snap = phaseReg.getRunSnapshot(s.runId);
+        const total = snap?.phases.length ?? 0;
+        const done = snap?.phases.filter((p) => p.status === "done").length ?? 0;
+        const cur = total > 0 ? Math.min(done + 1, total) : 0;
+        const elapsed = s.startedAt.length > 0 ? fmtDuration(Date.now() - Date.parse(s.startedAt)) : "—";
+        const phasePart = total > 0 ? `  phase ${cur}/${total}` : "";
+        lines.push(`  ${s.workflowName}${phasePart}  ${elapsed}`);
+      });
+      if (extras > 2) lines.push(`  … +${extras - 2} more`);
+      return lines;
+    }
+    // Single active run — show phase detail
+    const s = active[0]!;
+    const snap = phaseReg.getRunSnapshot(s.runId);
+    const total = snap?.phases.length ?? 0;
+    const done = snap?.phases.filter((p) => p.status === "done").length ?? 0;
+    const cur = total > 0 ? Math.min(done + 1, total) : 0;
+    const elapsed = s.startedAt.length > 0 ? fmtDuration(Date.now() - Date.parse(s.startedAt)) : "—";
+    const phasePart = total > 0 ? `  phase ${cur}/${total}` : "";
+    const lines = [`${glyph} ${s.workflowName}${phasePart}  ${elapsed}`];
+    if (snap && snap.phases.length > 0) {
+      snap.phases.forEach((p, i) => {
+        const isLast = i === snap.phases.length - 1;
+        const prefix = isLast ? "  └ " : "  ├ ";
+        const pg = p.status === "done" ? "\x1b[32m✓\x1b[0m"
+          : p.status === "running" ? `\x1b[36m${glyph}\x1b[0m`
+          : "\x1b[2m·\x1b[0m";
+        const pe = p.status !== "pending" && (p as { elapsedMs?: number }).elapsedMs
+          ? `  ${fmtDuration((p as { elapsedMs?: number }).elapsedMs!)}` : "";
+        lines.push(`${prefix}${pg} ${p.phaseName}${pe}`);
+      });
+    }
+    return lines;
   };
 
   const _updateRunStatus = (): void => {
     if (_statusCtx === null) return;
     const sctx = _statusCtx as ExtensionContextLike;
-    const setStatus = (sctx.ui as { setStatus?: (k: string, v: string | undefined) => void }).setStatus;
-    if (!setStatus) return;
+    const setWidget = (sctx.ui as { setWidget?: (k: string, v: string[] | undefined, opts?: { placement?: string }) => void }).setWidget;
+    if (!setWidget) return;
     try {
-      setStatus(STATUS_KEY, _renderStatusLine());
+      const lines = _renderWidgetLines();
+      setWidget(STATUS_KEY, lines, { placement: "belowEditor" });
     } catch { /* swallow — TUI may not be mounted yet */ }
   };
 
@@ -626,8 +650,8 @@ export default function piWorkflowsExtension(pi: ExtensionAPI): void {
     // the footer doesn't carry a stale workflow indicator past shutdown.
     _clearStatusInterval();
     try {
-      const setStatus = (ctx.ui as { setStatus?: (k: string, v: string | undefined) => void }).setStatus;
-      setStatus?.(STATUS_KEY, undefined);
+      const setWidget = (ctx.ui as { setWidget?: (k: string, v: string[] | undefined, opts?: { placement?: string }) => void }).setWidget;
+      setWidget?.(STATUS_KEY, undefined);
     } catch { /* ignore */ }
     _statusCtx = null;
     // Slice 16: close the hot-reload watcher.
