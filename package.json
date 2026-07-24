@@ -41,6 +41,7 @@
     "@earendil-works/pi-coding-agent": "*"
   },
   "devDependencies": {
+    "@earendil-works/pi-coding-agent": "^0.82.0",
     "@types/node": "^25.9.3",
     "c8": "^11.0.0",
     "esbuild": "^0.28.1",
@@ -80,6 +81,9 @@
     "@opentelemetry/semantic-conventions": "^1.41.1"
   },
   "overrides": {
-    "ws": "^8.20.1"
+    "ws": "^8.20.1",
+    "undici": ">=7.29.0",
+    "protobufjs": ">=7.6.5",
+    "brace-expansion": ">=5.0.8"
   }
 }

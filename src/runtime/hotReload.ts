@@ -42,10 +42,20 @@ import type { ActiveRunsRegistry } from "./activeRuns.js";
 
 // ─── FSWatcher minimal interface (satisfied by chokidar + test stubs) ──
 
+// Structural minimum we rely on from a watcher: subscribe to the four events
+// we care about, and close it. The listener parameter is intentionally loose
+// (`...args: any[]`) rather than `(pathOrErr: string | Error)`: chokidar's own
+// `FSWatcher.on` carries a rich overloaded signature (per-event arg tuples via
+// its EventMap) that is NOT assignable to a single narrow `(string | Error)`
+// listener, so pinning that narrow shape made `chokidar.watch(...)` fail to
+// satisfy `FSWatcherLike` under chokidar's newer types (TS2322). Accepting the
+// wider listener keeps this a true structural supertype of both chokidar's
+// FSWatcher and the test stub; call sites still narrow the arg explicitly
+// (`p as string`), so no runtime behavior changes.
 export interface FSWatcherLike {
   on(
     event: "add" | "change" | "unlink" | "error",
-    listener: (pathOrErr: string | Error) => void,
+    listener: (...args: any[]) => void,
   ): this;
   close(): Promise<void> | void;
 }
