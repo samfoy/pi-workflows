@@ -89,6 +89,23 @@ function tmpRunDir(prefix: string): { runDir: string; ledgerPath: string; cleanu
   };
 }
 
+async function awaitTailDone(done: Promise<void>, timeoutMs = 5_000): Promise<void> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      done,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`tailer did not finish within ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 const ts = (() => {
   let n = 0;
   return () => `2026-05-28T00:00:${String(n++).padStart(2, "0")}.000Z`;
@@ -530,7 +547,7 @@ test("tailRunLedger: tails a real ledger.jsonl, exits when terminal transition l
       env.ledgerPath,
       tail.map((e) => JSON.stringify(e)).join("\n") + "\n",
     );
-    await handle.done; // resolves once root span ends + drain settles.
+    await awaitTailDone(handle.done); // resolves once root span ends + drain settles.
     await rig.provider.forceFlush();
     const spans = rig.exporter.getFinishedSpans();
     assert.equal(spans.length, 6);
@@ -563,7 +580,7 @@ test("tailRunLedger: tolerates missing ledger file (run not yet started)", async
     // Wait a few polls.
     await new Promise((r) => setTimeout(r, 50));
     ac.abort();
-    await handle.done;
+    await awaitTailDone(handle.done);
     assert.equal(rig.exporter.getFinishedSpans().length, 0);
   } finally {
     env.cleanup();
@@ -593,7 +610,7 @@ test("tailRunLedger: corrupt JSON line is skipped (does not crash)", async () =>
       api: rig.api,
       pollIntervalMs: 10,
     });
-    await handle.done;
+    await awaitTailDone(handle.done);
     await rig.provider.forceFlush();
     const spans = rig.exporter.getFinishedSpans();
     assert.equal(spans.length, 1);
@@ -634,7 +651,7 @@ test("tailRunLedger: torn trailing line is buffered until next \\n arrives", asy
       to: "done",
     });
     appendFileSync(env.ledgerPath, "\n" + term + "\n");
-    await handle.done;
+    await awaitTailDone(handle.done);
     await rig.provider.forceFlush();
     const spans = rig.exporter.getFinishedSpans();
     assert.equal(spans.length, 1);

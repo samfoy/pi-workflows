@@ -174,7 +174,7 @@ export async function createHotReloadWatcher(
       depth: 0,
       persistent: false,
       awaitWriteFinish: { stabilityThreshold: 100, pollInterval: 50 },
-    });
+    }) as unknown as FSWatcherLike;
   }
 
   // ─── Event handlers ─────────────────────────────────────────────
