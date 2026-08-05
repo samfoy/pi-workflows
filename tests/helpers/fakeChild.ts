@@ -16,6 +16,8 @@ export interface FakeChildSpec {
   stderr?: ReadonlyArray<string | Buffer>;
   /** Wall-clock delay before exit fires. Default 0. */
   exitDelayMs?: number;
+  /** Do not let an intentionally long fallback exit timer pin the test loop. */
+  unrefExitTimer?: boolean;
   /** Exit code. Default 0. */
   exitCode?: number | null;
   /** Exit signal. Default null. */
@@ -193,12 +195,12 @@ export function makeFakeSpawn(scripts: FakeChildSpec[] | (() => FakeChildSpec)):
       } catch { /* ignore */ }
       (child as EventEmitter).emit("exit", code, signal);
     };
-    // Keep natural exits referenced. Empty-output fakes have no other active
-    // handle, so unref'ing this timer lets node:test cancel the still-pending
-    // dispatch promise before even a zero-delay exit can fire. Kill-induced
-    // exits clear this timer in fireExit(), including the 60s escalation
-    // fixtures, so keeping it referenced does not reintroduce their old hang.
+    // Keep ordinary natural exits referenced. Empty-output fakes have no other
+    // active handle, so unref'ing a zero-delay exit lets node:test cancel the
+    // still-pending dispatch promise. Long escalation fixtures opt out because
+    // their mocked 60s fallback timer must not pin the test loop.
     exitTimer = setTimeout(fireExit, spec.exitDelayMs ?? 0);
+    if (spec.unrefExitTimer === true) exitTimer.unref?.();
 
     return child;
   };

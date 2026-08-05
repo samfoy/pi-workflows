@@ -1019,6 +1019,7 @@ test("abort path: escalates SIGTERM\u2192SIGKILL when child ignores SIGTERM", { 
       // never fires (we never `tick(60_000)`); the child exits via
       // the synchronous `fireExit` inside `kill("SIGKILL")`.
       exitDelayMs: 60_000,
+      unrefExitTimer: true,
       ignoresSigterm: true, // SIGTERM is recorded but doesn't fire exit
       ignoresSigkill: false, // SIGKILL is what finally exits the child
     },
@@ -1083,6 +1084,7 @@ test("abort path: SIGTERM alone is sufficient when child cooperates (no SIGKILL 
     {
       stdout: ['{"type":"session"}\n'],
       exitDelayMs: 60_000,
+      unrefExitTimer: true,
       // Default: child cooperates, SIGTERM fires exit — no SIGKILL needed.
     },
   ]);
@@ -1143,6 +1145,7 @@ test("timeout path: escalates SIGTERM\u2192SIGKILL when child ignores SIGTERM", 
       // the timeout, so escalation never happens (test was hanging).
       stdoutNeverEnds: true,
       exitDelayMs: 60_000,
+      unrefExitTimer: true,
       ignoresSigterm: true,
     },
   ]);
