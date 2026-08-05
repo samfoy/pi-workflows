@@ -193,12 +193,12 @@ export function makeFakeSpawn(scripts: FakeChildSpec[] | (() => FakeChildSpec)):
       } catch { /* ignore */ }
       (child as EventEmitter).emit("exit", code, signal);
     };
+    // Keep natural exits referenced. Empty-output fakes have no other active
+    // handle, so unref'ing this timer lets node:test cancel the still-pending
+    // dispatch promise before even a zero-delay exit can fire. Kill-induced
+    // exits clear this timer in fireExit(), including the 60s escalation
+    // fixtures, so keeping it referenced does not reintroduce their old hang.
     exitTimer = setTimeout(fireExit, spec.exitDelayMs ?? 0);
-    // Defense-in-depth: even if a future test forgets to kill or
-    // exit the child, an unref'd timer won't keep Node alive.
-    if (typeof (exitTimer as { unref?: () => void }).unref === "function") {
-      (exitTimer as unknown as { unref: () => void }).unref();
-    }
 
     return child;
   };
