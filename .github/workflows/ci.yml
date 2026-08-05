@@ -56,12 +56,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Fail only on high+ severities so a moderate transient advisory doesn't
-      # block PRs unrelated to the surface. The `overrides` block in
-      # package.json pins ws; any future moderate advisory shows in `npm audit`
-      # output without blocking the run.
+      # Fail only on high+ severities in dependencies this package ships.
+      # The pi coding agent is a peer supplied and audited by the host, but npm
+      # installs it in CI for type/tests; omit that non-shipped peer tree here.
+      # The `overrides` block pins patched transitive versions used by this repo.
       - name: Audit dependencies (high+ severity)
-        run: npm audit --audit-level=high
+        run: npm audit --omit=peer --audit-level=high
 
   coverage:
     name: Coverage report (informational)

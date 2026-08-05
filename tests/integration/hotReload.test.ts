@@ -14,7 +14,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { createHotReloadWatcher } from "../../src/runtime/hotReload.js";
+import {
+  createHotReloadWatcher,
+  type FSWatcherLike,
+} from "../../src/runtime/hotReload.js";
 import { ActiveRunsRegistry } from "../../src/runtime/activeRuns.js";
 import type { ExtensionAPI } from "../../src/types/internal.js";
 import type { WorkflowFile } from "../../src/types/internal.js";
@@ -141,7 +144,7 @@ test("rapid double-write: debounce coalesces 2 writes into exactly 1 re-register
         persistent: false,
         // NO awaitWriteFinish — each write fires an independent event so
         // debounce is the only coalescing layer (mutation probe works).
-      }),
+      }) as unknown as FSWatcherLike,
   });
 
   await new Promise((r) => setTimeout(r, 150));
