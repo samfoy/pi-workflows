@@ -80,6 +80,7 @@
     "@opentelemetry/semantic-conventions": "^1.41.1"
   },
   "overrides": {
+    "brace-expansion": "^5.0.9",
     "ws": "^8.20.1"
   }
 }

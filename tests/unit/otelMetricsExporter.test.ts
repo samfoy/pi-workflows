@@ -80,6 +80,23 @@ interface TestRig {
   instruments: OtelMetricsInstruments;
 }
 
+async function awaitTailDone(done: Promise<void>, timeoutMs = 5_000): Promise<void> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    await Promise.race([
+      done,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`tailer did not finish within ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 function makeRig(t: TestContext, extraResource?: Record<string, unknown>): TestRig {
   const exporter = new InMemoryMetricExporter(
     AggregationTemporality.CUMULATIVE,
@@ -579,7 +596,7 @@ test("tailRunLedgerForMetrics: tails a real ledger.jsonl, exits when terminal tr
       env.ledgerPath,
       tail.map((e) => JSON.stringify(e)).join("\n") + "\n",
     );
-    await handle.done;
+    await awaitTailDone(handle.done);
     const rm = await collect(rig);
     const started = pointsFor(rm, "pi.runs.started");
     assert.equal(started[0]!.value, 1);
@@ -610,7 +627,7 @@ test("tailRunLedgerForMetrics: tolerates missing ledger file and abort signal", 
     });
     await new Promise((r) => setTimeout(r, 30));
     ac.abort();
-    await handle.done;
+    await awaitTailDone(handle.done);
     // No metrics produced (no ledger entries).
     const rm = rig.exporter.getMetrics();
     if (rm.length > 0) {
@@ -644,7 +661,7 @@ test("tailRunLedgerForMetrics: corrupt JSON line is skipped", async (t) => {
       instruments: rig.instruments,
       pollIntervalMs: 10,
     });
-    await handle.done;
+    await awaitTailDone(handle.done);
     const rm = await collect(rig);
     const started = pointsFor(rm, "pi.runs.started");
     assert.equal(started[0]!.value, 1);
