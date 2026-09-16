@@ -6,7 +6,7 @@
  * timeout is overridden to a tight value where useful.
  */
 
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -969,18 +969,77 @@ test("dispatchAgent: rejects path-traversal agentId before any spawn", { timeout
 // `setInterval` is also unmocked since the dispatcher doesn't use it.
 
 /**
- * Drain real-`setImmediate`-based async iteration until predicate is
- * true or the bound is exhausted. Used to advance the parser through
- * its chunks without relying on real wall-clock progression.
+ * Count how many `setTimeout` timers the code under test has ARMED.
+ *
+ * `t.mock.timers` exposes only `enable`, `reset`, `runAll`, `setTime`, and
+ * `tick` — it has no way to inspect the pending queue (verified by listing
+ * own and prototype properties). So wrap the global after `enable()` and
+ * count the calls.
+ *
+ * Call this AFTER `t.mock.timers.enable(...)`. The wrapper forwards to the
+ * mocked `setTimeout`, so every armed timer stays tick-able. `t.after`
+ * restores the original.
+ */
+function countArmedTimeouts(t: TestContext): () => number {
+  const mocked = globalThis.setTimeout;
+  let armed = 0;
+  // @ts-ignore test shim: forward every argument to the mocked timer
+  globalThis.setTimeout = (fn: (...a: unknown[]) => void, ms?: number, ...rest: unknown[]) => {
+    armed++;
+    // @ts-ignore forward to the mock so tick() still fires this timer
+    return mocked(fn, ms, ...rest);
+  };
+  t.after(() => {
+    // @ts-ignore restore
+    globalThis.setTimeout = mocked;
+  });
+  return () => armed;
+}
+
+/**
+ * Drain real-`setImmediate`-based async iteration until `predicate` is
+ * true, or throw when the wall-clock budget runs out.
+ *
+ * The bound is wall-clock, not an iteration count, and that distinction
+ * is load-bearing. This helper runs while `setTimeout` is mocked, so the
+ * dispatcher's own progress depends on real filesystem I/O
+ * (`writeParentLivenessFields`, `fs.mkdir`) that completes on the libuv
+ * thread pool. An iteration count assumes a fixed amount of work per
+ * `setImmediate` turn. Under CPU contention that assumption fails: the
+ * test runner starts one process per test file, so a busy host starves
+ * the thread pool and 1000 cheap immediate turns elapse before the
+ * dispatcher reaches `spawn()`.
+ *
+ * The old version returned silently when the bound was exhausted. The
+ * caller then ticked mock timers that the dispatcher had not armed yet.
+ * Because `setTimeout` was mocked, no later tick ever fired, so the test
+ * waited for the full 60000 ms `node:test` timeout and was reported as
+ * `cancelled` rather than failed. `Date.now()` stays real here, because
+ * `t.mock.timers.enable` receives only `["setTimeout"]`.
+ *
+ * If the budget runs out, throw. A thrown error names the unmet
+ * condition and fails the test in milliseconds.
  */
 async function drainSetImmediate(
   predicate: () => boolean,
-  maxIterations = 1000,
+  options: { timeoutMs?: number; label?: string } = {},
 ): Promise<void> {
-  for (let i = 0; i < maxIterations; i++) {
+  const timeoutMs = options.timeoutMs ?? 20_000;
+  const label = options.label ?? "predicate";
+  const startedAt = Date.now();
+  const deadline = startedAt + timeoutMs;
+  let turns = 0;
+  while (Date.now() < deadline) {
     if (predicate()) return;
+    turns++;
     await new Promise<void>((r) => setImmediate(r));
   }
+  throw new Error(
+    `drainSetImmediate: "${label}" never became true within ${timeoutMs}ms ` +
+      `(${turns} setImmediate turns, ${Date.now() - startedAt}ms elapsed). ` +
+      `The dispatcher never reached the awaited state, so ticking mock timers now ` +
+      `would arm nothing and the test would hang until the node:test timeout.`,
+  );
 }
 
 /**
@@ -993,17 +1052,17 @@ async function drainSetImmediate(
  * that race.
  */
 async function drainUntilStreamEnded(
-  child: { stdout?: NodeJS.ReadableStream | null },
-  maxIterations = 1000,
+  getChild: () => { stdout?: NodeJS.ReadableStream | null } | undefined,
+  options: { timeoutMs?: number } = {},
 ): Promise<void> {
   await drainSetImmediate(() => {
-    const s = child.stdout as (NodeJS.ReadableStream & {
+    const s = getChild()?.stdout as (NodeJS.ReadableStream & {
       readableEnded?: boolean;
       destroyed?: boolean;
     }) | null | undefined;
     if (s == null) return false; // spawn hasn't happened yet — keep draining
     return s.readableEnded === true || s.destroyed === true;
-  }, maxIterations);
+  }, { ...options, label: "child.stdout fully consumed (spawned and stream ended)" });
 }
 
 test("abort path: escalates SIGTERM\u2192SIGKILL when child ignores SIGTERM", { timeout: 60_000 }, async (t) => {
@@ -1052,7 +1111,7 @@ test("abort path: escalates SIGTERM\u2192SIGKILL when child ignores SIGTERM", { 
   // 'end'). This avoids a race where the synchronous `fireExit`
   // (called inside fakeChild kill) destroys stdout mid-iteration
   // and the dispatcher's parser-error path re-issues SIGTERM.
-  await drainUntilStreamEnded(captured);
+  await drainUntilStreamEnded(() => captured);
 
   // Trigger abort. The dispatcher's onAbort listener runs
   // synchronously: SIGTERM is sent (ignored), and a SIGKILL grace
@@ -1111,7 +1170,7 @@ test("abort path: SIGTERM alone is sufficient when child cooperates (no SIGKILL 
     }),
   );
 
-  await drainUntilStreamEnded(captured);
+  await drainUntilStreamEnded(() => captured);
 
   ctrl.abort();
   // SIGTERM is cooperative: fakeChild fires "exit" synchronously
@@ -1135,6 +1194,7 @@ test("abort path: SIGTERM alone is sufficient when child cooperates (no SIGKILL 
 
 test("timeout path: escalates SIGTERM\u2192SIGKILL when child ignores SIGTERM", { timeout: 60_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
+  const armedTimeouts = countArmedTimeouts(t);
   const runDir = tmpRunDir();
   const fake = makeFakeSpawn([
     {
@@ -1163,7 +1223,22 @@ test("timeout path: escalates SIGTERM\u2192SIGKILL when child ignores SIGTERM", 
     }),
   );
 
-  await drainSetImmediate(() => fake.calls.length > 0);
+  await drainSetImmediate(() => fake.calls.length > 0, {
+    label: "dispatcher called spawn()",
+  });
+
+  // Wait for the dispatcher to ARM its subprocess timeout before ticking.
+  //
+  // `spawn()` returning is not sufficient. The dispatcher arms
+  // `setTimeout(timeoutMs)` after spawn, and `t.mock.timers.tick()` only
+  // fires timers that already exist. A tick that lands before the timer is
+  // armed fires nothing, and because `setTimeout` is mocked no real timer
+  // ever fires afterwards, so the dispatch never settles. This was the
+  // cross-run hang: under CPU contention the pre-spawn filesystem I/O
+  // outlasted the old iteration-bounded drain.
+  await drainSetImmediate(() => armedTimeouts() > 0, {
+    label: "dispatcher armed its subprocess timeout timer",
+  });
 
   // Tick past timeoutMs to fire the dispatcher's subprocess timeout.
   // That schedules the SIGKILL grace timer; tick again past graceMs.
